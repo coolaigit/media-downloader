@@ -61,16 +61,15 @@ def main() -> int:
         return dispatch(cmd, argv[2:])
 
     # ---------- 正常 Desktop 服务（1D：端口/实例/浏览器统一在这里之后决策） ----------
-    from app.ports import parse_launch_flags
+    from app.ports import InvalidPortError, parse_launch_flags
 
     try:
         port, open_browser = parse_launch_flags(argv)
-    except ValueError:
+    except InvalidPortError as e:
+        # 1D.1：非法显式端口一律 exit 2，绝不回退自动扫描
+        print(f"[错误] 参数错误：{e}", file=sys.stderr)
         print("用法: launcher.py [--port N] [--no-browser] | --internal <cmd> [args...]",
               file=sys.stderr)
-        return 2
-    if port is None and any(a in ("--port", "-p") or a.startswith("--port=") for a in argv):
-        print("[错误] --port 需要一个 1-65535 的数字端口。", file=sys.stderr)
         return 2
 
     import serve

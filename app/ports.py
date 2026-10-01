@@ -89,24 +89,37 @@ def resolve_port(cli_port: int | None = None) -> tuple[str, int | None]:
     return ("exhausted", None)
 
 
+class InvalidPortError(ValueError):
+    """用户显式给了非法端口（--port abc / 0 / 65536 / 缺值）。"""
+
+
 def parse_launch_flags(argv: list[str]) -> tuple[int | None, bool]:
-    """解析顶层启动旗标（launcher.py / serve.py 直启共用）。
+    """解析顶层启动旗标（launcher.py / serve.py 直启共用，校验只此一处）。
 
     支持：--port N / --port=N / -p N / --no-browser。
     环境变量 MEDIA_DOWNLOADER_NO_BROWSER=1 同样关闭自动开页面
     （自动化/测试场景用，避免无头环境真去拉浏览器）。
-    返回 (port, open_browser)。
+
+    返回 (port, open_browser)，port=None 表示用户没有指定端口。
+    用户指定了**非法**端口（非数字 / 0 / 65536+ / 缺值）→ 抛 InvalidPortError，
+    调用方必须 exit 2 并给出明确错误 —— 绝不允许静默回退到自动扫描 8848
+    （1D.1：launcher.py 与 serve.py 对非法端口行为完全一致）。
     """
     port: int | None = None
+    port_given = False
     open_browser = os.environ.get(ENV_NO_BROWSER, "").strip() not in ("1", "true", "yes")
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--port", "-p") and i + 1 < len(argv):
+        if a in ("--port", "-p"):
+            port_given = True
+            if i + 1 >= len(argv):
+                raise InvalidPortError(f"{a} 缺少端口号")
             port = _to_port(argv[i + 1])
             i += 2
             continue
         if a.startswith("--port="):
+            port_given = True
             port = _to_port(a.split("=", 1)[1])
             i += 1
             continue
@@ -115,11 +128,15 @@ def parse_launch_flags(argv: list[str]) -> tuple[int | None, bool]:
             i += 1
             continue
         i += 1
+    if port_given and port is None:
+        raise InvalidPortError("端口必须是 1-65535 的数字")
     return port, open_browser
 
 
 def _to_port(text: str) -> int | None:
     text = text.strip()
-    if text.isdigit() and 0 < int(text) < 65536:
-        return int(text)
+    if text.isdigit():
+        n = int(text)
+        if 0 < n < 65536:
+            return n
     return None

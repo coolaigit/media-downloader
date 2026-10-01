@@ -141,7 +141,13 @@ def main(port: int | None = None, open_browser: bool | None = None) -> int:
 
 
 if __name__ == "__main__":
-    from app.ports import parse_launch_flags
+    from app.ports import InvalidPortError, parse_launch_flags
 
-    _port, _ob = parse_launch_flags(sys.argv[1:])
+    try:
+        _port, _ob = parse_launch_flags(sys.argv[1:])
+    except InvalidPortError as e:
+        # 1D.1：与 launcher.py 行为完全一致 —— 非法显式端口 exit 2，绝不回退扫描
+        print(f"[错误] 参数错误：{e}", file=sys.stderr)
+        print("用法: serve.py [--port N] [--no-browser]", file=sys.stderr)
+        sys.exit(2)
     sys.exit(main(port=_port, open_browser=_ob))
