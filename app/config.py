@@ -93,7 +93,8 @@ DATA_ROOT.mkdir(parents=True, exist_ok=True)
 (DATA_ROOT / "logs").mkdir(parents=True, exist_ok=True)
 (DATA_ROOT / "data").mkdir(parents=True, exist_ok=True)
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
-BIN_DIR.mkdir(parents=True, exist_ok=True)
+# 注意：BIN_DIR 是 RESOURCE/BUNDLE 内容（bin/ffmpeg.exe 随包分发），
+# 只读，严禁运行时创建/写入；找不到就由 find_ffmpeg() 回退到 FFMPEG_PATH / PATH。
 
 if PYLIBS_DIR.exists():
     _pylibs = str(PYLIBS_DIR)
@@ -131,7 +132,8 @@ PROBE_TIMEOUT = 12
 PROBE_FIRST_CHUNK = 256 * 1024
 MAX_PROBE_BYTES = 3 * 1024 * 1024
 
-# 允许用户自定义下载根目录（写入 config.json，见 store.py）；默认项目内 downloads
+# 允许用户自定义下载根目录（写入 config.json，见 store.py）；
+# 默认 %USERPROFILE%\Downloads\MediaDownloader（源码/安装版一致，不写程序目录）
 DOWNLOADS_SETTING_KEY = "downloads_dir"
 
 
