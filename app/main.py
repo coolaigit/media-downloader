@@ -949,7 +949,9 @@ def api_open_downloads(payload: dict = Body(default={})):
 
 @app.get("/api/health")
 def api_health():
-    return {"ok": True, "root": str(ROOT)}
+    # app 标记（1D）：启动器靠它区分「本工具已在运行」与「其它程序恰好在监听端口」，
+    # 见 app/ports.probe_running —— 不要删。
+    return {"ok": True, "app": "MediaDownloader", "root": str(ROOT)}
 
 
 # ---------- 前端静态资源 ----------

@@ -1,8 +1,8 @@
 ﻿# 媒体下载工具 - PowerShell 启动脚本
+# 1D 起：端口决策 / 已有实例识别 / 自动打开浏览器统一由 launcher.py 处理，
+# 本脚本不再自己挑端口 —— 改端口请用：python launcher.py --port 端口号
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
-
-$port = 8848
 
 Write-Host "============================================"
 Write-Host "           媒体下载工具  启动中"
@@ -25,29 +25,6 @@ if (-not (Test-Path (Join-Path $PSScriptRoot 'bin\ffmpeg.exe'))) {
     }
 }
 
-# 3. 端口占用则递增
-while ($port -le 8870) {
-    $busy = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-    if (-not $busy) { break }
-    Write-Host "[提示] 端口 $port 已占用，尝试 $(( $port + 1 ))"
-    $port++
-}
-if ($port -gt 8870) { throw "8848-8870 端口均被占用" }
-
-Write-Host ""
-Write-Host "  访问地址:  http://127.0.0.1:$port"
-Write-Host "  下载目录:  $(Join-Path $PSScriptRoot 'downloads')"
-Write-Host ""
-Write-Host "  按 Ctrl+C 停止服务"
-Write-Host "============================================"
-Write-Host ""
-
-# 4. 打开浏览器
-Start-Job -ScriptBlock {
-    param($p)
-    Start-Sleep -Seconds 3
-    Start-Process "http://127.0.0.1:$p"
-} -ArgumentList $port | Out-Null
-
-# 5. 启动服务
-python -m uvicorn app.main:app --host 127.0.0.1 --port $port --log-level warning
+# 3. 启动（前台；端口/实例/浏览器由 launcher.py 统一决策）
+python launcher.py
+exit $LASTEXITCODE

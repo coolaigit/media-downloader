@@ -63,7 +63,8 @@ def popen_internal(cmd: str, *args: str, cwd: Path | str | None = None,
                    env_extra: dict | None = None, **popen_kw) -> subprocess.Popen:
     """以 internal 命令启动一个**长期存活**的子进程（如登录浏览器）。
 
-    与 run_internal 的区别：不等待、不捕获输出，调用方拿 Popen 自己管理。
+    与 run_external（等待并收集结果）不同：不等待、不捕获输出，
+    调用方拿 Popen 自己管理生命周期。
     默认 CREATE_NO_WINDOW + 显式 cwd/env，其余参数原样透传。
     """
     argv = build_internal_command(cmd, *args)
