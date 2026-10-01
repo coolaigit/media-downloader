@@ -1,0 +1,4 @@
+Package: ddgs
+Version: 9.16.0
+License: MIT
+Source: PyPI wheel ddgs-9.16.0

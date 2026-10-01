@@ -1,0 +1,4 @@
+Package: pillow
+Version: 12.3.0
+License: MIT-CMU
+Source: PyPI wheel pillow-12.3.0

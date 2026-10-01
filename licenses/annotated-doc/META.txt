@@ -1,0 +1,4 @@
+Package: annotated-doc
+Version: 0.0.5
+License: MIT
+Source: PyPI wheel annotated-doc-0.0.5

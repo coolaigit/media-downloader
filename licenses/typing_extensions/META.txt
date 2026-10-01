@@ -1,0 +1,4 @@
+Package: typing_extensions
+Version: 4.16.0
+License: PSF-2.0
+Source: PyPI wheel typing_extensions-4.16.0

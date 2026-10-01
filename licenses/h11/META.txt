@@ -1,0 +1,4 @@
+Package: h11
+Version: 0.16.0
+License: MIT
+Source: PyPI wheel h11-0.16.0

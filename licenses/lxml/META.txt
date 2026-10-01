@@ -1,0 +1,4 @@
+Package: lxml
+Version: 6.1.1
+License: BSD-3-Clause
+Source: PyPI wheel lxml-6.1.1

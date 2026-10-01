@@ -56,3 +56,4 @@ dist/
 build/
 .venv-build/
 config.json
+dist-archive/

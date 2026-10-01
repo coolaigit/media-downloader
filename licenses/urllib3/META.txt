@@ -1,0 +1,4 @@
+Package: urllib3
+Version: 2.8.0
+License: MIT
+Source: PyPI wheel urllib3-2.8.0

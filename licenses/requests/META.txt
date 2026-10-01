@@ -1,0 +1,4 @@
+Package: requests
+Version: 2.34.2
+License: Apache-2.0
+Source: PyPI wheel requests-2.34.2

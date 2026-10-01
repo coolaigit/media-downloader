@@ -1,0 +1,4 @@
+Package: greenlet
+Version: 3.5.6
+License: MIT AND PSF-2.0
+Source: PyPI wheel greenlet-3.5.6

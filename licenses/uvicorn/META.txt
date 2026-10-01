@@ -1,0 +1,4 @@
+Package: uvicorn
+Version: 0.52.4
+License: BSD-3-Clause
+Source: PyPI wheel uvicorn-0.52.4

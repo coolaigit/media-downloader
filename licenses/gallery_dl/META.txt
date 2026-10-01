@@ -1,0 +1,4 @@
+Package: gallery_dl
+Version: 1.32.13
+License: GPL-2.0-only
+Source: PyPI wheel gallery_dl-1.32.13

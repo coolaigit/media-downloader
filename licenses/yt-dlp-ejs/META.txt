@@ -1,0 +1,4 @@
+Package: yt-dlp-ejs
+Version: 0.8.0
+License: Unlicense AND MIT AND ISC
+Source: PyPI wheel yt-dlp-ejs-0.8.0

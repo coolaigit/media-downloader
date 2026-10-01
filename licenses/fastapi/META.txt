@@ -1,0 +1,4 @@
+Package: fastapi
+Version: 0.141.1
+License: MIT
+Source: PyPI wheel fastapi-0.141.1

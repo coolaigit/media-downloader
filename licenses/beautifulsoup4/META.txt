@@ -1,0 +1,4 @@
+Package: beautifulsoup4
+Version: 4.15.0
+License: MIT License
+Source: PyPI wheel beautifulsoup4-4.15.0

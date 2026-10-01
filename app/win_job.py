@@ -123,7 +123,12 @@ def reap_orphan_ffmpeg(max_age_hours: float = 0.0) -> int:
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance Win32_Process | "
              "Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, timeout=60,
+            # ⚠️ 1E.2：必须显式 mbcs + errors=replace。text=True 默认按 locale/utf-8
+            # 解码，系统进程名含中文（GBK 0xd0…）时读取线程直接 UnicodeDecodeError
+            # 死亡 → communicate() 永久挂起 → startup 事件卡死 → 服务永不就绪
+            #（RC2 frozen 首测实证：每次启动都挂在「Waiting for application startup」）。
+            encoding="mbcs", errors="replace",
             creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
         data = json.loads(out.stdout or "[]")
     except Exception:  # noqa: BLE001
@@ -146,6 +151,7 @@ def reap_orphan_ffmpeg(max_age_hours: float = 0.0) -> int:
                     ["powershell", "-NoProfile", "-Command",
                      f"(Get-Process -Id {pid}).StartTime.ToString('o')"],
                     capture_output=True, text=True, timeout=15,
+                    encoding="mbcs", errors="replace",
                     creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
                 t0 = time.mktime(time.strptime(cr.stdout.strip()[:19], "%Y-%m-%dT%H:%M:%S"))
                 if (time.time() - t0) < max_age_hours * 3600:

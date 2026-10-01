@@ -1,0 +1,4 @@
+Package: playwright
+Version: 1.62.0
+License: Apache-2.0
+Source: PyPI wheel playwright-1.62.0

@@ -1,0 +1,6 @@
+Component: FFmpeg
+Version: 7.1 (essentials_build, www.gyan.dev)
+License: GPLv3 (configure: --enable-gpl --enable-version3)
+Binary SHA256: 2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3
+Source: https://www.gyan.dev/ffmpeg/builds/ (ffmpeg-7.1-essentials_build.7z)
+Official source code: https://ffmpeg.org/download.html (n7.1 tag)

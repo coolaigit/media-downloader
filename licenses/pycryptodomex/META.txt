@@ -1,0 +1,4 @@
+Package: pycryptodomex
+Version: 3.23.0
+License: BSD, Public Domain
+Source: PyPI wheel pycryptodomex-3.23.0

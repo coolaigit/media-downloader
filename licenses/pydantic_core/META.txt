@@ -1,0 +1,4 @@
+Package: pydantic_core
+Version: 2.46.4
+License: MIT
+Source: PyPI wheel pydantic_core-2.46.4

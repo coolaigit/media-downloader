@@ -1,0 +1,4 @@
+Package: pyee
+Version: 13.0.1
+License: MIT
+Source: PyPI wheel pyee-13.0.1

@@ -1,0 +1,4 @@
+Package: typing-inspection
+Version: 0.4.4
+License: MIT
+Source: PyPI wheel typing-inspection-0.4.4

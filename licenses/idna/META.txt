@@ -1,0 +1,4 @@
+Package: idna
+Version: 3.20
+License: BSD-3-Clause
+Source: PyPI wheel idna-3.20

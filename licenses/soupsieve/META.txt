@@ -1,0 +1,4 @@
+Package: soupsieve
+Version: 2.10
+License: MIT
+Source: PyPI wheel soupsieve-2.10

@@ -1,0 +1,4 @@
+Package: anyio
+Version: 4.15.1
+License: MIT
+Source: PyPI wheel anyio-4.15.1

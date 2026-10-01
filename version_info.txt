@@ -1,0 +1,30 @@
+# UTF-8
+# PyInstaller VersionResource：MediaDownloader.exe 的 Windows 文件属性
+# CompanyName/版权暂留空 —— Publisher 由用户最终确认后再补（1E.2 决议）。
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3F,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('080404B0', [
+        StringStruct('FileDescription', 'MediaDownloader'),
+        StringStruct('ProductName', 'MediaDownloader'),
+        StringStruct('FileVersion', '1.0.0.0'),
+        StringStruct('ProductVersion', '1.0.0'),
+        StringStruct('OriginalFilename', 'MediaDownloader.exe'),
+        StringStruct('InternalName', 'MediaDownloader'),
+        StringStruct('CompanyName', ''),
+        StringStruct('LegalCopyright', ''),
+      ]),
+    ]),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])]),
+  ],
+)

@@ -1,0 +1,4 @@
+Package: mutagen
+Version: 1.48.1
+License: GPL-2.0-or-later
+Source: PyPI wheel mutagen-1.48.1

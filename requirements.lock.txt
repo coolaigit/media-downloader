@@ -3,6 +3,7 @@ annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
 beautifulsoup4==4.15.0
+brotli==1.2.0
 certifi==2026.7.22
 charset-normalizer==3.5.2
 click==8.5.0
@@ -13,11 +14,13 @@ greenlet==3.5.6
 h11==0.16.0
 idna==3.20
 lxml==6.1.1
+mutagen==1.48.1
 packaging==26.3
 pefile==2024.8.26
 pillow==12.3.0
 playwright==1.62.0
 primp==2.0.1
+pycryptodomex==3.23.0
 pydantic==2.13.4
 pydantic_core==2.46.4
 pyee==13.0.1
@@ -32,4 +35,6 @@ typing-inspection==0.4.4
 typing_extensions==4.16.0
 urllib3==2.8.0
 uvicorn==0.52.4
+websockets==17.1
 yt-dlp==2026.7.4
+yt-dlp-ejs==0.8.0

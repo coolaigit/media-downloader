@@ -1,0 +1,4 @@
+Package: pydantic
+Version: 2.13.4
+License: MIT
+Source: PyPI wheel pydantic-2.13.4

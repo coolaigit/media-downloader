@@ -12,7 +12,7 @@ requests==2.34.2
 beautifulsoup4==4.15.0
 lxml==6.1.1              # bs4 解析器（page_scanner.py "lxml"）
 pillow==12.3.0           # 图片宽高探测
-yt-dlp==2026.7.4
+yt-dlp[default]==2026.7.4  # [default] 带 runtime：yt-dlp-ejs(JS挑战)/websockets/brotli/mutagen/pycryptodomex/certifi
 pydantic==2.13.4
 
 # ---- Desktop 可选能力 ----

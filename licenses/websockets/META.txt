@@ -1,0 +1,4 @@
+Package: websockets
+Version: 17.1
+License: BSD-3-Clause
+Source: PyPI wheel websockets-17.1

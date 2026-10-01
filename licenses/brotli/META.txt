@@ -1,0 +1,4 @@
+Package: brotli
+Version: 1.2.0
+License: MIT
+Source: PyPI wheel brotli-1.2.0

@@ -154,6 +154,14 @@ def find_js_runtime() -> tuple[str, str] | None:
     """
     import glob as _glob
 
+    # ⚠️ 1E.2：frozen 下最优候选是随包分发的 Playwright 驱动自带 node.exe
+    # （_internal\playwright\driver\node.exe，v24+）—— 不需要用户装任何东西，
+    # 也不引入第二份 Node。必须放在 PATH 之前：用户 PATH 里的 node 版本不可控。
+    if FROZEN:
+        bundled = BUNDLE_DIR / "playwright" / "driver" / "node.exe"
+        if bundled.exists():
+            return "node", str(bundled)
+
     candidates: list[tuple[str, list[str]]] = [
         ("deno", ["deno"]),
         ("node", ["node"]),
@@ -169,8 +177,9 @@ def find_js_runtime() -> tuple[str, str] | None:
     # PATH 里没有时，找几个常见安装位置。
     # ⚠️ 1E 策略：WorkBuddy 托管 node 只是【源码开发机】的便利候选，
     # frozen 发布版绝不能把它当隐性发布依赖（开发机找得到、用户机器没有，
-    # YouTube 就会「开发时正常、发布后 403」）—— FROZEN 下跳过。
-    # 发布版只认：用户 PATH 里的 deno/node/quickjs/bun + Node.js 官方安装位置。
+    # YouTube 就会「开发时正常、发布后 403」）—— FROZEN 下跳过（1E.2 起
+    # frozen 优先用上面随包的 Playwright bundled node）。
+    # 发布版只认：随包 node > 用户 PATH 里的 deno/node/quickjs/bun + Node.js 官方安装位置。
     # 找不到时 YouTube 等部分功能明确降级（/api/status 会显示 js_runtime 状态）。
     patterns = [
         r"E:\nodejs\node.exe",

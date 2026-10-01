@@ -32,6 +32,16 @@ datas = [
 datas += collect_data_files("certifi")                   # CA 证书（requests/yt-dlp 用）
 datas += collect_data_files("playwright")                # playwright 驱动（node.exe 等 Python 运行时，
                                                          #   不含浏览器 —— 浏览器复用用户系统 Chrome/Edge）
+datas += collect_data_files("yt_dlp_ejs")                # 1E.2：yt-dlp EJS 挑战脚本（.js 资源）
+
+# ---- 1E.2：第三方许可证与声明（随包分发必须） ----
+# 先落在 _internal（licenses\ + THIRD_PARTY_NOTICES.txt），构建后再复制
+# 一份到 RC 根目录（用户直接可见）——见 BUILD_MANIFEST 的构建命令。
+datas += [
+    (str(SPEC_DIR / "licenses"), "licenses"),
+    (str(SPEC_DIR / "THIRD_PARTY_NOTICES.txt"), "."),
+    (str(SPEC_DIR / "FFMPEG_DISTRIBUTION_NOTES.md"), "licenses"),
+]
 
 # ---- 懒加载模块必须显式收集 ----
 hiddenimports = (
@@ -74,6 +84,9 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # 1E.2：正式版本资源 + 项目自有图标（app_icon.ico 由 PIL 生成，版权清晰）
+    version=str(SPEC_DIR / "version_info.txt"),
+    icon=str(SPEC_DIR / "app_icon.ico"),
 )
 
 coll = COLLECT(

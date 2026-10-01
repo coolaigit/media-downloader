@@ -1,0 +1,4 @@
+Package: starlette
+Version: 1.7.0
+License: BSD-3-Clause
+Source: PyPI wheel starlette-1.7.0
