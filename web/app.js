@@ -1903,9 +1903,24 @@ function fillSettings(s) {
   renderCookiesStat(statusInfo && statusInfo.cookies);
   $('sProfileDir').value = s.browser_user_data_dir || '';
   $('sProfileHeaded').checked = !!s.browser_headed;
+  $('sMcRoot').value = s.mediacrawler_root || '';
+  renderMcStat(statusInfo && statusInfo.mediacrawler);
   refreshLoginState();
   renderProfileStat(statusInfo && statusInfo.browser_profile);
   $('sAllowPrivate').checked = !!s.allow_private_network;
+}
+
+// MediaCrawler（外部工具）状态：找到/没找到都如实显示，失败给可操作原因
+function renderMcStat(mc) {
+  const el = $('sMcStat');
+  if (!el) return;
+  if (!mc) { el.textContent = '检测中…'; return; }
+  if (mc.found) {
+    const logged = Object.values(mc.platforms || {}).filter(p => p.logged_in).length;
+    el.textContent = `已找到：${mc.root}` + (logged ? `（${logged} 个平台已有登录态）` : '（暂无平台登录态）');
+  } else {
+    el.textContent = mc.reason || '未找到（抖音/快手/B站主页展开不可用，其余功能不受影响）';
+  }
 }
 
 async function loadSettings() {
@@ -1928,6 +1943,7 @@ async function saveSettings() {
     skip_existing: $('sSkip').checked,
     browser_user_data_dir: $('sProfileDir').value.trim(),
     browser_headed: $('sProfileHeaded').checked,
+    mediacrawler_root: $('sMcRoot').value.trim(),
     cookies_file: $('sCookiesFile').value.trim(),
     cookies_from_browser: $('sCookiesBrowser').value,
     allow_private_network: $('sAllowPrivate').checked,
@@ -1941,13 +1957,18 @@ async function saveSettings() {
       $('settingsMsg').textContent = '已保存（下载根目录将在重启程序后生效）';
       $('settingsMsg').style.color = 'var(--warn, #d80)';
       toast('已保存；下载根目录重启程序后生效', 'ok');
+    } else if (r.mediacrawler_warning) {
+      $('settingsMsg').textContent = '已保存，但 ' + r.mediacrawler_warning;
+      $('settingsMsg').style.color = 'var(--warn, #d80)';
+      toast('已保存；' + r.mediacrawler_warning, 'ok');
     } else {
       $('settingsMsg').textContent = '已保存';
       $('settingsMsg').style.color = 'var(--ok)';
       toast('设置已保存', 'ok');
     }
     setTimeout(() => { $('settingsMsg').textContent = ''; }, 4000);
-    loadStatus();
+    loadStatus().then(() => renderMcStat(statusInfo && statusInfo.mediacrawler))
+                .catch(() => {});
   } catch (e) {
     $('settingsMsg').textContent = '保存失败：' + e.message;
     $('settingsMsg').style.color = 'var(--err)';

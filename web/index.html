@@ -785,6 +785,10 @@
       <span class="hint" id="sLoginMsg">登录一次即可长期复用（登录态存在上面的配置目录里）</span>
     </div>
     <div class="kv" style="grid-column:1/-1"><span>当前生效的 Cookies</span><b id="sCookiesStat">检测中…</b></div>
+    <label class="wide">MediaCrawler 根目录（外部工具，抖音/快手/B站主页展开用；留空 = 自动发现）
+      <input type="text" id="sMcRoot" placeholder="如 D:\MediaCrawler（需含 main.py，用它自己的 Python 环境）">
+    </label>
+    <div class="kv" style="grid-column:1/-1"><span>MediaCrawler 状态</span><b id="sMcStat">检测中…</b></div>
     <label class="chk wide"><input type="checkbox" id="sAllowPrivate"> 允许访问内网 / 本机地址（有安全风险，默认关闭）</label>
     <p class="hint">用途：部分站点（如 B 站、Instagram）对未登录访问有风控或不返回内容
       （返回 412 / 403，或页面只有登录墙）。在浏览器登录后，把 Cookies 导出为 Netscape 格式
