@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>媒体下载工具</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div id="deadBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99;background:#b3261e;color:#fff;padding:10px 16px;font-weight:600;text-align:center;">
+    ⚠ 本地服务已停止，页面无法保存任何操作 —— 请重新双击「打开工具.bat」启动后刷新本页。
+  </div>
+  <div class="brand">
+    <span class="logo">⬇</span>
+    <div>
+      <h1>媒体下载工具</h1>
+      <p class="sub">抓取图片 · 抓取视频（各支持关键词搜索与粘贴链接）</p>
+    </div>
+  </div>
+  <div class="env" id="envBar">
+    <span class="env-item" id="envFfmpeg" title="ffmpeg 用于合并音视频流">ffmpeg 检测中…</span>
+    <span class="env-item" id="envYtdlp">yt-dlp …</span>
+    <span class="env-item" id="envDisk">磁盘 …</span>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="image">抓取图片</button>
+  <button class="tab" data-tab="video">抓取视频</button>
+  <button class="tab" data-tab="library">已下载</button>
+  <button class="tab" data-tab="settings">设置</button>
+</nav>
+
+<main>
+
+<!-- ============ 抓取图片 ============ -->
+<section class="panel active" id="panel-image">
+  <div class="modeswitch" id="imageModeSwitch">
+    <button class="mode-btn active" data-mode="kw">关键词搜图</button>
+    <button class="mode-btn" data-mode="link">粘贴链接抓取</button>
+    <div class="spacer"></div>
+    <span class="hint" id="imageModeSwitchHint">按关键词在搜索引擎里搜图</span>
+  </div>
+
+  <!-- 方式一：关键词搜图 -->
+  <div id="imageKwMode">
+  <div class="searchbar">
+    <input type="text" id="kwInput" placeholder="输入关键词，如：风景 壁纸 / cat / 城市夜景" autofocus>
+    <button class="btn primary" id="btnSearch">搜索图片</button>
+  </div>
+
+  <details class="filters" id="filterBox">
+    <summary>筛选项 <span class="hint" id="filterSummary">（清晰度 / 尺寸 / 颜色 / 时间 …）</span></summary>
+    <div class="filter-grid">
+      <label>清晰度
+        <select id="fResPreset">
+          <option value="0">不限</option>
+          <option value="480">≥480p</option>
+          <option value="720">≥720p</option>
+          <option value="1080">≥1080p</option>
+          <option value="1440">≥2K (1440p)</option>
+          <option value="2160">≥4K (2160p)</option>
+        </select>
+      </label>
+      <label>最大清晰度
+        <select id="fResMax">
+          <option value="0">不限</option>
+          <option value="480">≤480p</option>
+          <option value="720">≤720p</option>
+          <option value="1080">≤1080p</option>
+          <option value="1440">≤2K</option>
+          <option value="2160">≤4K</option>
+        </select>
+      </label>
+      <label>尺寸
+        <select id="fSize">
+          <option value="">不限</option>
+          <option value="small">小图</option>
+          <option value="medium">中图</option>
+          <option value="large">大图</option>
+          <option value="wallpaper">超大 / 壁纸</option>
+        </select>
+      </label>
+      <label>长宽比
+        <select id="fAspect">
+          <option value="">不限</option>
+          <option value="wide">宽屏（横）</option>
+          <option value="square">正方形</option>
+          <option value="tall">竖屏</option>
+        </select>
+      </label>
+      <label>类型
+        <select id="fType">
+          <option value="">不限</option>
+          <option value="photo">照片</option>
+          <option value="clipart">剪贴画</option>
+          <option value="linedrawing">线稿</option>
+          <option value="animatedgif">动图 GIF</option>
+          <option value="transparent">透明背景</option>
+        </select>
+      </label>
+      <label>发布时间
+        <select id="fTime">
+          <option value="">不限</option>
+          <option value="day">24 小时内</option>
+          <option value="week">一周内</option>
+          <option value="month">一个月内</option>
+          <option value="year">一年内</option>
+        </select>
+      </label>
+      <label>颜色
+        <select id="fColor">
+          <option value="">不限</option>
+          <option value="color">彩色</option>
+          <option value="bw">黑白</option>
+          <option value="red">红</option>
+          <option value="orange">橙</option>
+          <option value="yellow">黄</option>
+          <option value="green">绿</option>
+          <option value="teal">青</option>
+          <option value="blue">蓝</option>
+          <option value="purple">紫</option>
+          <option value="pink">粉</option>
+          <option value="brown">棕</option>
+          <option value="black">黑</option>
+          <option value="gray">灰</option>
+          <option value="white">白</option>
+        </select>
+      </label>
+      <label>人像
+        <select id="fFace">
+          <option value="">不限</option>
+          <option value="face">仅人脸</option>
+          <option value="portrait">头像</option>
+        </select>
+      </label>
+      <label>授权
+        <select id="fLicense">
+          <option value="">不限</option>
+          <option value="public">公有领域</option>
+          <option value="share">可共享使用</option>
+          <option value="share_modify">可共享并修改</option>
+          <option value="all_cc">所有知识共享</option>
+        </select>
+      </label>
+      <label>文件格式
+        <select id="fFormats">
+          <option value="">不限</option>
+          <option value="jpeg,jpg">JPG</option>
+          <option value="png">PNG</option>
+          <option value="webp">WebP</option>
+          <option value="gif">GIF</option>
+          <option value="bmp">BMP</option>
+          <option value="svg">SVG</option>
+          <option value="avif">AVIF</option>
+        </select>
+      </label>
+      <label>最小文件体积
+        <select id="fMinSize">
+          <option value="0">不限</option>
+          <option value="100">≥100KB</option>
+          <option value="300">≥300KB</option>
+          <option value="500">≥500KB</option>
+          <option value="1024">≥1MB</option>
+          <option value="3072">≥3MB</option>
+        </select>
+      </label>
+      <label>数量上限
+        <select id="fLimit">
+          <option value="20">20 张</option>
+          <option value="40" selected>40 张</option>
+          <option value="80">80 张</option>
+          <option value="120">120 张</option>
+        </select>
+      </label>
+      <label>安全搜索
+        <select id="fSafe">
+          <option value="moderate" selected>适中</option>
+          <option value="strict">严格</option>
+          <option value="off">关闭</option>
+        </select>
+      </label>
+      <label>搜索引擎
+        <select id="fEngines">
+          <option value="bing" selected>Bing（推荐）</option>
+          <option value="bing,ddg">Bing + DuckDuckGo</option>
+          <option value="ddg">DuckDuckGo</option>
+          <option value="google">Google</option>
+          <option value="bing,google,ddg">全部（Bing + Google + DDG）</option>
+        </select>
+      </label>
+    </div>
+    <div class="filter-actions">
+      <button class="btn tiny ghost" id="btnResetFilters">重置筛选</button>
+      <label class="chk"><input type="checkbox" id="fSkipExisting" checked> 跳过已下载的相同图片</label>
+      <span class="hint">清晰度筛选会逐个探测原图真实分辨率，条件越严格耗时越长。
+        Google 的结果自带真实宽高，可跳过探测（更快），但需要干净的出口 IP，可能触发人机验证。</span>
+    </div>
+  </details>
+
+  <div class="toolbar" id="searchToolbar" hidden>
+    <span id="searchStat" class="stat"></span>
+    <div class="spacer"></div>
+    <button class="btn tiny" id="btnSelAll">全选</button>
+    <button class="btn tiny" id="btnSelInv">反选</button>
+    <button class="btn tiny" id="btnSelNone">清空</button>
+    <button class="btn tiny primary" id="btnDownloadSel">下载选中 (<span id="selCount">0</span>)</button>
+  </div>
+
+  <div id="searchMsg" class="msg"></div>
+  <div class="grid" id="searchGrid"></div>
+  </div><!-- /imageKwMode -->
+
+  <!-- 方式二：粘贴链接抓取（只要图片） -->
+  <div id="imgLinkMode" hidden>
+<div class="searchbar">
+    <input type="text" id="imgCrawlInput"
+      placeholder="粘贴图片列表页 / 相册 / 官网链接，例：https://www.pexels.com/search/led/">
+    <button class="btn primary" id="imgBtnCrawl">开始抓取图片</button>
+  </div>
+
+  <details class="filters" id="imgCrawlOptions" open>
+    <summary>抓取选项 <span class="hint" id="imgCrawlOptSummary">（页数 / 下钻 / 已下载 …）</span></summary>
+    <div class="filter-grid">
+      <label>抓取模式
+        <select id="imgCMode">
+          <option value="list" selected>列表页 / 博主页 → 逐条抓取</option>
+          <option value="site">全站抓取（独立站：整站走一遍）</option>
+        </select>
+      </label>
+      <label id="imgCPagesLabelList">抓取页数
+        <select id="imgCPageCount">
+          <option value="1" selected>1 页</option>
+          <option value="2">2 页</option>
+          <option value="3">3 页</option>
+          <option value="5">5 页</option>
+          <option value="10">10 页</option>
+          <option value="20">20 页</option>
+        </select>
+      </label>
+      <label id="imgCPagesLabelSite" hidden>抓取页数（整站）
+        <select id="imgCSitePages">
+          <option value="10">10 页</option>
+          <option value="30" selected>30 页</option>
+          <option value="60">60 页</option>
+          <option value="120">120 页</option>
+          <option value="300">300 页</option>
+        </select>
+      </label>
+      <label id="imgCDepthLabel" hidden>跟随链接层数
+        <select id="imgCDepth">
+          <option value="1">1 层（只抓首页直达的页面）</option>
+          <option value="2" selected>2 层（推荐）</option>
+          <option value="3">3 层（抓得更深，更慢）</option>
+        </select>
+      </label>
+      <label id="imgCSitemapLabel" class="chk wide" hidden><input type="checkbox" id="imgCUseSitemap" checked>
+        用站点地图（sitemap.xml / robots.txt 声明）当起点 —— 站点自己给出的完整页面清单，覆盖最全</label>
+      <label id="imgCDrillLabel">详情页下钻
+        <select id="imgCDrill">
+          <option value="auto" selected>智能判断（推荐）</option>
+          <option value="always">总是下钻（取高清原图）</option>
+          <option value="never">不下钻（只要列表页）</option>
+        </select>
+      </label>
+      <label id="imgCMaxItemsLabel">最多下钻
+        <select id="imgCMaxItems">
+          <option value="10">10 个详情页</option>
+          <option value="30" selected>30 个</option>
+          <option value="60">60 个</option>
+          <option value="120">120 个</option>
+          <option value="300">300 个</option>
+        </select>
+      </label>
+      <label>结果处理
+        <select id="imgCOriginals">
+          <option value="0" selected>保留全部（含缩略图）</option>
+          <option value="1">只留原图（去掉缩略图）</option>
+        </select>
+      </label>
+      <label class="chk wide"><input type="checkbox" id="imgCRender" checked>
+        允许浏览器渲染 JS 页面（阿里 / 1688 / 大部分现代站点必需；会明显变慢）</label>
+    </div>
+    <div class="filter-actions">
+      <span class="hint"><b>两种模式是两件事</b>：<b>列表页 / 博主页 → 逐条抓取</b>
+        用于「一个页面列着一批内容」的站（商品列表、搜索结果页、博主主页、频道页）；
+        <b>全站抓取</b>用于独立站（公司官网、博客、作品站）——不假设任何列表结构，
+        从你给的地址出发把同域页面走一遍，汇总全站素材（列表页常只有缩略图，
+        原图在详情页里，所以逐条抓取时「下钻」决定能不能拿到高清原图）。</span>
+    </div>
+  </details>
+
+  <div id="imgCrawlProgress" hidden>
+    <div class="crawlprog">
+      <span class="spin"></span>
+      <span id="imgCrawlStage">准备中…</span>
+      <div class="spacer"></div>
+      <span id="imgCrawlCount" class="stat"></span>
+      <button class="btn tiny danger" id="imgBtnCrawlCancel">取消</button>
+    </div>
+    <div class="task-bar"><i id="imgCrawlBar"></i></div>
+    <div id="imgCrawlNote" class="hint"></div>
+  </div>
+
+  <div class="toolbar" id="imgCrawlToolbar" hidden>
+    <span id="imgCrawlStat" class="stat"></span>
+    <!-- 批量下载前的设置：原来只能吃全局默认值，现在可当场调整 -->
+    <div class="dlopts">
+      <label>并发 <input type="number" id="imgDlConcurrency" min="1" max="16" value="6"></label>
+      <label class="chk"><input type="checkbox" id="imgDlSkip" checked> 跳过已存在</label>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn tiny" id="imgBtnCrawlSelAll">全选</button>
+    <button class="btn tiny" id="imgBtnCrawlSelInv">反选</button>
+    <button class="btn tiny" id="imgBtnCrawlSelNone">清空</button>
+    <button class="btn tiny primary" id="imgBtnCrawlDownload">下载选中 (<span id="imgCrawlSelCount">0</span>)</button>
+  </div>
+
+  <div id="imgCrawlMsg" class="msg"></div>
+  <div id="imgCrawlWarn" class="warn" hidden></div>
+  <div class="grid" id="imgCrawlGrid"></div>
+
+  <details id="imgCrawlDetailBox" hidden>
+    <summary>抓取明细（各页抓到多少、下钻了哪些详情页）</summary>
+    <div id="imgCrawlDetail" class="detail-box"></div>
+  </details>
+  </div>
+</section>
+
+
+<!-- ============ 抓取视频 ============ -->
+<section class="panel" id="panel-video">
+  <div class="modeswitch" id="videoModeSwitch">
+    <button class="mode-btn active" data-mode="kw">关键词搜视频</button>
+    <button class="mode-btn" data-mode="link">粘贴链接抓取</button>
+    <div class="spacer"></div>
+    <span class="hint" id="videoModeSwitchHint">按关键词在搜索引擎里搜视频</span>
+  </div>
+
+  <!-- 方式一：关键词搜视频 -->
+  <div id="videoKwMode">
+  <div class="video-search">
+    <input type="text" id="videoKw" placeholder="用关键词搜视频，如：风景 航拍 4K / product demo">
+    <!-- 视频源：**搜索开始前**就能选定。分两类，界面上如实区分：
+         「官方搜索」是直接调用该站自己的搜索（YouTube 走 yt-dlp、B 站走官方接口）；
+         「按站点挑选」是从多个来源的结果里挑出该站的条目（因为实测
+         site: 限定在视频垂直里返回 0 条，做不到定向查询）。 -->
+    <select id="videoPlatform" title="先选好要搜哪个来源，再点搜索">
+      <optgroup label="聚合（一次搜多个来源）">
+        <option value="web" selected>全网（多来源）</option>
+        <option value="domestic">国内主流（B站官方搜索 + 抖音/腾讯/优酷/爱奇艺/搜狐…）</option>
+        <option value="foreign">国外主流（YouTube官方搜索 + Vimeo/Dailymotion/TikTok/X…）</option>
+      </optgroup>
+      <optgroup label="单站 · 官方搜索接口">
+        <option value="youtube">YouTube</option>
+        <option value="bilibili">Bilibili（哔哩哔哩）</option>
+      </optgroup>
+      <optgroup label="单站 · 按站点检索">
+        <option value="douyin">抖音</option>
+        <option value="qq">腾讯视频</option>
+        <option value="youku">优酷</option>
+        <option value="iqiyi">爱奇艺</option>
+        <option value="sohu">搜狐视频</option>
+        <option value="kuaishou">快手</option>
+        <option value="weibo">微博</option>
+        <option value="xiaohongshu">小红书</option>
+        <option value="vimeo">Vimeo</option>
+        <option value="dailymotion">Dailymotion</option>
+        <option value="tiktok">TikTok</option>
+        <option value="twitter">X（Twitter）</option>
+        <option value="instagram">Instagram</option>
+        <option value="facebook">Facebook</option>
+      </optgroup>
+      <optgroup label="成人站点">
+        <option value="adult">成人站点（Pornhub / Eporner）</option>
+      </optgroup>
+    </select>
+    <!-- 结果条数：原来写死 10 条，用户反馈「太少、看不到更多」 -->
+    <select id="videoKwCount" title="每次取多少条结果">
+      <option value="10">10 条</option>
+      <option value="20" selected>20 条</option>
+      <option value="30">30 条</option>
+      <option value="50">50 条</option>
+    </select>
+    <button class="btn" id="btnVideoSearch">搜索视频</button>
+  </div>
+  <p class="hint" style="margin:-4px 0 12px">
+    <b>先选视频源再搜索</b>：只想在 YouTube 上搜，就把来源选成 YouTube（B 站同理）。
+    「全网」会一次查多个来源并合并去重，某个来源返回的内容与关键词无关时会自动丢弃并如实说明。
+    <br>「国内主流 / 国外主流」= 多来源结果里的该地区站点 + 该地区主力站的定向检索
+    + 该地区有官方搜索接口的站点（国内并 B 站、国外并 YouTube 与 Dailymotion）。
+    <br>「单站 · 按站点检索」会<b>主动针对该站点检索</b>——用检索语法限定域名，
+    并把站点名拼进关键词（如「科比 抖音」），两条手段并施后再按域名核准。
+    该站内容少时会如实告诉你找到几条。
+    极少数站点（优酷 / 快手 / 小红书 / Vimeo / X / Facebook）的视频只在自家 App 内，
+    公开网页里检索不到，选中时会直接说明原因。
+    <br><b>成人向关键词</b>（如「angela white anal」）会自动<b>优先返回成人站点</b>的结果
+    （Pornhub / Eporner）——通用搜索引擎对这类内容只给 YouTube 的采访花絮，
+    拿不到成人站的内容，所以这里单独去成人站检索。
+    <br><b>兜底不限于上面罗列的站点</b>：某个源结果不够时，会自动从<b>全网</b>补充，
+    并如实标注哪些是兜底来的。
+    搜到后可逐条「解析」确认，也可<b>勾选多条批量下载</b>。
+  </p>
+
+  <!-- 搜索结果的操作栏：勾选 / 批量下载设置。搜索结果大多还要走 yt-dlp 逐条解析，
+       不像「复制直链」那样秒下，所以并发默认收在 3，避免一批同时开跑把带宽抢死。 -->
+  <div class="toolbar" id="videoSearchToolbar" hidden>
+    <span id="videoSearchStat" class="stat"></span>
+    <div class="dlopts">
+      <label>清晰度
+        <select id="videoKwQuality">
+          <option value="best" selected>最佳画质（推荐）</option>
+          <option value="1080">1080p</option>
+          <option value="720">720p</option>
+          <option value="480">480p</option>
+          <option value="audio">仅音频</option>
+          <option value="worst">最小文件</option>
+        </select>
+      </label>
+      <label>并发 <input type="number" id="videoKwConcurrency" min="1" max="8" value="3"></label>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn tiny" id="videoKwSelAll">全选</button>
+    <button class="btn tiny" id="videoKwSelInv">反选</button>
+    <button class="btn tiny" id="videoKwSelNone">清空</button>
+    <button class="btn tiny primary" id="videoKwDownload">下载选中 (<span id="videoKwSelCount">0</span>)</button>
+  </div>
+
+  <!-- 结果筛选：与勾选批量下载联动 —— 筛完之后「全选」只选**筛出来**的那些，
+       就能实现「批量挑出 5 分钟以内的，然后一次性下载」这种用法。 -->
+  <details class="filters" id="videoSearchFilterBox" open hidden>
+    <summary>结果筛选 <span class="hint" id="videoSearchFilterSummary">（时长 / 来源 / 标题 / 排序）</span></summary>
+    <div class="filter-grid">
+      <label>时长
+        <select id="videoFilterDur">
+          <option value="" selected>不限</option>
+          <option value="0-60">1 分钟以内</option>
+          <option value="0-180">3 分钟以内</option>
+          <option value="0-300">5 分钟以内</option>
+          <option value="0-600">10 分钟以内</option>
+          <option value="300-1200">5 – 20 分钟</option>
+          <option value="1200-3600">20 – 60 分钟</option>
+          <option value="3600-">1 小时以上</option>
+          <option value="custom">自定义（下面填秒数）</option>
+        </select>
+      </label>
+      <label>自定义时长（秒）
+        <input type="number" id="videoFilterMin" min="0" placeholder="最短" style="width:80px" disabled>
+        <input type="number" id="videoFilterMax" min="0" placeholder="最长" style="width:80px" disabled>
+      </label>
+      <label>来源站点 <select id="videoFilterSite"><option value="">全部</option></select></label>
+      <label>标题包含
+        <input type="text" id="videoFilterText" placeholder="如：集锦 / 教程" style="width:120px">
+      </label>
+      <label>排序
+        <select id="videoFilterSort">
+          <option value="default" selected>默认（相关度）</option>
+          <option value="dur_asc">时长：短 → 长</option>
+          <option value="dur_desc">时长：长 → 短</option>
+        </select>
+      </label>
+      <label class="chk"><input type="checkbox" id="videoFilterKeepUnknown" checked>
+        保留没有时长信息的结果（要按时长筛时建议关掉）</label>
+      <!-- 去重：按「下载台账」隐藏下过的视频。台账记的是**视频身份**
+           （页面地址归一 / yt-dlp 的 extractor+id），与文件放在哪儿无关 ——
+           把已下载的视频挪到别处，依然算「下过」。 -->
+      <label class="chk"><input type="checkbox" id="videoFilterHideDownloaded" checked>
+        隐藏已下载的视频（下次搜同一个词不会重复出现）</label>
+      <div class="filter-actions" style="grid-column:1/-1">
+        <button class="btn tiny" id="videoFilterReset">重置筛选</button>
+        <button class="btn tiny" id="btnHistoryManage">下载记录…</button>
+        <span class="hint" id="videoFilterNote"></span>
+      </div>
+    </div>
+  </details>
+
+  <div id="videoSearchResult" class="vlist" hidden></div>
+
+  </div><!-- /videoKwMode -->
+
+  <!-- 方式二：粘贴链接抓取（只要视频） -->
+  <div id="vidLinkMode" hidden>
+  <!-- 单个视频链接：解析清晰度后下载（走 yt-dlp，可选清晰度 / 容器 / 字幕） -->
+  <div class="subsec-title">单个视频 —— 解析清晰度后下载</div>
+  <div class="searchbar">
+    <input type="text" id="videoInput" placeholder="输入任意视频页面链接：B站 / YouTube / 抖音 / 各站视频页 均可">
+    <button class="btn primary" id="btnProbe">解析清晰度</button>
+  </div>
+
+  <div class="subsec-title" style="margin-top:20px">列表页 / 博主主页 —— 批量抓出视频</div>
+<div class="searchbar">
+    <input type="text" id="vidCrawlInput"
+      placeholder="粘贴视频页 / 列表页 / 博主主页链接，例：https://www.tiktok.com/@kvi.lighting">
+    <button class="btn primary" id="vidBtnCrawl">开始抓取视频</button>
+  </div>
+
+  <details class="filters" id="vidCrawlOptions" open>
+    <summary>抓取选项 <span class="hint" id="vidCrawlOptSummary">（页数 / 下钻 / 已下载 …）</span></summary>
+    <div class="filter-grid">
+      <label>抓取模式
+        <select id="vidCMode">
+          <option value="list" selected>列表页 / 博主页 → 逐条抓取</option>
+          <option value="site">全站抓取（独立站：整站走一遍）</option>
+        </select>
+      </label>
+      <label id="vidCPagesLabelList">抓取页数
+        <select id="vidCPageCount">
+          <option value="1" selected>1 页</option>
+          <option value="2">2 页</option>
+          <option value="3">3 页</option>
+          <option value="5">5 页</option>
+          <option value="10">10 页</option>
+          <option value="20">20 页</option>
+        </select>
+      </label>
+      <label id="vidCPagesLabelSite" hidden>抓取页数（整站）
+        <select id="vidCSitePages">
+          <option value="10">10 页</option>
+          <option value="30" selected>30 页</option>
+          <option value="60">60 页</option>
+          <option value="120">120 页</option>
+          <option value="300">300 页</option>
+        </select>
+      </label>
+      <label id="vidCDepthLabel" hidden>跟随链接层数
+        <select id="vidCDepth">
+          <option value="1">1 层（只抓首页直达的页面）</option>
+          <option value="2" selected>2 层（推荐）</option>
+          <option value="3">3 层（抓得更深，更慢）</option>
+        </select>
+      </label>
+      <label id="vidCSitemapLabel" class="chk wide" hidden><input type="checkbox" id="vidCUseSitemap" checked>
+        用站点地图（sitemap.xml / robots.txt 声明）当起点 —— 站点自己给出的完整页面清单，覆盖最全</label>
+      <label id="vidCDrillLabel">详情页下钻
+        <select id="vidCDrill">
+          <option value="auto" selected>智能判断（推荐）</option>
+          <option value="always">总是下钻（取高清原图）</option>
+          <option value="never">不下钻（只要列表页）</option>
+        </select>
+      </label>
+      <label id="vidCMaxItemsLabel">最多下钻
+        <select id="vidCMaxItems">
+          <option value="10">10 个详情页</option>
+          <option value="30" selected>30 个</option>
+          <option value="60">60 个</option>
+          <option value="120">120 个</option>
+          <option value="300">300 个</option>
+        </select>
+      </label>
+      <label>结果处理
+        <select id="vidCOriginals">
+          <option value="0" selected>保留全部（含缩略图）</option>
+          <option value="1">只留原图（去掉缩略图）</option>
+        </select>
+      </label>
+      <label class="chk wide"><input type="checkbox" id="vidCRender" checked>
+        允许浏览器渲染 JS 页面（阿里 / 1688 / 大部分现代站点必需；会明显变慢）</label>
+    </div>
+    <div class="filter-actions">
+      <span class="hint">单个视频页只出该视频；<b>博主主页 / 频道页 / 播放列表</b>会抓出整批视频
+        （平台主页的视频地址不在页面里，工具会自动改用平台自带的视频列表接口）。
+        <b>全站抓取</b>则是把整个独立站的资源走一遍，与上面的逐条抓取是两件事。</span>
+    </div>
+  </details>
+
+  <div id="vidCrawlProgress" hidden>
+    <div class="crawlprog">
+      <span class="spin"></span>
+      <span id="vidCrawlStage">准备中…</span>
+      <div class="spacer"></div>
+      <span id="vidCrawlCount" class="stat"></span>
+      <button class="btn tiny danger" id="vidBtnCrawlCancel">取消</button>
+    </div>
+    <div class="task-bar"><i id="vidCrawlBar"></i></div>
+    <div id="vidCrawlNote" class="hint"></div>
+  </div>
+
+  <div class="toolbar" id="vidCrawlToolbar" hidden>
+    <span id="vidCrawlStat" class="stat"></span>
+    <!-- 清晰度下拉会按本次抓到的真实档位动态生成（rebuildQualityOptions），
+         选好再点「下载选中」，后端会自动挑对应档位的地址。 -->
+    <div class="dlopts">
+      <label>清晰度
+        <select id="vidDlQuality">
+          <option value="">原样（抓到的档位）</option>
+          <option value="highest">最高</option>
+          <option value="lowest">最低</option>
+        </select>
+      </label>
+      <label>并发 <input type="number" id="vidDlConcurrency" min="1" max="16" value="4"></label>
+      <label class="chk"><input type="checkbox" id="vidDlSkip" checked> 跳过已存在</label>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn tiny" id="vidBtnCrawlSelAll">全选</button>
+    <button class="btn tiny" id="vidBtnCrawlSelInv">反选</button>
+    <button class="btn tiny" id="vidBtnCrawlSelNone">清空</button>
+    <button class="btn tiny primary" id="vidBtnCrawlDownload">下载选中 (<span id="vidCrawlSelCount">0</span>)</button>
+  </div>
+
+  <div id="vidCrawlMsg" class="msg"></div>
+  <div id="vidCrawlWarn" class="warn" hidden></div>
+  <div class="grid" id="vidCrawlGrid"></div>
+
+  <details id="vidCrawlDetailBox" hidden>
+    <summary>抓取明细（各页抓到多少、下钻了哪些详情页）</summary>
+    <div id="vidCrawlDetail" class="detail-box"></div>
+  </details>
+  </div>
+<!-- ===== 共用区：状态提示 / 解析结果 / 播放列表 =====
+       两种方式都会用到（关键词搜出的条目点「解析」、粘贴单链接点「解析清晰度」，
+       结果都渲染到 videoInfo），所以放在方式切换之外，不随显隐被藏起来。 -->
+  <div id="videoMsg" class="msg"></div>
+
+  <div id="videoInfo" hidden>
+    <!-- 从批量列表点「单独解析」进来时的回退入口。
+         原实现里 doProbe() 会无条件隐藏列表，且没有任何路径能回到它 ——
+         用户只能重新解析整个列表（本次修复的痛点之一）。 -->
+    <div class="backbar" id="backToPlaylistBar" hidden>
+      <button class="btn tiny" id="btnBackToPlaylist">← 返回批量列表</button>
+      <span class="hint" id="backToPlaylistHint"></span>
+    </div>
+    <div class="vcard">
+      <img id="vThumb" alt="封面" referrerpolicy="no-referrer">
+      <div class="vmeta">
+        <h3 id="vTitle"></h3>
+        <div class="vsub" id="vSub"></div>
+        <div class="vopts">
+          <label>清晰度
+            <select id="vQuality"></select>
+          </label>
+          <label>容器格式
+            <select id="vContainer">
+              <option value="">自动</option>
+              <option value="mp4">MP4</option>
+              <option value="mkv">MKV</option>
+              <option value="webm">WebM</option>
+            </select>
+          </label>
+          <label>限速
+            <select id="vRate">
+              <option value="">不限速</option>
+              <option value="500K">500 KB/s</option>
+              <option value="1M">1 MB/s</option>
+              <option value="2M">2 MB/s</option>
+              <option value="5M">5 MB/s</option>
+            </select>
+          </label>
+          <label class="chk"><input type="checkbox" id="vAudioOnly"> 仅音频</label>
+          <label class="chk"><input type="checkbox" id="vSubs"> 下载字幕</label>
+          <label class="chk"><input type="checkbox" id="vPlaylist"> 整个播放列表</label>
+        </div>
+        <div class="vactions">
+          <button class="btn primary" id="btnVideoDownload">开始下载</button>
+          <a class="btn ghost" id="vPageLink" href="#" target="_blank" rel="noopener">打开原页面</a>
+        </div>
+        <div id="vFfmpegWarn" class="warn" hidden></div>
+      </div>
+    </div>
+    <details class="fmtbox">
+      <summary>全部可用格式（<span id="vFmtCount">0</span>）</summary>
+      <div class="tablewrap">
+        <table id="vFmtTable">
+          <thead><tr><th>ID</th><th>分辨率</th><th>视频编码</th><th>音频编码</th><th>扩展名</th><th>大小</th><th>说明</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </details>
+  </div>
+
+  <div id="playlistBox" hidden>
+    <h3>播放列表</h3>
+    <div class="toolbar">
+      <span class="stat" id="plStat"></span>
+      <div class="spacer"></div>
+      <button class="btn tiny" id="btnPlAll">全选</button>
+      <button class="btn tiny" id="btnPlNone">清空</button>
+      <button class="btn tiny primary" id="btnPlDownload">下载选中 (<span id="plSelCount">0</span>)</button>
+    </div>
+    <div class="vlist" id="playlistList"></div>
+  </div>
+
+</section>
+
+<!-- ============ 已下载 ============ -->
+<section class="panel" id="panel-library">
+  <div class="toolbar">
+    <span class="stat" id="libStat"></span>
+    <div class="spacer"></div>
+    <select id="libFilter">
+      <option value="">全部类型</option>
+      <option value="image">仅图片</option>
+      <option value="video">仅视频</option>
+    </select>
+    <button class="btn tiny" id="btnLibRefresh">刷新</button>
+    <button class="btn tiny" id="btnLibOpen">打开下载文件夹</button>
+  </div>
+  <div id="libMsg" class="msg"></div>
+  <div class="grid" id="libGrid"></div>
+</section>
+
+<!-- ============ 设置 ============ -->
+<section class="panel" id="panel-settings">
+  <h3 class="sec-title">下载设置</h3>
+  <div class="settings">
+    <label>图片保存子目录
+      <input type="text" id="sSubImages" placeholder="images">
+    </label>
+    <label>视频保存子目录
+      <input type="text" id="sSubVideos" placeholder="videos">
+    </label>
+    <label>图片并发数
+      <input type="number" id="sConcurrency" min="1" max="16">
+    </label>
+    <label>流媒体下载并发数
+      <input type="number" id="sStreamConcurrency" min="1" max="8">
+    </label>
+    <label>视频默认清晰度
+      <select id="sQuality">
+        <option value="best">最佳画质</option>
+        <option value="2160">4K</option>
+        <option value="1440">2K</option>
+        <option value="1080">1080p</option>
+        <option value="720">720p</option>
+        <option value="480">480p</option>
+        <option value="worst">最小文件</option>
+      </select>
+    </label>
+    <label class="chk wide"><input type="checkbox" id="sSkip"> 跳过已下载的相同文件（按来源地址判断）</label>
+  </div>
+
+  <h3 class="sec-title">下载记录与去重</h3>
+  <div class="settings">
+    <p class="hint" style="grid-column:1/-1">
+      下载成功后会按<b>视频身份</b>记一笔（页面地址归一后的身份，或 yt-dlp 的
+      「来源站 + 视频 ID」）。它<b>与文件放在哪儿无关</b>：把已下载的视频移到别的目录、
+      甚至删掉，仍然算「下过」，下次搜同一个关键词不会再出现。
+      想再看到它们，把搜索结果筛选里的「隐藏已下载的视频」取消勾选即可。
+      <br>注意：这与上面的「跳过已下载的相同文件」是两回事 —— 那条判断的是
+      <b>下载目录里的文件还在不在</b>（文件被移走就会重新下载）。
+    </p>
+    <div class="filter-actions" style="grid-column:1/-1">
+      <button class="btn tiny" id="btnHistoryRefresh">查看下载记录</button>
+      <button class="btn tiny danger" id="btnHistoryClear">清空下载记录</button>
+      <span class="hint" id="historyStat">尚未读取</span>
+    </div>
+    <div id="historyBox" class="detail-box" style="grid-column:1/-1" hidden></div>
+  </div>
+
+  <h3 class="sec-title">站点访问（应对需要登录的站点）</h3>
+  <div class="settings">
+    <label>Cookies 文件路径
+      <input type="text" id="sCookiesFile" placeholder="如 D:\cookies\bilibili.txt（Netscape 格式）">
+    </label>
+    <label>或从浏览器读取 Cookies
+      <select id="sCookiesBrowser">
+        <option value="">不使用</option>
+        <option value="chrome">Chrome</option>
+        <option value="edge">Edge</option>
+        <option value="firefox">Firefox</option>
+        <option value="brave">Brave</option>
+      </select>
+    </label>
+    <label class="wide">登录态浏览器配置目录（持久化，可复用已登录的账号）
+      <input type="text" id="sProfileDir" placeholder="如 D://media-downloader//data//browser_profile
+（留空 = 每次都用干净浏览器；填了就能复用该目录里的登录态）">
+    </label>
+    <label class="chk wide"><input type="checkbox" id="sProfileHeaded">
+      显示浏览器窗口（有头模式）—— 抖音、小红书等会识别无头浏览器并只返回空壳，抓它们的主页时需要打开</label>
+    <div class="kv" style="grid-column:1/-1"><span>登录态浏览器</span><b id="sProfileStat">检测中…</b></div>
+    <div class="wide" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn" id="btnOpenLogin">打开浏览器去登录</button>
+      <select id="sLoginSite" style="min-width:150px">
+        <option value="https://www.instagram.com/">Instagram</option>
+        <option value="https://www.pinterest.com/">Pinterest</option>
+        <option value="https://www.douyin.com/">抖音</option>
+        <option value="https://www.xiaohongshu.com/">小红书</option>
+        <option value="https://www.tiktok.com/">TikTok</option>
+      </select>
+      <span class="hint" id="sLoginMsg">登录一次即可长期复用（登录态存在上面的配置目录里）</span>
+    </div>
+    <div class="kv" style="grid-column:1/-1"><span>当前生效的 Cookies</span><b id="sCookiesStat">检测中…</b></div>
+    <label class="chk wide"><input type="checkbox" id="sAllowPrivate"> 允许访问内网 / 本机地址（有安全风险，默认关闭）</label>
+    <p class="hint">用途：部分站点（如 B 站、Instagram）对未登录访问有风控或不返回内容
+      （返回 412 / 403，或页面只有登录墙）。在浏览器登录后，把 Cookies 导出为 Netscape 格式
+      文件填入此处，即可复用登录态 —— <b>网页抓取、浏览器渲染、视频解析三条链路都会用上它</b>。
+      「从浏览器读取」需要先完全退出该浏览器（运行中会锁住 cookie 数据库），
+      导出成文件的方式不需要关浏览器，更稳。
+      Cookies 含账号凭据，请妥善保管，不要提交到公共仓库。</p>
+  </div>
+
+  <h3 class="sec-title">运行环境</h3>
+  <div class="settings">
+    <div class="kv"><span>ffmpeg</span><b id="sFfmpeg">检测中…</b></div>
+    <div class="kv"><span>yt-dlp</span><b id="sYtdlp">检测中…</b></div>
+    <div class="kv"><span>下载根目录</span><b id="sDownloads">…</b></div>
+    <div class="kv"><span>可用磁盘空间</span><b id="sDisk">…</b></div>
+  </div>
+
+  <div class="settings-actions">
+    <button class="btn primary" id="btnSaveSettings">保存设置</button>
+    <button class="btn ghost" id="btnReloadSettings">还原</button>
+    <span id="settingsMsg" class="msg-inline"></span>
+  </div>
+
+  <h3 class="sec-title">使用说明与合规提醒</h3>
+  <div class="notice">
+    <p><b>能做什么</b>：输入列表页/网站链接批量抓出图片、视频与流媒体（可整站遍历）；
+      按关键词搜图、搜视频并下载；输入视频页面链接解析清晰度后下载（支持上千个视频站点）。</p>
+    <p><b>关于清晰度筛选</b>：搜索接口本身不提供可靠的原图像素尺寸，工具会逐个探测原图文件头
+      以取得真实分辨率，因此筛选越严格、耗时越长，这是准确性的必要代价。</p>
+    <p><b>关于部分站点抓不到</b>：有些站点用 Cloudflare / Anubis 等人机验证，或依赖 JS 动态渲染，
+      静态抓取会被拦截，工具会明确提示原因，而不是静默返回空结果。
+      需要登录的站点可在设置里配置 Cookies。</p>
+    <p><b>合规</b>：本工具仅供个人学习与备份用途。请勿用于侵犯版权、绕过付费墙或大规模抓取。
+      下载的内容版权归原作者与站点所有，请遵守目标站点服务条款与当地法律。</p>
+  </div>
+</section>
+
+</main>
+
+<!-- ============ 任务面板 ============ -->
+<div class="taskdock" id="taskDock">
+  <div class="taskdock-head" id="taskDockHead">
+    <span>下载任务 <b id="taskCount">0</b></span>
+    <div class="spacer"></div>
+    <button class="btn tiny ghost" id="btnClearTasks">清除已完成</button>
+    <button class="btn tiny ghost" id="btnToggleDock">收起</button>
+  </div>
+  <div class="taskdock-body" id="taskList"></div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+# 统一源码文件的行尾，避免在 Windows 上被工具改写成 CRLF 后产生「整文件都变了」的假 diff。
+# 实测教训：web/app.js 一次 15 行的真实改动，因行尾被写成 CRLF，
+# 在 diff 里表现为 1400+ 行增删，真实改动完全被淹没。
+*.py    text eol=lf
+*.js    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.txt   text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Windows 批处理必须保留 CRLF，否则可能无法执行
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 二进制/抓取样本不做行尾处理
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.mp4   binary
+*.exe   binary
