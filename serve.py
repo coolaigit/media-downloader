@@ -13,9 +13,14 @@ RESOURCE_ROOT 只读。chdir 已移除：`python serve.py` 时脚本目录
 自动位于 sys.path[0]，app 包导入不依赖当前工作目录；
 这里仍显式 insert 一次，保证任意路径调起都成立。
 
+1C（2026-10-01）：主体抽成 main()，供 launcher.py 复用；
+本文件保留 `python serve.py` 直启入口（打开工具.bat / WMI 不用改）。
+⚠️ `--internal` 分流不在这里 —— 统一由 launcher.py 处理，避免两个入口
+分流逻辑漂移；bat 若将来改指 launcher.py 也等价。
+
 注意：windowed frozen 下 sys.stdout 可能为 None / 坏句柄——本启动器
 在导入任何会碰 stdout 的模块之前就把 stdout/stderr 重定向到日志文件，
-因此天然规避（frozen 专项在阶段 1C 再验证 run.py 直启路径）。
+因此天然规避（frozen 专项在阶段 1C probe 验证）。
 
 用法：python serve.py   （由 打开工具.bat / WMI 调起）
 """
@@ -28,26 +33,30 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from app.config import DATA_ROOT  # noqa: E402
 
-LOG_DIR = DATA_ROOT / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)  # DATA_ROOT 可写，安全
+def main() -> None:
+    from app.config import DATA_ROOT
 
-crash_log = open(LOG_DIR / "service_crash.log", "w", buffering=1)
-faulthandler.enable(crash_log)
-sys.stdout = open(LOG_DIR / "service.out.log", "a", buffering=1)
-sys.stderr = open(LOG_DIR / "service.err.log", "a", buffering=1)
+    LOG_DIR = DATA_ROOT / "logs"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)  # DATA_ROOT 可写，安全
+
+    crash_log = open(LOG_DIR / "service_crash.log", "w", buffering=1)
+    faulthandler.enable(crash_log)
+    sys.stdout = open(LOG_DIR / "service.out.log", "a", buffering=1)
+    sys.stderr = open(LOG_DIR / "service.err.log", "a", buffering=1)
+
+    def _hook(exc_type, exc, tb):
+        import traceback
+        print(f"\n[{time.strftime('%m-%d %H:%M:%S')}] 未处理异常:", file=sys.stderr)
+        traceback.print_exception(exc_type, exc, tb, file=sys.stderr)
+
+    sys.excepthook = _hook
+    print(f"\n===== 服务启动 {time.strftime('%m-%d %H:%M:%S')} =====", flush=True)
+
+    import uvicorn  # noqa: E402
+
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8848, log_level="info")
 
 
-def _hook(exc_type, exc, tb):
-    import traceback
-    print(f"\n[{time.strftime('%m-%d %H:%M:%S')}] 未处理异常:", file=sys.stderr)
-    traceback.print_exception(exc_type, exc, tb, file=sys.stderr)
-
-
-sys.excepthook = _hook
-print(f"\n===== 服务启动 {time.strftime('%m-%d %H:%M:%S')} =====", flush=True)
-
-import uvicorn  # noqa: E402
-
-uvicorn.run("app.main:app", host="127.0.0.1", port=8848, log_level="info")
+if __name__ == "__main__":
+    main()

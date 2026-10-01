@@ -25,7 +25,7 @@ from .page_scanner import resolve_stream
 from .stream_downloader import stream_supported
 from .task_manager import manager
 from .video_downloader import ffmpeg_available, probe_video, search_videos
-from . import browser_profile, cookie_store, crawl_manager, store
+from . import browser_profile, cookie_store, crawl_manager, store, subproc
 
 # 「设置」里配的 cookies.txt 也要用于**网页抓取与浏览器渲染**，不只是 yt-dlp：
 # 需要登录的平台（Instagram 等）匿名访问只会返回登录墙，正文里没有任何内容 ——
@@ -262,6 +262,16 @@ def _settings() -> dict:
     return store.load()
 
 
+def _mediacrawler_status() -> dict:
+    """MediaCrawler 外部工具状态（1B.1）。失败不致命——状态如实降级，不影响 /api/status。"""
+    try:
+        from . import profile_sources
+        return profile_sources.status()
+    except Exception as e:  # noqa: BLE001
+        return {"found": False, "root": "", "python": "", "data_dir": "",
+                "reason": f"状态检测失败：{type(e).__name__}: {e}", "platforms": {}}
+
+
 # ---------- 状态 ----------
 
 @app.get("/api/status")
@@ -298,6 +308,9 @@ def api_status():
         "cookies": cookie_store.status(),
         # 登录态浏览器配置：让用户知道「抖音/小红书主页」这条路是否已具备前提
         "browser_profile": browser_profile.info(),
+        # MediaCrawler（外部工具）状态：设置页填 mediacrawler_root 后能立刻看到
+        # 找没找到 / 哪些平台有登录态（1B.1；Desktop Mode 专用，Server Mode 不暴露）
+        "mediacrawler": _mediacrawler_status(),
         "filter_options": FILTER_OPTIONS,
     }
 
@@ -468,13 +481,21 @@ def api_browser_login(payload: dict = Body(...)):
             store.save({"browser_user_data_dir": prof, "browser_headed": True})
     except Exception:  # noqa: BLE001
         pass
-    cmd = [sys.executable, "-m", "app.login_browser", url, "--dir", prof,
-           "--seconds", str(int(payload.get("seconds") or 900))]
+    # 1C：经统一 dispatcher 起 internal 子命令 —— frozen 下 sys.executable 是
+    # MediaDownloader.exe，不能再假设它是 python.exe；子进程边界保持不变
+    # （生命周期长、可独立终止，不改成进程内调用）。
+    # CREATE_NEW_PROCESS_GROUP：登录浏览器是用户交互进程，主服务退出时不随 Job
+    # 强杀（与旧 `-m` 行为一致），仅 Ctrl-C 组信号传播时可控。
+    cmd = subproc.build_internal_command(
+        "login-browser", url, "--dir", prof,
+        "--seconds", str(int(payload.get("seconds") or 900)))
     try:
         proc = subprocess.Popen(
-            cmd, cwd=str(ROOT),
+            cmd,
+            cwd=str(ROOT),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=subproc.child_env(),
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
     except Exception as e:  # noqa: BLE001
@@ -742,12 +763,22 @@ def api_set_settings(req: SettingsReq):
     old_mc = str(store.load().get("mediacrawler_root") or "").strip()
     data = store.save(patch)
     # mediacrawler_root 变了 → 立即失效外部工具的发现缓存，不用等 60 秒 TTL
+    mc_warning = ""
     if "mediacrawler_root" in patch and str(patch["mediacrawler_root"]).strip() != old_mc:
         try:
             from . import profile_sources
             profile_sources.invalidate_cache()
         except Exception:  # noqa: BLE001
             pass
+        # 1B.1：填了但目录无效 → 仅提示，不拒绝保存（用户可能先填后建目录），
+        # 也不崩溃 —— 无效时 find_mediacrawler 会自动回退到「自动发现」链路
+        mc = str(patch["mediacrawler_root"]).strip()
+        if mc:
+            mc_path = Path(mc)
+            if not mc_path.is_dir():
+                mc_warning = "该目录不存在，MediaCrawler 将回退到自动发现"
+            elif not (mc_path / "main.py").exists():
+                mc_warning = "目录里没有 main.py，MediaCrawler 将回退到自动发现"
     # 下载根目录由导入期常量 DOWNLOADS_DIR 消费，改了配置当前进程也不会跟着走 ——
     # 必须明确告诉前端「重启后才生效」，杜绝「显示已保存但仍在写旧目录」的静默分叉
     cfg_dd = str(data.get("downloads_dir") or "").strip()
@@ -757,7 +788,8 @@ def api_set_settings(req: SettingsReq):
             restart_required = Path(cfg_dd).resolve() != DOWNLOADS_DIR.resolve()
         except OSError:
             restart_required = True
-    return {"ok": True, "settings": data, "restart_required": restart_required}
+    return {"ok": True, "settings": data, "restart_required": restart_required,
+            "mediacrawler_warning": mc_warning}
 
 
 # ---------- 文件访问与代理 ----------

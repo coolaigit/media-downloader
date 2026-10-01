@@ -49,3 +49,4 @@ config.json
 gallery-dl/
 .workbuddy/
 .wbapp_*
+build-probe/

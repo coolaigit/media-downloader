@@ -43,7 +43,8 @@ from urllib.parse import urlparse
 
 import requests
 
-from .config import DATA_ROOT, RESOURCE_ROOT
+from .config import DATA_ROOT, FROZEN, RESOURCE_ROOT
+from . import subproc
 
 # URL 宿主 → MediaCrawler 平台短名（现成工具的平台键，不是解析规则）
 _HOST_TO_PLATFORM = {
@@ -260,10 +261,14 @@ def _check_root(root: Path) -> dict | None:
     # wrapper.py 由 MCP 维护（无头模式必需）；没有它也能跑 main.py，只是风控更严
     wrapper = root / "wrapper.py"
     py_env = os.environ.get("MEDIACRAWLER_PYTHON")
+    # ⚠️ 1C：frozen 下 sys.executable 是 MediaDownloader.exe，拿它跑 MediaCrawler
+    # 的 main.py 等于「用自己跑别人的脚本」—— 必须排除，只认外部解释器：
+    # MEDIACRAWLER_PYTHON > MediaCrawler 自己的 .venv > （源码模式才允许）当前解释器。
+    # 都没有时如实报「未找到」，宁可降级也不伪造（找不到的提示语见 find_mediacrawler）。
     for py in ([Path(py_env)] if py_env else []) + [
             root / ".venv" / "Scripts" / "python.exe",
             root / ".venv" / "bin" / "python",
-            Path(sys.executable)]:
+            *([] if FROZEN else [Path(sys.executable)])]:
         if py and Path(py).exists():
             data_env = os.environ.get("MEDIACRAWLER_DATA_DIR")
             sib = root.parent / "data"
@@ -614,9 +619,15 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
     # 要视频时必须扫更大的范围：画板/主页的文件是图和视频混排的，
     # 前 N 个文件可能全是图（实测 USKYLEDS/architecture 前 22 个全是图，
     # 视频 pin 混在后面）。只扫 limit 个会得出「没有视频」的错误结论。
+    # 要视频时必须扫更大的范围：画板/主页的文件是图和视频混排的，
+    # 前 N 个文件可能全是图（实测 USKYLEDS/architecture 前 22 个全是图，
+    # 视频 pin 混在后面）。只扫 limit 个会得出「没有视频」的错误结论。
     scan = max(int(limit) * 6, 120) if video_only else max(1, min(int(limit), 200))
-    argv = [sys.executable, "-m", "gallery_dl", "--dump-json",
-            "--range", f"1-{min(scan, 400)}"]
+    # 1C：经统一 dispatcher 调 gallery-dl（internal 子命令内部就是
+    # gallery_dl.main()，CLI 参数/退出码/输出语义 100% 保持）——
+    # frozen 下 sys.executable 是本程序 EXE，老的 `-m gallery_dl` 写法不成立
+    argv = subproc.build_internal_command("gallery-dl", "--dump-json",
+                                          "--range", f"1-{min(scan, 400)}")
     if cookie_file:
         argv += ["--cookies", cookie_file]
     argv += list(argv_extra or [])
@@ -628,6 +639,7 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
         # 父死子灭：同 MediaCrawler
         proc = run_bound(argv, timeout=timeout, stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         cwd=str(RESOURCE_ROOT),
                          env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     except subprocess.TimeoutExpired:
         return {"ok": False, "items": [], "login_required": False,
