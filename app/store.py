@@ -16,6 +16,9 @@ DEFAULTS = {
     "downloads_subdir_images": "images",
     "downloads_subdir_videos": "videos",
     "image_concurrency": 6,
+    # 流媒体（m3u8/mpd）下载并发：task_manager._run_streams 每次任务启动时
+    # 实时读取本设置 —— 改完立即生效，无需重启（2026-09-28 依用户反馈加并发）
+    "stream_concurrency": 4,
     "skip_existing": True,
     "allow_private_network": False,   # 默认拒绝内网地址（SSRF 防护）
     "cookies_file": "",               # Netscape 格式 cookies.txt，用于需要登录的站点
@@ -26,6 +29,13 @@ DEFAULTS = {
     # 是否显示浏览器窗口：实测无头模式打开抖音主页只会得到空壳，必须有头。
     "browser_headed": False,
     "video_quality_default": "best",
+    # 下载根目录：空 = 默认 %USERPROFILE%\Downloads\MediaDownloader。
+    # ⚠️ 消费点是 app.config 的 DOWNLOADS_DIR（导入期常量），改了要重启才生效，
+    # 端点层必须如实返回 restart_required，不能让用户以为立即生效。
+    "downloads_dir": "",
+    # MediaCrawler（外部工具）的安装根目录：空 = 自动发现（env/常见路径/有限扫描），
+    # 消费点 profile_sources._candidates_root（每次查找实时读，改完即生效）。
+    "mediacrawler_root": "",
 }
 
 _LOCK = threading.RLock()

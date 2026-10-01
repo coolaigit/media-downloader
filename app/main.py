@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -202,11 +203,20 @@ class SettingsReq(BaseModel):
     downloads_subdir_images: str | None = None
     downloads_subdir_videos: str | None = None
     image_concurrency: int | None = Field(default=None, ge=1, le=16)
+    # 流媒体下载并发（1-8）：task_manager._run_streams 每次任务启动实时读取，立即生效
+    stream_concurrency: int | None = Field(default=None, ge=1, le=8)
     skip_existing: bool | None = None
     allow_private_network: bool | None = None
     cookies_file: str | None = None
     cookies_from_browser: str | None = None
     video_quality_default: str | None = None
+    # 1B：以下字段前端一直在发，但此前不在模型里 —— Pydantic 静默丢弃，
+    # 造成「界面显示已保存、后端根本没接」的假成功，这里全部接通
+    browser_user_data_dir: str | None = Field(default=None, max_length=1000)
+    browser_headed: bool | None = None
+    # 下载根目录：导入期常量 DOWNLOADS_DIR 消费，改后需重启生效（端点如实返回）
+    downloads_dir: str | None = Field(default=None, max_length=1000)
+    mediacrawler_root: str | None = Field(default=None, max_length=1000)
 
 
 # ---------- 工具 ----------
@@ -265,12 +275,22 @@ def api_status():
     except OSError:
         free = None
     import yt_dlp
+    # 下载根目录改了配置但还没重启 → 前端要能看出来，否则「显示的目录」和
+    # 「实际下载到的目录」对不上，用户找不到文件（1B 验收专门盯这点）
+    cfg_dd = str(st.get("downloads_dir") or "").strip()
+    dd_pending = False
+    if cfg_dd:
+        try:
+            dd_pending = Path(cfg_dd).resolve() != DOWNLOADS_DIR.resolve()
+        except OSError:
+            dd_pending = True
     return {
         "ffmpeg_available": bool(ff),
         "ffmpeg_path": ff or "",
         "ffmpeg_version": ffmpeg_version(ff) or "",
         "ytdlp_version": yt_dlp.version.__version__,
         "downloads_dir": str(DOWNLOADS_DIR),
+        "downloads_dir_restart_pending": dd_pending,
         "disk_free_bytes": free,
         "settings": st,
         # 生效中的 cookies（条数/域名）：让用户能一眼看出「配了但没生效」
@@ -714,7 +734,30 @@ def api_get_settings():
 @app.post("/api/settings")
 def api_set_settings(req: SettingsReq):
     patch = {k: v for k, v in req.model_dump().items() if v is not None}
-    return {"ok": True, "settings": store.save(patch)}
+    # 下载根目录：留空 = 回到默认；填了必须是绝对路径（相对路径会让
+    # is_safe_download_path / /files 的目录安全校验语义变得不可预测）
+    dd = str(patch.get("downloads_dir") or "").strip()
+    if dd and not Path(dd).is_absolute():
+        raise HTTPException(400, "下载根目录必须是绝对路径（如 D:\\Downloads\\MediaDownloader）")
+    old_mc = str(store.load().get("mediacrawler_root") or "").strip()
+    data = store.save(patch)
+    # mediacrawler_root 变了 → 立即失效外部工具的发现缓存，不用等 60 秒 TTL
+    if "mediacrawler_root" in patch and str(patch["mediacrawler_root"]).strip() != old_mc:
+        try:
+            from . import profile_sources
+            profile_sources.invalidate_cache()
+        except Exception:  # noqa: BLE001
+            pass
+    # 下载根目录由导入期常量 DOWNLOADS_DIR 消费，改了配置当前进程也不会跟着走 ——
+    # 必须明确告诉前端「重启后才生效」，杜绝「显示已保存但仍在写旧目录」的静默分叉
+    cfg_dd = str(data.get("downloads_dir") or "").strip()
+    restart_required = False
+    if cfg_dd:
+        try:
+            restart_required = Path(cfg_dd).resolve() != DOWNLOADS_DIR.resolve()
+        except OSError:
+            restart_required = True
+    return {"ok": True, "settings": data, "restart_required": restart_required}
 
 
 # ---------- 文件访问与代理 ----------

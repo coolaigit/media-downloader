@@ -711,10 +711,13 @@
     <label>视频保存子目录
       <input type="text" id="sSubVideos" placeholder="videos">
     </label>
+    <label class="wide">下载根目录（留空 = 默认 %USERPROFILE%\Downloads\MediaDownloader；修改后需重启程序生效）
+      <input type="text" id="sDownloadsDir" placeholder="如 D:\Downloads\MediaDownloader">
+    </label>
     <label>图片并发数
       <input type="number" id="sConcurrency" min="1" max="16">
     </label>
-    <label>流媒体下载并发数
+    <label>流媒体下载并发数（1-8，下载 HLS/FLV 流时生效，立即生效）
       <input type="number" id="sStreamConcurrency" min="1" max="8">
     </label>
     <label>视频默认清晰度

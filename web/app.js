@@ -172,7 +172,8 @@ async function loadStatus() {
   $('sFfmpeg').textContent = statusInfo.ffmpeg_available
     ? (statusInfo.ffmpeg_version || '可用') : '缺失（视频需合并音视频时会失败）';
   $('sYtdlp').textContent = statusInfo.ytdlp_version;
-  $('sDownloads').textContent = statusInfo.downloads_dir;
+  $('sDownloads').textContent = statusInfo.downloads_dir
+    + (statusInfo.downloads_dir_restart_pending ? '（已改配置，重启程序后生效）' : '');
   $('sDisk').textContent = free ? humanSize(free) : '未知';
 }
 
@@ -1890,6 +1891,7 @@ function renderCookiesStat(ck) {
 function fillSettings(s) {
   $('sSubImages').value = s.downloads_subdir_images || 'images';
   $('sSubVideos').value = s.downloads_subdir_videos || 'videos';
+  $('sDownloadsDir').value = s.downloads_dir || '';
   $('sConcurrency').value = s.image_concurrency || 6;
   $('sStreamConcurrency').value = s.stream_concurrency || 4;
   $('sQuality').value = s.video_quality_default || 'best';
@@ -1919,6 +1921,7 @@ async function saveSettings() {
   const body = {
     downloads_subdir_images: $('sSubImages').value.trim(),
     downloads_subdir_videos: $('sSubVideos').value.trim(),
+    downloads_dir: $('sDownloadsDir').value.trim(),
     image_concurrency: parseInt($('sConcurrency').value, 10) || 6,
     stream_concurrency: parseInt($('sStreamConcurrency').value, 10) || 4,
     video_quality_default: $('sQuality').value,
@@ -1932,10 +1935,18 @@ async function saveSettings() {
   try {
     const r = await api('/api/settings', { method: 'POST', body });
     fillSettings(r.settings || body);
-    $('settingsMsg').textContent = '已保存';
-    $('settingsMsg').style.color = 'var(--ok)';
-    setTimeout(() => { $('settingsMsg').textContent = ''; }, 2500);
-    toast('设置已保存', 'ok');
+    // 下载根目录由启动时的常量消费：后端明确返回要不要重启，必须如实提示，
+    // 不能只显示「已保存」让用户以为当前进程已经写新目录
+    if (r.restart_required) {
+      $('settingsMsg').textContent = '已保存（下载根目录将在重启程序后生效）';
+      $('settingsMsg').style.color = 'var(--warn, #d80)';
+      toast('已保存；下载根目录重启程序后生效', 'ok');
+    } else {
+      $('settingsMsg').textContent = '已保存';
+      $('settingsMsg').style.color = 'var(--ok)';
+      toast('设置已保存', 'ok');
+    }
+    setTimeout(() => { $('settingsMsg').textContent = ''; }, 4000);
     loadStatus();
   } catch (e) {
     $('settingsMsg').textContent = '保存失败：' + e.message;

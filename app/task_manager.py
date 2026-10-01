@@ -294,8 +294,8 @@ class TaskManager:
     ) -> str:
         """提交流媒体（m3u8/mpd）下载任务：items = [{url, referer, title}]。
 
-        串行执行：ffmpeg 拉流本身就能占满带宽，并发只会互相拖慢，
-        而且多数站点对同 IP 的多路拉流有限流。
+        并发执行：具体路数由 _run_streams 每次启动时从设置
+        （stream_concurrency，默认 4，1-8）实时读取 —— 设置页改完立即生效。
         """
         out = _resolve_output(output_subdir)
         task = Task(

@@ -273,6 +273,12 @@ def _check_root(root: Path) -> dict | None:
     return None
 
 
+def invalidate_cache() -> None:
+    """设置里改了 mediacrawler_root 后调用：下一次查找立即重扫，不等 SEARCH_TTL。"""
+    global _search_cache
+    _search_cache = None
+
+
 def find_mediacrawler(force: bool = False) -> dict:
     """定位 MediaCrawler（带缓存）。返回 {found, root, python, data_dir, wrapper, reason}。"""
     global _search_cache
