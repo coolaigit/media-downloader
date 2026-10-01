@@ -1,0 +1,24 @@
+# ============================================================
+# MediaDownloader 运行时直接依赖（人工维护）
+# 生成 lock：.venv-build\Scripts\python.exe -m pip freeze > requirements.lock.txt
+# 安装：    .venv-build\Scripts\python.exe -m pip install -r requirements.in
+# 原则：只收生产链路真实 import 的包；版本 = 本机已验证基线，不追新。
+# ============================================================
+
+# ---- 运行必需 ----
+fastapi==0.141.1
+uvicorn==0.52.4
+requests==2.34.2
+beautifulsoup4==4.15.0
+lxml==6.1.1              # bs4 解析器（page_scanner.py "lxml"）
+pillow==12.3.0           # 图片宽高探测
+yt-dlp==2026.7.4
+pydantic==2.13.4
+
+# ---- Desktop 可选能力 ----
+playwright==1.62.0       # JS 页渲染兜底 + 登录浏览器（复用系统 Chrome/Edge，不打包浏览器）
+gallery-dl==1.32.13      # 单页作品列表提取（internal 子命令）
+ddgs==9.16.0             # DuckDuckGo 备用搜图（缺失时如实降级）
+
+# ---- 构建（仅构建期，不属运行时） ----
+pyinstaller==6.22.2

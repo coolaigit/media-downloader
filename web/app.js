@@ -171,6 +171,10 @@ async function loadStatus() {
 
   $('sFfmpeg').textContent = statusInfo.ffmpeg_available
     ? (statusInfo.ffmpeg_version || '可用') : '缺失（视频需合并音视频时会失败）';
+  // 1E：JS runtime 状态如实显示（yt-dlp 解 YouTube 需要；缺失时部分功能降级）
+  const js = statusInfo.js_runtime;
+  $('sJsRuntime').textContent = js ? (js.name + ' 可用') : '未找到（YouTube 等部分视频可能解析失败）';
+  $('sJsRuntime').style.color = js ? 'var(--ok)' : 'var(--warn, #d80)';
   $('sYtdlp').textContent = statusInfo.ytdlp_version;
   $('sDownloads').textContent = statusInfo.downloads_dir
     + (statusInfo.downloads_dir_restart_pending ? '（已改配置，重启程序后生效）' : '');

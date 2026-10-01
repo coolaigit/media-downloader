@@ -1,0 +1,15 @@
+{
+  "downloads_subdir_images": "images",
+  "downloads_subdir_videos": "videos",
+  "image_concurrency": 6,
+  "stream_concurrency": 4,
+  "skip_existing": true,
+  "allow_private_network": false,
+  "cookies_file": "",
+  "cookies_from_browser": "",
+  "browser_user_data_dir": "",
+  "browser_headed": false,
+  "video_quality_default": "best",
+  "downloads_dir": "",
+  "mediacrawler_root": ""
+}

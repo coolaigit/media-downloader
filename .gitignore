@@ -50,3 +50,9 @@ gallery-dl/
 .workbuddy/
 .wbapp_*
 build-probe/
+
+# 1E：构建环境与产物
+dist/
+build/
+.venv-build/
+config.json

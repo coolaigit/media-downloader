@@ -166,14 +166,22 @@ def find_js_runtime() -> tuple[str, str] | None:
             if hit:
                 return name, hit
 
-    # PATH 里没有时，找几个常见安装位置（含 WorkBuddy 托管的 node）
+    # PATH 里没有时，找几个常见安装位置。
+    # ⚠️ 1E 策略：WorkBuddy 托管 node 只是【源码开发机】的便利候选，
+    # frozen 发布版绝不能把它当隐性发布依赖（开发机找得到、用户机器没有，
+    # YouTube 就会「开发时正常、发布后 403」）—— FROZEN 下跳过。
+    # 发布版只认：用户 PATH 里的 deno/node/quickjs/bun + Node.js 官方安装位置。
+    # 找不到时 YouTube 等部分功能明确降级（/api/status 会显示 js_runtime 状态）。
     patterns = [
         r"E:\nodejs\node.exe",
         r"C:\Program Files\nodejs\node.exe",
         r"C:\Program Files (x86)\nodejs\node.exe",
         r"%LOCALAPPDATA%\Programs\nodejs\node.exe",
-        r"C:\Users\*\AppData\Roaming\npm\..\..\.workbuddy\binaries\node\versions\*\node.exe",
     ]
+    if not FROZEN:
+        patterns.append(
+            r"C:\Users\*\AppData\Roaming\npm\..\..\.workbuddy\binaries\node\versions\*\node.exe"
+        )
     for pat in patterns:
         p = os.path.expandvars(pat)
         for hit in ([p] if os.path.sep in p and "*" not in p else _glob.glob(p)):

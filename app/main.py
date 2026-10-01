@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import DOWNLOADS_DIR, HEADERS, ROOT, WEB_DIR, ffmpeg_version, find_ffmpeg
+from .config import DOWNLOADS_DIR, HEADERS, ROOT, WEB_DIR, ffmpeg_version, find_ffmpeg, find_js_runtime
 from .image_search import FILTER_OPTIONS, search_images
 from .page_scanner import resolve_stream
 from .stream_downloader import stream_supported
@@ -278,6 +278,7 @@ def _mediacrawler_status() -> dict:
 def api_status():
     """环境与依赖状态：ffmpeg、yt-dlp 版本、下载目录、磁盘空间。"""
     ff = find_ffmpeg()
+    js = find_js_runtime()
     st = _settings()
     free = None
     try:
@@ -298,6 +299,8 @@ def api_status():
         "ffmpeg_available": bool(ff),
         "ffmpeg_path": ff or "",
         "ffmpeg_version": ffmpeg_version(ff) or "",
+        # 1E：JS runtime 状态如实暴露（yt-dlp 解 YouTube 需要；没有时部分功能降级）
+        "js_runtime": {"name": js[0], "path": js[1]} if js else None,
         "ytdlp_version": yt_dlp.version.__version__,
         "downloads_dir": str(DOWNLOADS_DIR),
         "downloads_dir_restart_pending": dd_pending,
