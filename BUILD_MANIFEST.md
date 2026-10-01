@@ -2,6 +2,27 @@
 
 > 每次正式发布前更新本文件。构建必须用隔离 venv，禁止裸 python/pip。
 
+## Installer RC（1F，2026-10-01/02）
+
+| 项 | 值 |
+|---|---|
+| 安装器脚本 | `installer\MediaDownloader.iss`（Inno 只装 `dist\MediaDownloader\*`，不弥补 RC 缺文件） |
+| Inno Setup | **6.7.3**（`C:\Program Files (x86)\Inno Setup 6\ISCC.exe`，本机已有，未重装） |
+| 固定 AppId | `{3A40E79A-76F4-4EEA-B328-5D122EFE7F5F}`（生成一次后固化；**升级版本必须沿用，禁止重新生成**） |
+| Installer 文件名 | `MediaDownloader-Setup-1.0.0-RC.exe` |
+| Installer 大小 | 84,628,337 B（≈80.7 MB；onedir 265 MB，Compression=lzma2 + SolidCompression=yes，无 UPX/无裁剪） |
+| Installer SHA256 | `ef85329557177bfaebf7885d6c8a4c5ddf57f64dfda1826230974e154267ced4` |
+| 权限/安装位置 | `PrivilegesRequired=admin`；`ArchitecturesInstallIn64BitMode=x64compatible`（**必须**，否则 {autopf} 落到 Program Files (x86)——首构建实测踩坑已卸载重装）；默认 `{autopf}\MediaDownloader` = `C:\Program Files\MediaDownloader` |
+| 快捷方式 | 开始菜单始终创建；桌面图标 = 可选任务 `desktopicon` **默认不勾选**；无自启/计划任务/Run 注册表 |
+| 运行中升级 | `CloseApplications=yes`（Restart Manager 标准机制检测占用并提示关闭；无 taskkill）。实测：应用运行中覆盖安装，Restart Manager 干净关闭实例，安装器退出码 0 |
+| 覆盖安装 | `[InstallDelete]` 仅 `{app}\*`（旧程序文件清理，运行数据已不在 {app}，安全）。实测：config.json sha256/mtime 逐字节不变、卸载项唯一、383 文件完整 |
+| 卸载行为 | 默认只删 `{app}`；**绝不删** `%LOCALAPPDATA%\MediaDownloader` 与 `%USERPROFILE%\Downloads\MediaDownloader`。实测 7 项数据保留全过；重装后原 config 直接可读。⚠️ 已知外观级残留：卸载后偶余**空目录壳**（0 文件，非提权 shell 删不掉，无功能影响） |
+| 敏感扫描 | 安装后目录 + RC2 dist 全量内容扫描 8 类关键词，命中 **0**（"admin" 既有误报同 RC2 记录） |
+| Code signing | **pending**（安装器未签名，交互安装会出现 Unknown Publisher，属当前预期） |
+| Publisher | **pending**（AppPublisher 故意留空，正式发布前由用户定案） |
+| 项目 License | **pending**（不设 LicenseFile；`LICENSE-TODO.md` 保留；第三方声明随包：THIRD_PARTY_NOTICES.txt + licenses\ + FFMPEG_DISTRIBUTION_NOTES.md） |
+| 安装验收 | 安装后核心 25 项全过（脚本 `_test_1f.py`，含 YouTube metadata + 474KB 实际下载、login-browser、bundled Node、ffmpeg、gallery-dl 1.32.13、PF 零运行时写入）；卸载硬门禁 7/7 |
+
 ## RC2（1E.2，2026-10-01）
 
 | 项 | 值 |
@@ -11,7 +32,7 @@
 | 构建解释器 | `.venv-build\Scripts\python.exe`（源自 `C:\Python314\python.exe` 3.14.6） |
 | PyInstaller | 6.22.2（onedir + windowed；排错版 `MD_SPEC_CONSOLE=1` 同 spec） |
 | spec | `MediaDownloader.spec`（入口 `launcher.py`，SPECPATH 计算路径；含 version resource + icon） |
-| 构建命令 | `.venv-build\Scripts\python.exe -m PyInstaller --noconfirm MediaDownloader.spec`<br>后处理：复制 `licenses\`、`THIRD_PARTY_NOTICES.txt` 到 `dist\MediaDownloader\` 根 |
+| 构建命令 | `.venv-build\Scripts\python.exe -m PyInstaller --noconfirm MediaDownloader.spec`<br>后处理：复制 `licenses\`、`THIRD_PARTY_NOTICES.txt`、`FFMPEG_DISTRIBUTION_NOTES.md` 到 `dist\MediaDownloader\` 根（1F 起ffmpeg notes 纳入根目录清单；此前只在 `_internal\licenses\`，已补齐——安装包输入源=RC2 整体，Inno 不单独补文件） |
 | 依赖 lock | `requirements.lock.txt`（40 项），SHA256 `93e40dcc3089447a370f61ee227f08d978937e4b0c97bea642bb2e73b47c0795` |
 | EXE VersionInfo | FileDescription/ProductName=MediaDownloader · FileVersion=1.0.0.0 · ProductVersion=1.0.0 · OriginalFilename=MediaDownloader.exe · CompanyName/版权留空（**Publisher 待用户确认**） |
 | Icon | `app_icon.ico`（PIL 程序生成，项目自有、版权清晰） |
