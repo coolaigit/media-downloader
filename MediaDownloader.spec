@@ -44,13 +44,18 @@ datas += [
 ]
 
 # ---- 懒加载模块必须显式收集 ----
+# 本地 app 包不能依赖 collect_submodules("app")：spec 评估阶段的 sys.path
+# 与 Analysis.pathex 生效阶段不同，实测它可能返回空/错误包，导致 app.main 未进 PYZ，
+# Frozen 启动即 “Could not import module app.main”。直接按项目文件枚举最可靠。
+_app_hidden = ["app"] + [
+    f"app.{p.stem}" for p in sorted((SPEC_DIR / "app").glob("*.py"))
+    if p.name != "__init__.py"
+]
 hiddenimports = (
     collect_submodules("gallery_dl")          # gallery-dl 按字符串懒加载 extractor/*.py
-    + collect_submodules("yt_dlp.extractor")  # yt-dlp 同理（提取器几百个，按名动态 import）
-    + collect_submodules("app")               # ⚠️ app.main 只被 uvicorn 以 "app.main:app"
-                                              # 字符串引用，静态分析链抓不到 —— 必须
-                                              # 显式收集整个 app 包（1E 首构建实证：
-                                              # 缺了它启动即 Could not import module）
+    + collect_submodules("xhshow")            # 小红书签名库
+    + collect_submodules("yt_dlp.extractor")  # yt-dlp 同理
+    + _app_hidden
 )
 
 a = Analysis(

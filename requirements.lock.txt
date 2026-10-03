@@ -20,6 +20,7 @@ pefile==2024.8.26
 pillow==12.3.0
 playwright==1.62.0
 primp==2.0.1
+pycryptodome==3.23.0
 pycryptodomex==3.23.0
 pydantic==2.13.4
 pydantic_core==2.46.4
@@ -36,5 +37,6 @@ typing_extensions==4.16.0
 urllib3==2.8.0
 uvicorn==0.52.4
 websockets==17.1
+xhshow==0.2.0
 yt-dlp==2026.7.4
 yt-dlp-ejs==0.8.0

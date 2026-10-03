@@ -136,6 +136,18 @@ def main(port: int | None = None, open_browser: bool | None = None) -> int:
 
     import uvicorn  # noqa: E402
 
+    # Frozen 启动前先显式导入一次：若某个打包依赖缺失，uvicorn 的字符串导入
+    # 只会留下 “Could not import module app.main”，看不到真正缺哪个模块。
+    # 显式 import 不改变运行语义（uvicorn 后续命中 sys.modules 缓存），但能把
+    # 完整 traceback 落进 service.err.log，便于发布构建自证。
+    try:
+        __import__("app.main")
+    except Exception:  # noqa: BLE001
+        import traceback
+        print("[startup] import app.main failed:", file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
+        return 3
+
     uvicorn.run("app.main:app", host="127.0.0.1", port=p, log_level="info")
     return 0
 

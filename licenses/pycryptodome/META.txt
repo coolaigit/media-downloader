@@ -1,0 +1,5 @@
+Package: pycryptodome
+Version: 3.23.0
+License: BSD 2-Clause / Public Domain
+Source: https://github.com/Legrandin/pycryptodome
+Distribution: PyPI wheel pycryptodome-3.23.0

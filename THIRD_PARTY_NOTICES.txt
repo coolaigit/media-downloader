@@ -20,6 +20,7 @@ Python 库（PyInstaller 打包）
 ------------------------------
 
 gallery-dl        1.32.13     GPL-2.0-only        ⚠️ GPL：源码见 https://github.com/mikf/gallery-dl (v1.32.13)
+xhshow            0.2.0       MIT                 https://github.com/cloxl/xhshow
 mutagen           1.48.1      GPL-2.0-or-later    ⚠️ GPL：源码见 https://github.com/quodlibet/mutagen (v1.48.1)
 yt-dlp            2026.7.4    Unlicense           https://github.com/yt-dlp/yt-dlp
 yt-dlp-ejs        0.8.0       Unlicense AND MIT AND ISC
@@ -50,6 +51,7 @@ pillow            12.3.0      MIT-CMU
 ddgs              9.16.0      MIT
 websockets        17.1        BSD-3-Clause
 brotli            1.2.0       MIT
+pycryptodome      3.23.0      BSD-2-Clause / Public Domain
 pycryptodomex     3.23.0      BSD / Public Domain
 
 GPL 组件的源码提供说明

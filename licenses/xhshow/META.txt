@@ -1,0 +1,5 @@
+Package: xhshow
+Version: 0.2.0
+License: MIT
+Source: https://github.com/cloxl/xhshow
+Distribution: PyPI wheel xhshow-0.2.0

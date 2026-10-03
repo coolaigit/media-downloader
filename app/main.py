@@ -19,13 +19,13 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import DOWNLOADS_DIR, HEADERS, ROOT, WEB_DIR, ffmpeg_version, find_ffmpeg, find_js_runtime
+from .config import DATA_ROOT, DOWNLOADS_DIR, HEADERS, ROOT, WEB_DIR, ffmpeg_version, find_ffmpeg, find_js_runtime
 from .image_search import FILTER_OPTIONS, search_images
 from .page_scanner import resolve_stream
 from .stream_downloader import stream_supported
 from .task_manager import manager
 from .video_downloader import ffmpeg_available, probe_video, search_videos
-from . import browser_profile, cookie_store, crawl_manager, store, subproc
+from . import browser_profile, cookie_store, crawl_manager, profile_sources, store, subproc
 
 # 「设置」里配的 cookies.txt 也要用于**网页抓取与浏览器渲染**，不只是 yt-dlp：
 # 需要登录的平台（Instagram 等）匿名访问只会返回登录墙，正文里没有任何内容 ——
@@ -39,6 +39,32 @@ browser_profile.set_provider(lambda: {
 })
 
 app = FastAPI(title="媒体下载工具", version="1.0.0")
+
+
+def _is_instagram_url(url: str) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return host == "instagram.com" or host.endswith(".instagram.com")
+
+
+def _is_xhs_url(url: str) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return host == "xiaohongshu.com" or host.endswith(".xiaohongshu.com")
+
+
+def _cookie_args_for_url(url: str, settings: dict) -> tuple[str | None, str | None]:
+    if _is_instagram_url(url):
+        p = DATA_ROOT / "site_profiles" / "cookies_from_profile.txt"
+        if p.exists():
+            return str(p), None
+        # 兼容旧版本留下的共享登录 profile：只读已经导出的 Netscape 文件，
+        # 不再直接碰 Chrome Cookie 数据库。
+        prof = browser_profile.user_data_dir()
+        if prof:
+            exported = Path(prof).resolve().parent / "cookies_from_profile.txt"
+            if exported.exists():
+                return str(exported), None
+        return None, None
+    return settings.get("cookies_file") or None, settings.get("cookies_from_browser") or None
 
 
 @app.on_event("startup")
@@ -472,15 +498,19 @@ def api_browser_login(payload: dict = Body(...)):
     # 登录目录的优先级：请求里指定 > 「设置」里已配置的登录态目录 > 默认目录。
     # ⚠️ 必须优先用**已配置的**目录：抓取时用的就是它（browser_profile.user_data_dir）。
     # 如果登录写到别的目录，就会出现「登录了但抓取没生效」——实测最容易踩的坑。
-    prof = (str(payload.get("dir") or "").strip()
-            or browser_profile.user_data_dir()
-            or browser_profile.default_login_dir())
+    if _is_instagram_url(url):
+        # Instagram 独立 profile：不再复用当前指向小红书 MediaCrawler 的 profile。
+        prof = str(DATA_ROOT / "site_profiles" / "instagram")
+    else:
+        prof = (str(payload.get("dir") or "").strip()
+                or browser_profile.user_data_dir()
+                or browser_profile.default_login_dir())
     Path(prof).mkdir(parents=True, exist_ok=True)
     # 关键联动：如果设置里还没配「登录态浏览器配置目录」，就把这次登录用的目录写进设置 ——
     # 否则会出现「登录了但不生效」（渲染仍用干净浏览器），实测这是最容易踩的坑。
     try:
         cur = str(store.load().get("browser_user_data_dir") or "").strip()
-        if not cur:
+        if not cur and not _is_instagram_url(url):
             store.save({"browser_user_data_dir": prof, "browser_headed": True})
     except Exception:  # noqa: BLE001
         pass
@@ -569,12 +599,38 @@ def api_video_probe(req: VideoProbeReq):
     if not settings.get("allow_private_network") and _is_private_url(req.url):
         raise HTTPException(403, "已拒绝内网地址")
     try:
-        res = probe_video(
-            req.url.strip(),
-            include_playlist=req.include_playlist,
-            cookies_file=settings.get("cookies_file") or None,
-            cookies_from_browser=settings.get("cookies_from_browser") or None,
-        )
+        url = req.url.strip()
+        if _is_xhs_url(url):
+            xr = profile_sources.xhs_detail_item(url)
+            if not xr.get("ok"):
+                return {"ok": False, "error": xr.get("error") or "小红书解析失败", "url": url}
+            item = xr["item"]
+            res = probe_video(item["direct_url"], include_playlist=False)
+            if res.get("ok"):
+                res["title"] = item.get("title") or res.get("title") or ""
+                res["thumbnail"] = item.get("cover") or res.get("thumbnail") or ""
+                res["webpage_url"] = url
+                res["extractor"] = "XHS/" + str(xr.get("source") or "signed")
+        else:
+            ck_file, ck_browser = _cookie_args_for_url(url, settings)
+            res = probe_video(
+                url,
+                include_playlist=req.include_playlist,
+                cookies_file=ck_file,
+                cookies_from_browser=ck_browser,
+            )
+            if _is_instagram_url(url) and (not res.get("ok") or not res.get("thumbnail")):
+                gd = profile_sources.gallery_dl_items(url, limit=1, video_only=True, retries=1)
+                if gd.get("ok") and gd.get("items"):
+                    gi = gd["items"][0]
+                    if not res.get("ok") and gi.get("direct_url"):
+                        res = probe_video(gi["direct_url"], include_playlist=False)
+                        if res.get("ok"):
+                            res["webpage_url"] = url
+                            res["extractor"] = "gallery-dl/Instagram"
+                    if res.get("ok"):
+                        res["thumbnail"] = res.get("thumbnail") or gi.get("cover") or ""
+                        res["title"] = res.get("title") or gi.get("title") or ""
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"解析失败: {type(e).__name__}: {e}")
     if not res.get("ok"):
@@ -661,18 +717,28 @@ def api_download_video(req: DownloadVideoReq):
     if not ffmpeg_available() and req.quality in ("best", ""):
         # 无 ffmpeg 时「最佳画质」通常需要合并分离流，提前告知
         pass
+    download_url = req.url.strip()
+    download_title = req.title
+    if _is_xhs_url(download_url):
+        xr = profile_sources.xhs_detail_item(download_url)
+        if not xr.get("ok"):
+            raise HTTPException(400, xr.get("error") or "小红书解析失败")
+        item = xr["item"]
+        download_url = item["direct_url"]
+        download_title = download_title or item.get("title") or ""
+    ck_file, ck_browser = _cookie_args_for_url(req.url.strip(), st)
     tid = manager.submit_video(
-        req.url.strip(),
+        download_url,
         output_subdir=req.subdir or st.get("downloads_subdir_videos", "videos"),
-        title=req.title,
+        title=download_title,
         quality=req.quality,
         container=req.container,
         prefer_audio_only=req.prefer_audio_only,
         write_subtitles=req.write_subtitles,
         subtitle_langs=req.subtitle_langs,
         include_playlist=req.include_playlist,
-        cookies_file=st.get("cookies_file") or "",
-        cookies_from_browser=st.get("cookies_from_browser") or "",
+        cookies_file=ck_file or "",
+        cookies_from_browser=ck_browser or "",
         rate_limit=req.rate_limit,
         format_id=req.format_id,
     )
@@ -699,6 +765,10 @@ def api_download_videos(req: DownloadVideosReq):
     if not items:
         raise HTTPException(400, "没有可下载的地址")
 
+    batch_ck_file = st.get("cookies_file") or ""
+    batch_ck_browser = st.get("cookies_from_browser") or ""
+    if items and all(_is_instagram_url(x["url"]) for x in items):
+        batch_ck_file, batch_ck_browser = _cookie_args_for_url(items[0]["url"], st)
     tids = manager.submit_videos(
         items,
         output_subdir=req.subdir or st.get("downloads_subdir_videos", "videos"),
@@ -706,8 +776,8 @@ def api_download_videos(req: DownloadVideosReq):
         container=req.container,
         include_playlist=req.include_playlist,
         concurrency=req.concurrency,
-        cookies_file=st.get("cookies_file") or "",
-        cookies_from_browser=st.get("cookies_from_browser") or "",
+        cookies_file=batch_ck_file or "",
+        cookies_from_browser=batch_ck_browser or "",
     )
     return {"count": len(tids), "task_ids": tids,
             "concurrency": manager.video_concurrency(),

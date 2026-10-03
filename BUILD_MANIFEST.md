@@ -10,8 +10,8 @@
 | Inno Setup | **6.7.3**（`C:\Program Files (x86)\Inno Setup 6\ISCC.exe`，本机已有，未重装） |
 | 固定 AppId | `{3A40E79A-76F4-4EEA-B328-5D122EFE7F5F}`（生成一次后固化；**升级版本必须沿用，禁止重新生成**） |
 | Installer 文件名 | `MediaDownloader-Setup-1.0.0-RC.exe` |
-| Installer 大小 | 84,628,337 B（≈80.7 MB；onedir 265 MB，Compression=lzma2 + SolidCompression=yes，无 UPX/无裁剪） |
-| Installer SHA256 | `ef85329557177bfaebf7885d6c8a4c5ddf57f64dfda1826230974e154267ced4` |
+| Installer 大小 | 84,955,980 B（≈81.0 MB；onedir 265.3 MiB，Compression=lzma2 + SolidCompression=yes，无 UPX/无裁剪） |
+| Installer SHA256 | `3ce535d2e62104c426475673fd7504f948f17fcc72aea14ce936fd7ed9460929` |
 | 权限/安装位置 | `PrivilegesRequired=admin`；`ArchitecturesInstallIn64BitMode=x64compatible`（**必须**，否则 {autopf} 落到 Program Files (x86)——首构建实测踩坑已卸载重装）；默认 `{autopf}\MediaDownloader` = `C:\Program Files\MediaDownloader` |
 | 快捷方式 | 开始菜单始终创建；桌面图标 = 可选任务 `desktopicon` **默认不勾选**；无自启/计划任务/Run 注册表 |
 | 运行中升级 | `CloseApplications=yes`（Restart Manager 标准机制检测占用并提示关闭；无 taskkill）。实测：应用运行中覆盖安装，Restart Manager 干净关闭实例，安装器退出码 0 |
@@ -23,6 +23,21 @@
 | 项目 License | **pending**（不设 LicenseFile；`LICENSE-TODO.md` 保留；第三方声明随包：THIRD_PARTY_NOTICES.txt + licenses\ + FFMPEG_DISTRIBUTION_NOTES.md） |
 | 安装验收 | 安装后核心 25 项全过（脚本 `_test_1f.py`，含 YouTube metadata + 474KB 实际下载、login-browser、bundled Node、ffmpeg、gallery-dl 1.32.13、PF 零运行时写入）；卸载硬门禁 7/7 |
 
+## Instagram / 小红书修复 RC（2026-10-03）
+
+| 项 | 结果 |
+|---|---|
+| Instagram 批量 | Frozen 实测主页 `lis_manyonok`：21 秒返回 3 条 Reel，条目封面存在；gallery-dl + 登录 cookies |
+| Instagram 单条 | Frozen/安装版实测 `C5WtxeLIS1R`：`ok=true`、5 个格式、thumbnail=true；实际下载 19,712,828 B MP4 |
+| 小红书批量 | Frozen 实测主页：3.5 秒返回 4 条视频，条目封面存在；xhshow 主路径，MediaCrawler 登录态回退 |
+| 小红书单条 | Frozen/安装版实测：`ok=true`、thumbnail=true、`XHS/xhshow`；实际下载 3,858,365 B MP4 |
+| 其它平台回归 | `test_profile_tools` 59/59、cookies 20/20、video search 116/116；quality/download fallback/variant/render gate 全 PASS |
+| Frozen 修复 | spec 改为直接枚举 `app/*.py` hidden imports，解决 `app.main` 未进入 PYZ 的发布级问题 |
+| EXE | SHA256 `20e84f7d3f8d3da77994412f59843e20cbb4613c0f375d7e1da19ecd6c14d52a`，18,822,212 B |
+| 依赖 lock | 42 项；SHA256 `ea94bcefdf613fea716366ea101a82e7425b23b6be84dd80a1b3cc594c9b2f1a` |
+| Installer | 84,955,980 B；SHA256 `3ce535d2e62104c426475673fd7504f948f17fcc72aea14ce936fd7ed9460929` |
+| 本机升级 | `D:\MediaDownloader` 覆盖安装 exit=0；config SHA256 不变；原 23 个下载文件保留；安装 EXE 与 RC 哈希一致 |
+
 ## RC2（1E.2，2026-10-01）
 
 | 项 | 值 |
@@ -33,11 +48,11 @@
 | PyInstaller | 6.22.2（onedir + windowed；排错版 `MD_SPEC_CONSOLE=1` 同 spec） |
 | spec | `MediaDownloader.spec`（入口 `launcher.py`，SPECPATH 计算路径；含 version resource + icon） |
 | 构建命令 | `.venv-build\Scripts\python.exe -m PyInstaller --noconfirm MediaDownloader.spec`<br>后处理：复制 `licenses\`、`THIRD_PARTY_NOTICES.txt`、`FFMPEG_DISTRIBUTION_NOTES.md` 到 `dist\MediaDownloader\` 根（1F 起ffmpeg notes 纳入根目录清单；此前只在 `_internal\licenses\`，已补齐——安装包输入源=RC2 整体，Inno 不单独补文件） |
-| 依赖 lock | `requirements.lock.txt`（40 项），SHA256 `93e40dcc3089447a370f61ee227f08d978937e4b0c97bea642bb2e73b47c0795` |
+| 依赖 lock | `requirements.lock.txt`（42 项），SHA256 `ea94bcefdf613fea716366ea101a82e7425b23b6be84dd80a1b3cc594c9b2f1a` |
 | EXE VersionInfo | FileDescription/ProductName=MediaDownloader · FileVersion=1.0.0.0 · ProductVersion=1.0.0 · OriginalFilename=MediaDownloader.exe · CompanyName/版权留空（**Publisher 待用户确认**） |
 | Icon | `app_icon.ico`（PIL 程序生成，项目自有、版权清晰） |
-| EXE SHA256 | `1a5a1eeac752a3ed56a29ad4e10b947840a2c734e240eead3872b6d666ec0396`（18,472,313 B） |
-| 产物总大小 | `dist\MediaDownloader\` 265 MB（大头为 Playwright 驱动 node.exe + ffmpeg） |
+| EXE SHA256 | `20e84f7d3f8d3da77994412f59843e20cbb4613c0f375d7e1da19ecd6c14d52a`（18,822,212 B） |
+| 产物总大小 | `dist\MediaDownloader\` 278,204,309 B（约 265.3 MiB；大头为 Playwright 驱动 node.exe + ffmpeg） |
 | Code signing | **pending**（未签名，已知事实；正式发布前决定） |
 | 敏感扫描 | 文件名 13 类 + 文本内容 7 类模式，真实命中 **0**（唯一 "admin" 命中为 Playwright 驱动自带文档示例字符串，非本机用户名） |
 
@@ -47,7 +62,7 @@ fastapi 0.141.1 · uvicorn 0.52.4 · requests 2.34.2 · beautifulsoup4 4.15.0 ·
 lxml 6.1.1 · pillow 12.3.0 · **yt-dlp[default] 2026.7.4**（runtime：yt-dlp-ejs 0.8.0 /
 websockets 17.1 / brotli 1.2.0 / mutagen 1.48.1 / pycryptodomex 3.23.0 / certifi 2026.7.22）·
 pydantic 2.13.4 · playwright 1.62.0（pyee 13.0.1 / greenlet 3.5.6）·
-gallery_dl 1.32.13 · ddgs 9.16.0
+gallery_dl 1.32.13 · ddgs 9.16.0 · **xhshow 0.2.0**（XHS 签名）· pycryptodome 3.23.0
 
 `curl_cffi` 继续不装：yt-dlp 可选 extra（非 default），HTTP(S) 请求统一走
 requests/urllib3 handler，当前功能不需要；warn 文件中的 missing 属预期 optional。
@@ -70,8 +85,10 @@ probe/diag 产物 · build-probe/ · release-secrets · MediaCrawler 全项目 �
 
 ## 构建期实证教训（累计）
 
-1. `app.main` 仅被 uvicorn 以 `"app.main:app"` 字符串引用 → 必须
-   `collect_submodules("app")`（1E）。
+1. `app.main` 仅被 uvicorn 以 `"app.main:app"` 字符串引用。**不能只依赖**
+   `collect_submodules("app")`：spec 评估阶段的 `sys.path` 与 `Analysis.pathex`
+   生效阶段不同，2026-10-03 实测会导致 `app.main` 根本不进 PYZ。
+   当前 spec 直接枚举项目 `app/*.py` 生成 hidden imports；Frozen 启动已复验 PASS。
 2. **RC2 首构建**：`win_job.reap_orphan_ffmpeg` 用 `text=True` 读 PowerShell
    （Get-CimInstance 全系统进程表，输出含中文进程名 GBK 字节）→ utf-8 读取线程
    UnicodeDecodeError 死亡 → communicate() 永久挂起 → startup 事件卡死 →

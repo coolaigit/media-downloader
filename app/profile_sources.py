@@ -466,7 +466,7 @@ def source_name(platform: str) -> str:
     return {
         "dy": "MediaCrawler", "ks": "MediaCrawler", "bili": "MediaCrawler",
         "wb": "MediaCrawler", "zhihu": "MediaCrawler",
-        "xhs": "xhshow 签名接口",
+        "xhs": "xhshow / MediaCrawler",
         "pin": "gallery-dl", "ig": "gallery-dl",
     }.get(platform, "外部来源")
 
@@ -547,6 +547,10 @@ def _candidate_cookie_files() -> list[str]:
     2. 登录助手导出的那份（跟登录态 profile 放在一起）
     """
     out: list[str] = []
+    # Instagram 使用 MediaDownloader 自己的独立登录态，避免和小红书/MediaCrawler profile 混用。
+    site_cookie = DATA_ROOT / "site_profiles" / "cookies_from_profile.txt"
+    if site_cookie.exists():
+        out.append(str(site_cookie))
     try:
         from . import store
         f = str(store.load().get("cookies_file") or "").strip()
@@ -631,7 +635,19 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
     if cookie_file:
         argv += ["--cookies", cookie_file]
     argv += list(argv_extra or [])
-    argv.append(url)
+    # gallery-dl 1.32.x 对 Instagram 用户根页只返回 kind=6 的队列跳转
+    # （<user>/ -> <user>/posts/），DataJob 不会替我们继续展开。只对纯用户主页
+    # 补 /posts/，reel/p/tv/stories 等单条链接保持原样。
+    run_url = url
+    try:
+        pu = urlparse(url)
+        host = (pu.hostname or "").lower()
+        segs = [x for x in (pu.path or "").split("/") if x]
+        if (host == "instagram.com" or host.endswith(".instagram.com")) and len(segs) == 1:
+            run_url = f"{pu.scheme or 'https'}://{pu.netloc}/{segs[0]}/posts/"
+    except Exception:
+        run_url = url
+    argv.append(run_url)
     if on_note:
         on_note("正在用 gallery-dl 读取该页的作品列表（成熟开源下载器，只取元数据不下载）…")
     try:
@@ -672,6 +688,12 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
             # Pinterest 的封面在 images.<尺寸>.url，优先高清档；没有就兜底找
             # 元数据里第一张 i.pinimg.com 的图（story pin 的封面埋得更深）。
             cover = ""
+            # Instagram/gallery-dl 常见字段；Pinterest 仍继续走下面原有 images 逻辑。
+            for k in ("display_url", "thumbnail", "preview_url", "image_url", "thumb"):
+                v = data.get(k)
+                if isinstance(v, str) and v.startswith("http"):
+                    cover = v
+                    break
             imgs = data.get("images")
             if isinstance(imgs, dict):
                 for pref in ("orig", "1200x", "736x", "600x", "474x"):
@@ -693,8 +715,29 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
                              or data.get("full_name") or data.get("username") or ""),
                    "cover": cover}
         elif kind == 3 and isinstance(data, str):
-            # 视频 pin 的地址带下载器前缀（实测：`ytdl:https://v1.pinimg.com/...m3u8`，
-            # gallery-dl 用它把这条交给 yt-dlp 解析）。剥掉前缀才是真实地址。
+            meta = pair[2] if len(pair) > 2 and isinstance(pair[2], dict) else {}
+            # Instagram 的 video 项是 ytdl:<作品页>/1.mp4：这是 gallery-dl 给 yt-dlp 的
+            # 交接标记，不是真实 MP4。必须还原为作品页，让我们自己的 yt-dlp + 登录态处理。
+            ytdl = re.match(r"^ytdl:(https?://.+)", data, re.I)
+            if ytdl and "instagram.com" in ytdl.group(1).lower():
+                page = (meta.get("post_url") or ytdl.group(1)).strip()
+                page = re.sub(r"/\d+\.mp4(?:\?.*)?$", "/", page)
+                key = "page:" + page
+                if page and key not in seen:
+                    seen.add(key)
+                    items.append({
+                        "page_url": page,
+                        "direct_url": "",
+                        "variants": [],
+                        "title": (meta.get("description") or meta.get("fullname") or
+                                  ctx.get("title") or "").strip()[:150],
+                        "cover": (meta.get("display_url") or ctx.get("cover") or "").strip(),
+                        "uploader": (meta.get("username") or "").strip(),
+                        "site": "instagram.com",
+                        "kind_hint": "video",
+                    })
+                continue
+            # Pinterest 等的 ytdl: 前缀后面是真实 HLS/媒体地址，保留原行为。
             m = re.match(r"^[a-z][a-z0-9_]*:(https?://.+)", data, re.I)
             data = m.group(1) if m else data
             if not data.startswith("http") or data in seen:
@@ -881,6 +924,177 @@ def xhs_author_items(url: str, *, limit: int = 30, timeout: int = 90,
     return {"ok": True, "items": items[:limit], "error": "", "login_required": False}
 
 
+def _xhs_signed_detail_item(url: str, *, timeout: int = 60) -> dict:
+    """用 xhshow + 已导出的登录 cookie 直接解析一条小红书笔记，不依赖 MediaCrawler。"""
+    try:
+        from xhshow import Xhshow
+        from urllib.parse import parse_qs
+    except ImportError:
+        return {"ok": False, "item": None, "error": "内置 xhshow 不可用"}
+
+    try:
+        pu = urlparse(url)
+        segs = [x for x in (pu.path or "").split("/") if x]
+        note_id = segs[-1] if segs else ""
+        qs = parse_qs(pu.query or "")
+        xsec_token = (qs.get("xsec_token") or [""])[0]
+        xsec_source = (qs.get("xsec_source") or ["pc_search"])[0] or "pc_search"
+    except Exception as e:
+        return {"ok": False, "item": None, "error": f"小红书地址解析失败：{e}"}
+    if not note_id or not xsec_token:
+        return {"ok": False, "item": None,
+                "error": "小红书单条链接缺少 xsec_token；请使用浏览器分享/地址栏中的完整链接。"}
+
+    ck, _ = _load_cookie_dict("xiaohongshu")
+    if not ck.get("web_session"):
+        return {"ok": False, "item": None,
+                "error": "小红书需要登录态。请在「设置」→「打开浏览器去登录」登录一次小红书。"}
+
+    endpoint = "https://edith.xiaohongshu.com/api/sns/web/v1/feed"
+    payload = {
+        "source_note_id": note_id,
+        "image_formats": ["jpg", "webp", "avif"],
+        "extra": {"need_body_topic": 1},
+        "xsec_source": xsec_source,
+        "xsec_token": xsec_token,
+    }
+    try:
+        headers = Xhshow().sign_headers_post(uri=endpoint, cookies=ck, payload=payload, x_rap=True)
+        headers.update({
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0 Safari/537.36",
+            "accept": "application/json, text/plain, */*",
+            "origin": "https://www.xiaohongshu.com",
+            "referer": url,
+        })
+        resp = None
+        last_exc = None
+        for trust in (True, False):
+            try:
+                with requests.Session() as sess:
+                    sess.trust_env = trust
+                    resp = sess.post(endpoint, json=payload, cookies=ck, headers=headers,
+                                     timeout=min(int(timeout), 30))
+                break
+            except requests.exceptions.RequestException as e:
+                last_exc = e
+        if resp is None:
+            raise last_exc or RuntimeError("请求失败")
+        data = resp.json()
+    except Exception as e:
+        return {"ok": False, "item": None, "error": f"小红书详情接口失败：{type(e).__name__}: {e}"}
+
+    if not data.get("success"):
+        code = data.get("code")
+        msg = (data.get("msg") or "")[:100]
+        return {"ok": False, "item": None,
+                "error": f"小红书详情接口报错（code={code}）：{msg}"}
+
+    entries = (data.get("data") or {}).get("items") or []
+    card = (entries[0].get("note_card") if entries and isinstance(entries[0], dict) else None) or {}
+    if card.get("type") != "video":
+        return {"ok": False, "item": None, "error": "这条小红书笔记不是视频笔记。"}
+
+    urls = []
+    video = card.get("video") if isinstance(card.get("video"), dict) else {}
+    media_v2 = video.get("media_v2")
+    try:
+        mv = json.loads(media_v2) if isinstance(media_v2, str) else (media_v2 or {})
+    except (TypeError, ValueError):
+        mv = {}
+    stream = ((mv.get("video") or {}).get("stream") or {}) if isinstance(mv, dict) else {}
+    for codec_group in stream.values() if isinstance(stream, dict) else []:
+        if not isinstance(codec_group, list):
+            continue
+        for fmt in codec_group:
+            if not isinstance(fmt, dict):
+                continue
+            u = (fmt.get("master_url") or "").strip()
+            if u and u not in urls:
+                urls.append(u)
+            for bu in fmt.get("backup_urls") or []:
+                if isinstance(bu, str) and bu.startswith("http") and bu not in urls:
+                    urls.append(bu)
+    # 老结构兜底：递归找 master_url。
+    if not urls:
+        def walk(obj):
+            if isinstance(obj, dict):
+                u = obj.get("master_url")
+                if isinstance(u, str) and u.startswith("http") and u not in urls:
+                    urls.append(u)
+                for v in obj.values():
+                    walk(v)
+            elif isinstance(obj, list):
+                for v in obj:
+                    walk(v)
+        walk(video)
+
+    if not urls:
+        return {"ok": False, "item": None, "error": "详情接口成功，但没有找到视频流地址。"}
+
+    cover = ""
+    images = card.get("image_list") or []
+    for im in images if isinstance(images, list) else []:
+        if not isinstance(im, dict):
+            continue
+        for k in ("url_default", "url_pre", "url"):
+            v = im.get(k)
+            if isinstance(v, str) and v.startswith("http"):
+                cover = v
+                break
+        if cover:
+            break
+    user = card.get("user") if isinstance(card.get("user"), dict) else {}
+    item = {
+        "page_url": url,
+        "direct_url": urls[0],
+        "variants": urls[1:],
+        "title": (card.get("title") or card.get("desc") or "").strip()[:150],
+        "cover": cover,
+        "uploader": (user.get("nickname") or user.get("nick_name") or "").strip(),
+        "site": "xiaohongshu.com",
+        "duration": ((video.get("capa") or {}).get("duration")
+                     if isinstance(video.get("capa"), dict) else None),
+    }
+    return {"ok": True, "item": item, "error": "", "source": "xhshow"}
+
+
+def xhs_detail_item(url: str, *, timeout: int = 300, on_note=None) -> dict:
+    """解析一条小红书笔记：内置 xhshow 优先，外部 MediaCrawler 仅作备用。"""
+    direct = _xhs_signed_detail_item(url, timeout=min(timeout, 60))
+    if direct.get("ok"):
+        return direct
+
+    info = find_mediacrawler()
+    if not info["found"] or not login_cached("xhs"):
+        return direct
+    ok_slot, why = acquire_run_slot()
+    if not ok_slot:
+        return direct if direct.get("error") else {"ok": False, "item": None, "error": why}
+    log_path = Path(info["data_dir"]) / "crawler_run.log"
+    _clear_jsonl("xhs")
+    argv = [str(info["python"]),
+            str(info["wrapper"] or (Path(info["root"]) / "main.py")),
+            "--platform", "xhs", "--lt", "qrcode",
+            "--type", "detail", "--specified_id", url,
+            "--save_data_option", "jsonl", "--save_data_path", str(info["data_dir"]),
+            "--get_comment", "no", "--get_media", "no", "--headless", "yes"]
+    t_start = time.time()
+    try:
+        if on_note:
+            on_note("内置接口未成功，正在回退到已登录的 MediaCrawler…")
+        rc, tail = _run(argv, Path(info["root"]), timeout, log_path)
+        rows = _read_jsonl("xhs", "contents", prefer="detail", newer_than=t_start - 2)
+    finally:
+        release_run_slot()
+    for row in rows:
+        got = normalize_row("xhs", row)
+        if got and got.get("direct_url"):
+            return {"ok": True, "item": got, "error": "", "rc": rc, "source": "MediaCrawler"}
+    why2 = tail or f"MediaCrawler 未返回可用视频（返回码 {rc}）"
+    return {"ok": False, "item": None,
+            "error": (direct.get("error") or "") + "；MediaCrawler 回退也失败：" + why2[-400:]}
+
+
 # ---------------------------------------------------------------- 统一入口：按平台挑来源
 
 def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
@@ -899,7 +1113,13 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
     name = PLATFORM_NAMES.get(platform, platform)
 
     if platform == "xhs":
+        # 批量优先走轻量 xhshow（直接签名接口）；失败时才回退到已登录 MediaCrawler。
         res = xhs_author_items(url, limit=limit, on_note=on_note)
+        if not res.get("ok") and find_mediacrawler()["found"] and login_cached("xhs"):
+            mc_items, mc_note = list_creator_items(url, limit=limit, on_note=on_note)
+            if mc_items:
+                return mc_items, ("xhshow 未成功，已回退 MediaCrawler。" +
+                                  (f" {mc_note}" if mc_note else ""))
     elif platform in ("pin", "ig"):
         res = gallery_dl_items(url, limit=limit, video_only=want_video,
                                retries=3 if platform == "ig" else 1,
@@ -973,6 +1193,7 @@ def list_creator_items(
             # `Failed to parse creator URL: Expecting value`。
             "--creator_id", (url if ("xsec_token=" in url) else (creator_id_from_url(url) or url)),
             "--crawler_max_notes_count", str(max(1, int(limit))),
+            *(["--get_comment", "no"] if platform == "xhs" else []),
             "--save_data_option", "jsonl",
             "--save_data_path", str(info["data_dir"]),
             # ⚠️ 这两个参数**不能省**（2026-09-23 实测）：
