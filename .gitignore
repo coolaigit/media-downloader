@@ -57,3 +57,6 @@ build/
 .venv-build/
 config.json
 dist-archive/
+
+# Inno Setup 可再生成输出（正式安装包文件保留本机，但不入 Git）
+installer/output/
