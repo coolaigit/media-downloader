@@ -10,8 +10,9 @@
 | Inno Setup | **6.7.3**（`C:\Program Files (x86)\Inno Setup 6\ISCC.exe`，本机已有，未重装） |
 | 固定 AppId | `{3A40E79A-76F4-4EEA-B328-5D122EFE7F5F}`（生成一次后固化；**升级版本必须沿用，禁止重新生成**） |
 | Installer 文件名 | `MediaDownloader-Setup-1.0.0-RC.exe` |
-| Installer 大小 | 84,955,980 B（≈81.0 MB；onedir 265.3 MiB，Compression=lzma2 + SolidCompression=yes，无 UPX/无裁剪） |
-| Installer SHA256 | `3ce535d2e62104c426475673fd7504f948f17fcc72aea14ce936fd7ed9460929` |
+| 外发测试副本 | `D:\\MediaDownloader-Setup-1.0.0-RC2.exe`（与当前 Installer 内容一致） |
+| Installer 大小 | 84,904,801 B（≈81.0 MB；onedir 277,811,783 B，Compression=lzma2 + SolidCompression=yes，无 UPX/无裁剪） |
+| Installer SHA256 | `f1b1a15761c5588989d37ddfd5613c0246611ba170de337e33f5c076869f0d08` |
 | 权限/安装位置 | `PrivilegesRequired=admin`；`ArchitecturesInstallIn64BitMode=x64compatible`（**必须**，否则 {autopf} 落到 Program Files (x86)——首构建实测踩坑已卸载重装）；默认 `{autopf}\MediaDownloader` = `C:\Program Files\MediaDownloader` |
 | 快捷方式 | 开始菜单始终创建；桌面图标 = 可选任务 `desktopicon` **默认不勾选**；无自启/计划任务/Run 注册表 |
 | 运行中升级 | `CloseApplications=yes`（Restart Manager 标准机制检测占用并提示关闭；无 taskkill）。实测：应用运行中覆盖安装，Restart Manager 干净关闭实例，安装器退出码 0 |
@@ -33,9 +34,9 @@
 | 小红书单条 | Frozen/安装版实测：`ok=true`、thumbnail=true、`XHS/xhshow`；实际下载 3,858,365 B MP4 |
 | 其它平台回归 | `test_profile_tools` 59/59、cookies 20/20、video search 116/116；quality/download fallback/variant/render gate 全 PASS |
 | Frozen 修复 | spec 改为直接枚举 `app/*.py` hidden imports，解决 `app.main` 未进入 PYZ 的发布级问题 |
-| EXE | SHA256 `20e84f7d3f8d3da77994412f59843e20cbb4613c0f375d7e1da19ecd6c14d52a`，18,822,212 B |
+| EXE | SHA256 `f8e72aca8f3167f0933ffd6700e21e8e147dea1802c9b3d9e4e93bfb0edb1aea`，18,822,212 B |
 | 依赖 lock | 42 项；SHA256 `ea94bcefdf613fea716366ea101a82e7425b23b6be84dd80a1b3cc594c9b2f1a` |
-| Installer | 84,955,980 B；SHA256 `3ce535d2e62104c426475673fd7504f948f17fcc72aea14ce936fd7ed9460929` |
+| Installer | 84,904,801 B；SHA256 `f1b1a15761c5588989d37ddfd5613c0246611ba170de337e33f5c076869f0d08` |
 | 本机升级 | `D:\MediaDownloader` 覆盖安装 exit=0；config SHA256 不变；原 23 个下载文件保留；安装 EXE 与 RC 哈希一致 |
 
 ## RC2（1E.2，2026-10-01）
