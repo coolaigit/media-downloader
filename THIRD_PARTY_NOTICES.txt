@@ -77,7 +77,6 @@ GPL 组件的源码提供说明
 未随包分发
 ----------
 
-· MediaCrawler —— 可选外部增强依赖，由用户自行安装，不在本发行包内。
 · Chromium/Firefox/WebKit 浏览器内核 —— 不随包，Playwright 登录/渲染复用用户系统
   Chrome / Edge。
 · Microsoft Edge WebView2 Runtime —— 不随包；桌面窗口优先复用 Windows 已安装的
