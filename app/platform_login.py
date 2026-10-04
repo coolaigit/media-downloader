@@ -133,7 +133,10 @@ def status(platform: str) -> dict:
             state = "expired"
             reason = "登录 Cookie 已过期"
     elif login_ts and prof.exists():
-        state = "ready"
+        # 仅仅打开过登录窗口不能算登录成功；login-browser 即使没拿到任何
+        # Cookie 也会写状态文件。没有当前平台可用 Cookie 时只能标记待确认。
+        state = "unknown"
+        reason = "已打开过登录窗口，但没有检测到该平台的有效登录 Cookie"
     elif prof.exists():
         try:
             has_data = any(prof.iterdir())
