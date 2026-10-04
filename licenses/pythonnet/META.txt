@@ -1,0 +1,4 @@
+Name: pythonnet
+Version: 3.2.0
+License: MIT
+Home: https://pythonnet.github.io/

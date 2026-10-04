@@ -1,0 +1,4 @@
+Name: rich
+Version: 15.0.0
+License: MIT
+Home: https://github.com/Textualize/rich

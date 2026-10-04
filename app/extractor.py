@@ -737,7 +737,7 @@ def is_decoration(url: str) -> bool:
 
     # 装饰目录段：这些目录本身就是站点 UI 资源区，里面的东西一律不是内容。
     # 放在文件名判定之后、尺寸判定之前 —— 它命中率高且几乎不会误伤内容图。
-    if re.search(r"/(favicons?|icons?|sprites?|placeholders?|branding|theme-assets)/",
+    if re.search(r"/(favicons?|icons?|logos?|sprites?|placeholders?|branding|theme-assets)/",
                  path):
         return True
     # 站点级装饰媒体：加载动画 / 背景视频 / 占位视频，名字通常就叫 site/bg/loader

@@ -1,0 +1,4 @@
+Name: bottle
+Version: 0.13.4
+License: MIT
+Home: http://bottlepy.org/

@@ -25,7 +25,13 @@ from pathlib import Path
 
 
 def _marker_path(profile_dir: str) -> Path:
+    # 状态/Cookie 放在 profile 的父目录：Chrome profile 本身只保存浏览器数据；
+    # 主服务与 gallery-dl/yt-dlp 也统一从父目录读取，避免“登录成功但下载仍未登录”。
     return Path(profile_dir).resolve().parent / "login_state.json"
+
+
+def _cookie_path(profile_dir: str) -> Path:
+    return Path(profile_dir).resolve().parent / "cookies_from_profile.txt"
 
 
 def _write_state(profile_dir: str, url: str, domains: dict, note: str = "",
@@ -98,7 +104,7 @@ def export_from_profile(profile_dir: str, headless: bool = True) -> dict:
     if not Path(profile_dir).is_dir():
         return {"ok": False, "path": "", "count": 0, "domains": {},
                 "error": f"profile 目录不存在：{profile_dir}"}
-    out = Path(profile_dir).resolve().parent / "cookies_from_profile.txt"
+    out = _cookie_path(profile_dir)
     with sync_playwright() as p:
         ch = _find_browser_channel()
         kw = dict(user_data_dir=str(profile_dir), headless=headless,
@@ -222,7 +228,7 @@ def _finish(profile_dir: str, url: str, raw_cookies: list) -> dict:
         d = (c.get("domain") or "").lstrip(".")
         if d:
             domains[d] = domains.get(d, 0) + 1
-    ck_path = Path(profile_dir).resolve().parent / "cookies_from_profile.txt"
+    ck_path = _cookie_path(profile_dir)
     # ⚠️ 读不到 cookie（窗口已被关掉/会话异常）时**绝不能**覆盖旧导出 ——
     # 实测看门狗在窗口关闭后才触发，ctx.cookies() 抛错拿到空列表，
     # 一写就把之前导出的有效登录态清空了。

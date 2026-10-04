@@ -1,0 +1,4 @@
+Name: mdurl
+Version: 0.1.2
+License: 
+Home: https://github.com/executablebooks/mdurl

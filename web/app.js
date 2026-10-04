@@ -179,6 +179,17 @@ async function loadStatus() {
   $('sDownloads').textContent = statusInfo.downloads_dir
     + (statusInfo.downloads_dir_restart_pending ? '（已改配置，重启程序后生效）' : '');
   $('sDisk').textContent = free ? humanSize(free) : '未知';
+  renderHelpEnv(statusInfo);
+}
+
+function renderHelpEnv(st) {
+  const core = $('hCoreEnv'), ck = $('hCookieEnv'), mc = $('hMcEnv');
+  if (!st) return;
+  if (core) core.textContent = `ffmpeg ${st.ffmpeg_available ? '✓' : '×'} · yt-dlp ${st.ytdlp_version || '未知'} · JS ${st.js_runtime ? '✓' : '×'}`;
+  if (ck) ck.textContent = (st.cookies && st.cookies.count) ? `已配置 ${st.cookies.count} 条` : '未配置（匿名访问）';
+  if (mc) mc.textContent = (st.mediacrawler && st.mediacrawler.found)
+    ? `已找到${Object.values(st.mediacrawler.platforms || {}).filter(x => x.logged_in).length ? '，有平台登录态' : ''}`
+    : '未安装/未发现（部分主页批量能力会降级）';
 }
 
 // ---------- 关键词搜图 ----------
@@ -1849,6 +1860,15 @@ function renderProfileStat(bp) {
     + (bp.has_default_profile ? '，检测到已有登录数据' : '，该目录还没有登录数据');
 }
 
+async function openHelpLogin(url) {
+  try {
+    const r = await api('/api/browser/login', { method: 'POST', body: { url, dir: '' } });
+    toast(`已打开登录窗口：登录完成后关闭该窗口即可（${r.dir}）`, 'ok');
+  } catch (e) {
+    toast('打开登录浏览器失败：' + e.message, 'err');
+  }
+}
+
 async function openLoginBrowser() {
   const url = ($('sLoginSite') && $('sLoginSite').value) || 'https://www.instagram.com/';
   const dir = ($('sProfileDir') && $('sProfileDir').value.trim()) || '';
@@ -1982,6 +2002,9 @@ async function saveSettings() {
 // ---------- 事件绑定 ----------
 function bindEvents() {
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => switchTab(t.dataset.tab));
+  document.querySelectorAll('.help-login').forEach(btn => {
+    btn.onclick = () => openHelpLogin(btn.dataset.url || 'https://www.instagram.com/');
+  });
 
   $('btnSearch').onclick = doSearch;
   $('kwInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });

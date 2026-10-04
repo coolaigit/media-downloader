@@ -32,6 +32,7 @@
   <button class="tab" data-tab="video">抓取视频</button>
   <button class="tab" data-tab="library">已下载</button>
   <button class="tab" data-tab="settings">设置</button>
+  <button class="tab" data-tab="help">使用说明</button>
 </nav>
 
 <main>
@@ -824,6 +825,61 @@
       需要登录的站点可在设置里配置 Cookies。</p>
     <p><b>合规</b>：本工具仅供个人学习与备份用途。请勿用于侵犯版权、绕过付费墙或大规模抓取。
       下载的内容版权归原作者与站点所有，请遵守目标站点服务条款与当地法律。</p>
+  </div>
+</section>
+
+<!-- ============ 使用说明 ============ -->
+<section class="panel" id="panel-help">
+  <h2 style="margin-top:0">首次使用与跨电脑说明</h2>
+  <div class="notice">
+    <p><b>最简单的使用顺序</b>：先直接粘贴公开链接尝试抓取；能用就不登录。只有遇到登录墙、403/412/429、
+      Bot Check、结果明显不完整，或主页/账号批量抓取为空时，再为对应平台建立登录态。</p>
+    <p><b>换电脑不会自动带走登录态</b>：安装包不包含你的 Cookies、账号、浏览器 Profile、下载记录或私人配置。
+      每台电脑需要按实际需要重新登录。程序自己的 ffmpeg、yt-dlp、gallery-dl、JS 运行时已随安装包提供。</p>
+    <p><b>外部增强能力</b>：MediaCrawler 目前仍是外部可选工具，不随安装包分发。没有它时，
+      抖音/快手/B站/微博/知乎等部分“账号主页批量展开”能力会降级或不可用；单条公开链接和其它平台不因此失效。</p>
+  </div>
+
+  <h3 class="sec-title">平台登录建议</h3>
+  <div class="tablewrap" style="max-height:none">
+    <table>
+      <thead><tr><th>平台</th><th>公开单条</th><th>主页/批量</th><th>建议</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>Instagram</td><td>有时免登录</td><td>强烈建议登录</td><td>批量/Reels 易遇登录墙或 429；登录一次长期复用</td><td><button class="btn tiny help-login" data-url="https://www.instagram.com/">去登录</button></td></tr>
+        <tr><td>小红书</td><td>当前可直接解析多数公开笔记</td><td>建议登录</td><td>批量、风控或内容受限时使用登录态更稳</td><td><button class="btn tiny help-login" data-url="https://www.xiaohongshu.com/">去登录</button></td></tr>
+        <tr><td>抖音 / 快手</td><td>视页面而定</td><td>通常建议登录</td><td>主页批量更依赖登录态；完整能力还依赖本机 MediaCrawler</td><td><button class="btn tiny help-login" data-url="https://www.douyin.com/">去登录</button></td></tr>
+        <tr><td>Pinterest</td><td>部分公开内容可用</td><td>建议登录</td><td>未登录容易遇登录墙/空页面</td><td><button class="btn tiny help-login" data-url="https://www.pinterest.com/">去登录</button></td></tr>
+        <tr><td>YouTube</td><td>通常免登录</td><td>多数公开频道免登录</td><td>年龄限制、会员内容、Bot Check 时再配置登录态</td><td></td></tr>
+        <tr><td>B站 / 微博 / 知乎</td><td>公开内容常可免登录</td><td>建议登录</td><td>高清、频繁访问、主页批量时更容易触发限制</td><td></td></tr>
+        <tr><td>普通网站 / 媒体直链</td><td>通常不需要</td><td>通常不需要</td><td>除非网站本身要求账号或验证码</td><td></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="sec-title">这台电脑当前环境</h3>
+  <div class="settings">
+    <div class="kv"><span>核心运行依赖</span><b id="hCoreEnv">检测中…</b></div>
+    <div class="kv"><span>Cookies</span><b id="hCookieEnv">检测中…</b></div>
+    <div class="kv"><span>MediaCrawler</span><b id="hMcEnv">检测中…</b></div>
+  </div>
+
+  <h3 class="sec-title">遇到问题先这样判断</h3>
+  <div class="notice">
+    <p><b>403 / 412 / 登录墙</b>：通常是站点要求登录或当前 Cookie 失效。先到「设置 → 站点访问」登录对应平台。</p>
+    <p><b>429</b>：通常是访问频率或 IP 风控。降低频率、稍后重试；登录态有效也不代表一定不会被限流。</p>
+    <p><b>Sign in to confirm you're not a bot / Bot Check</b>：多半是网络/IP/站点风控，不等于安装失败。换正常网络后再试。</p>
+    <p><b>批量能抓但数量明显少</b>：先确认是否已登录，再看该电脑是否配置 MediaCrawler；不同账号、IP、地区看到的内容也可能不同。</p>
+    <p><b>缩略图空白但视频能解析</b>：通常是图床防盗链或登录态问题；Instagram 已有登录态/代理兜底，仍异常时先刷新登录态。</p>
+    <p><b>程序打不开</b>：桌面壳默认使用 Windows WebView2；若桌面壳初始化失败，会回退到默认浏览器。
+      也可用 <code>MediaDownloader.exe --browser</code> 强制浏览器模式排错。</p>
+  </div>
+
+  <h3 class="sec-title">数据与隐私</h3>
+  <div class="notice">
+    <p>账号 Cookies/Profile 保存在本机用户目录，不写进安装目录，也不会进入安装包。不要把 Cookie 文件发给别人。</p>
+    <p>默认下载目录：<b>%USERPROFILE%\Downloads\MediaDownloader</b>；程序配置/日志/登录态位于
+      <b>%LOCALAPPDATA%\MediaDownloader</b>。卸载程序默认保留这些用户数据和已下载文件。</p>
+    <p>其它电脑安装时出现 <b>Unknown Publisher</b> 是因为当前安装包尚未做商业代码签名；这与程序是否能运行是两回事。</p>
   </div>
 </section>
 

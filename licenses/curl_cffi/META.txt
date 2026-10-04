@@ -1,0 +1,4 @@
+Name: curl_cffi
+Version: 0.15.0
+License: MIT
+Home: https://github.com/lexiforest/curl_cffi

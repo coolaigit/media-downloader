@@ -631,6 +631,18 @@ def api_video_probe(req: VideoProbeReq):
                     if res.get("ok"):
                         res["thumbnail"] = res.get("thumbnail") or gi.get("cover") or ""
                         res["title"] = res.get("title") or gi.get("title") or ""
+            if not res.get("ok"):
+                platform = profile_sources.platform_for_url(url)
+                if platform in {"dy", "ks", "bili", "wb", "zhihu"} and profile_sources.login_cached(platform):
+                    mr = profile_sources.mediacrawler_detail_item(platform, url)
+                    if mr.get("ok") and mr.get("item"):
+                        item = mr["item"]
+                        res = probe_video(item["direct_url"], include_playlist=False)
+                        if res.get("ok"):
+                            res["title"] = item.get("title") or res.get("title") or ""
+                            res["thumbnail"] = item.get("cover") or res.get("thumbnail") or ""
+                            res["webpage_url"] = url
+                            res["extractor"] = f"MediaCrawler/{platform}"
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"解析失败: {type(e).__name__}: {e}")
     if not res.get("ok"):
@@ -726,6 +738,16 @@ def api_download_video(req: DownloadVideoReq):
         item = xr["item"]
         download_url = item["direct_url"]
         download_title = download_title or item.get("title") or ""
+    else:
+        platform = profile_sources.platform_for_url(download_url)
+        if platform in {"dy", "ks", "bili", "wb", "zhihu"} and profile_sources.login_cached(platform):
+            # 仅在这些需要签名/登录态的平台复用已有 MediaCrawler 登录态。
+            # 其它平台仍完全沿用原下载路径。
+            mr = profile_sources.mediacrawler_detail_item(platform, download_url)
+            if mr.get("ok") and mr.get("item"):
+                item = mr["item"]
+                download_url = item["direct_url"]
+                download_title = download_title or item.get("title") or ""
     ck_file, ck_browser = _cookie_args_for_url(req.url.strip(), st)
     tid = manager.submit_video(
         download_url,

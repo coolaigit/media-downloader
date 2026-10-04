@@ -72,9 +72,23 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    import serve
+    # 默认桌面程序：用 WebView2 原生窗口承载本地 UI。
+    # --no-browser 保留给自动化/无头测试；--browser 允许人工强制旧的浏览器模式。
+    force_browser = "--browser" in argv
+    if not open_browser or force_browser:
+        import serve
+        return serve.main(port=port, open_browser=(open_browser and force_browser))
 
-    return serve.main(port=port, open_browser=open_browser)
+    try:
+        from app.desktop_shell import main as desktop_main
+        return desktop_main(port=port)
+    except Exception:
+        # 桌面壳自身初始化异常时仍保证工具可用：回退到原浏览器模式。
+        _ensure_stdio()
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        import serve
+        return serve.main(port=port, open_browser=True)
 
 
 if __name__ == "__main__":

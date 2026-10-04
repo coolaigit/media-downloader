@@ -42,7 +42,7 @@ ArchitecturesAllowed=x64compatible
 CloseApplications=yes
 ; 输出
 OutputDir=output
-OutputBaseFilename=MediaDownloader-Setup-1.0.0-RC
+OutputBaseFilename=MediaDownloader-Setup-1.0.0-RC3
 SetupIconFile=..\app_icon.ico
 ; 压缩：稳定性优先，禁 UPX / 裁剪资源
 Compression=lzma2
@@ -79,7 +79,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\MediaDownloader.exe"; \
 [Run]
 ; 安装完成页可选启动（默认勾选）。静默安装时跳过。
 ; runasoriginaluser：避免提权安装器把应用以管理员令牌拉起。
-; 端口仍由 EXE 自己决定（找端口 -> 启服务 -> 开浏览器），不在此固定 8848。
+; 端口仍由 EXE 自己决定；默认打开桌面窗口，桌面壳失败时才回退浏览器，不在此固定 8848。
 Filename: "{app}\MediaDownloader.exe"; \
     Description: "{cm:LaunchProgram,{#MyAppName}}"; \
     Flags: postinstall nowait skipifsilent runasoriginaluser

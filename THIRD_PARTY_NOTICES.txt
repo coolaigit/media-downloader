@@ -53,6 +53,18 @@ websockets        17.1        BSD-3-Clause
 brotli            1.2.0       MIT
 pycryptodome      3.23.0      BSD-2-Clause / Public Domain
 pycryptodomex     3.23.0      BSD / Public Domain
+curl_cffi         0.15.0      MIT                 https://github.com/lexiforest/curl_cffi
+cffi              2.1.1       MIT-0
+pycparser         3.0         BSD-3-Clause
+rich              15.0.0      MIT
+markdown-it-py    4.2.0       详见随包 LICENSE
+mdurl             0.1.2       详见随包 LICENSE
+Pygments          2.21.0      BSD-2-Clause
+pywebview         6.2.1       BSD-3-Clause        https://pywebview.flowrl.com/
+pythonnet         3.2.0       MIT                 https://pythonnet.github.io/
+clr_loader        0.3.1       详见随包 LICENSE
+proxy_tools       0.1.0       MIT
+bottle            0.13.4      MIT
 
 GPL 组件的源码提供说明
 ----------------------
@@ -65,10 +77,10 @@ GPL 组件的源码提供说明
 未随包分发
 ----------
 
-· MediaCrawler —— 可选外部依赖，由用户自行安装，不在本发行包内。
-· curl_cffi —— yt-dlp 可选 extra，非当前功能必需（HTTP(S) 请求统一走
-  requests/urllib3），未安装。
-· Chromium/Firefox/WebKit 浏览器内核 —— 不随包，Playwright 复用用户系统
+· MediaCrawler —— 可选外部增强依赖，由用户自行安装，不在本发行包内。
+· Chromium/Firefox/WebKit 浏览器内核 —— 不随包，Playwright 登录/渲染复用用户系统
   Chrome / Edge。
+· Microsoft Edge WebView2 Runtime —— 不随包；桌面窗口优先复用 Windows 已安装的
+  WebView2，若运行时不可用则自动回退到默认浏览器模式。
 
 版本清单以构建时的 requirements.lock.txt（随源码仓库分发）为准。

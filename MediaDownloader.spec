@@ -28,11 +28,13 @@ SPEC_DIR = Path(SPECPATH).resolve()
 datas = [
     (str(SPEC_DIR / "web"), "web"),                      # 前端静态资源
     (str(SPEC_DIR / "bin" / "ffmpeg.exe"), "bin"),       # ffmpeg 二进制（1E 策略：发行包自带）
+    (str(SPEC_DIR / "使用说明.md"), "."),                    # 跨电脑安装/登录态/故障说明
 ]
 datas += collect_data_files("certifi")                   # CA 证书（requests/yt-dlp 用）
 datas += collect_data_files("playwright")                # playwright 驱动（node.exe 等 Python 运行时，
                                                          #   不含浏览器 —— 浏览器复用用户系统 Chrome/Edge）
 datas += collect_data_files("yt_dlp_ejs")                # 1E.2：yt-dlp EJS 挑战脚本（.js 资源）
+datas += collect_data_files("webview")                      # 桌面壳运行时资源（如有）
 
 # ---- 1E.2：第三方许可证与声明（随包分发必须） ----
 # 先落在 _internal（licenses\ + THIRD_PARTY_NOTICES.txt），构建后再复制
@@ -55,6 +57,7 @@ hiddenimports = (
     collect_submodules("gallery_dl")          # gallery-dl 按字符串懒加载 extractor/*.py
     + collect_submodules("xhshow")            # 小红书签名库
     + collect_submodules("yt_dlp.extractor")  # yt-dlp 同理
+    + collect_submodules("webview")           # pywebview 后端按运行环境动态导入
     + _app_hidden
 )
 

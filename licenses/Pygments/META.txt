@@ -1,0 +1,4 @@
+Name: Pygments
+Version: 2.21.0
+License: BSD-2-Clause
+Home: https://pygments.org

@@ -1,0 +1,4 @@
+Name: pycparser
+Version: 3.0
+License: BSD-3-Clause
+Home: https://github.com/eliben/pycparser

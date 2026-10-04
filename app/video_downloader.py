@@ -199,8 +199,8 @@ def build_format_selector(
         # 含选择器元字符的一律拒绝，退回常规档位逻辑
         if re.fullmatch(r"[\w.\-]+", fid):
             if ffmpeg_available():
-                return f"{fid}+bestaudio/{fid}/best"
-            return f"{fid}/best"
+                return f"{fid}+bestaudio/{fid}/best[vcodec!=none]"
+            return f"{fid}/best[vcodec!=none]"
 
     height_cap = max_height
     if not height_cap:
@@ -220,23 +220,24 @@ def build_format_selector(
     if height_cap:
         # 有 ffmpeg 时用「最佳视频+最佳音频」合并；同时给出单文件兜底
         if ffmpeg_available():
-            base = f"bestvideo{ext_part}[height<={height_cap}]+bestaudio/best[height<={height_cap}]"
+            base = f"bestvideo{ext_part}[height<={height_cap}]+bestaudio/best{ext_part}[height<={height_cap}][vcodec!=none]/best[height<={height_cap}][vcodec!=none]"
         else:
-            # 无 ffmpeg：只能选自带音轨的完整格式，否则得到无声或无画面文件
-            base = f"best{ext_part}[height<={height_cap}]/best[height<={height_cap}]"
+            # 无 ffmpeg：优先自带音轨的完整视频；至少也必须包含视频轨。
+            base = f"best{ext_part}[height<={height_cap}][vcodec!=none][acodec!=none]/best{ext_part}[height<={height_cap}][vcodec!=none]/best[height<={height_cap}][vcodec!=none]"
         return base
 
     if quality == "worst":
         # 不能只写 "worst"：实测（2026-09-21）B 站下 `worst` 会报
         # "Requested format is not available" —— 该站只暴露 bestvideo/bestaudio 这类
         # 分离流，没有 `worst` 这个别名。改成带兜底链的选择器：
-        # 最小分离流合并 -> 最小的单文件 -> 整体最小。
+        # 最小分离流合并 -> 最小完整视频 -> 最小视频。任何视频模式都禁止
+        # 最终退到纯音频（TikTok 曾因此“任务成功”却落盘 .mp3）。
         if ffmpeg_available():
-            return f"worstvideo{ext_part}+worstaudio/worst{ext_part}/worst"
-        return f"worst{ext_part}/worst"
+            return f"worstvideo{ext_part}+worstaudio/worst{ext_part}[vcodec!=none][acodec!=none]/worst{ext_part}[vcodec!=none]/worst[vcodec!=none]"
+        return f"worst{ext_part}[vcodec!=none][acodec!=none]/worst{ext_part}[vcodec!=none]/worst[vcodec!=none]"
     if ffmpeg_available():
-        return f"bestvideo{ext_part}+bestaudio/best{ext_part}"
-    return f"best{ext_part}/best"
+        return f"bestvideo{ext_part}+bestaudio/best{ext_part}[vcodec!=none]/best[vcodec!=none]"
+    return f"best{ext_part}[vcodec!=none]/best[vcodec!=none]"
 
 
 def _fallback_format_selector(container: str = "") -> str:
@@ -248,8 +249,8 @@ def _fallback_format_selector(container: str = "") -> str:
     """
     ext_part = f"[ext={container}]" if container else ""
     if ffmpeg_available():
-        return f"bestvideo{ext_part}+bestaudio/best{ext_part}"
-    return f"best{ext_part}/best"
+        return f"bestvideo{ext_part}+bestaudio/best{ext_part}[vcodec!=none]/best[vcodec!=none]"
+    return f"best{ext_part}[vcodec!=none]/best[vcodec!=none]"
 
 
 def _is_media_forbidden(low_msg: str) -> bool:
@@ -323,11 +324,24 @@ def probe_video(
             "notice": last_cookie_note(),
         }
 
+    summary = _summarize_info(info)
+    # 这是“视频解析”入口：若上游只返回纯音频，不能把它当成视频解析成功。
+    # TikTok 2026-10 的页面曾出现这种情况，旧逻辑会让“下载视频”最终落成 .mp3。
+    has_video_format = any(bool(f.get("has_video")) for f in (summary.get("formats") or []))
+    if not has_video_format and not summary.get("is_live"):
+        return {
+            "ok": False,
+            "is_playlist": False,
+            "error": "当前页面只解析到音频流，没有拿到可下载的视频流。可能是站点接口变化、地区/IP 或登录限制；请稍后重试或更新登录态。",
+            "audio_only_available": any(bool(f.get("has_audio")) for f in (summary.get("formats") or [])),
+            "notice": last_cookie_note(),
+            **summary,
+        }
     return {
         "ok": True,
         "is_playlist": False,
         "notice": last_cookie_note(),
-        **_summarize_info(info),
+        **summary,
     }
 
 
@@ -1466,22 +1480,11 @@ def _search_site(keyword: str, platform: str, count: int,
 
     items = merge_items(*groups, limit=10 ** 6) if groups else []
 
-    # 兜底：仍不够数时把范围放开到**不限域的全网**。
-    #
-    # 原来兜底也带着 host_patterns，等于在同一个白名单里再找一遍 ——
-    # 找不到还是找不到。用户明确要求「兜底是全网搜索，而不是仅仅限于我们
-    # 罗列的这些主流视频网站」。这里用的是同一份全网数据里被域名筛掉的那部分，
-    # **不额外发请求**；这些条目会在提示里如实说明「不属于该站」。
-    if len(items) < need and broad_pool:
-        # 给兜底条目打标记：最终列表要按标记把它们排在后面，提示里也按它计数
-        # （不能用「合并前后长度差」——列表随后会被截断到 need，数字会对不上）
-        for it in broad_pool:
-            ex = dict(it.get("extra") or {})
-            ex["broad_fallback"] = True
-            it["extra"] = ex
-        merged_all = merge_items(items, broad_pool, limit=10 ** 6)
-        if len(merged_all) > len(items):
-            items = merged_all
+    # 单站模式必须严格保持平台归属。
+    # 过去为了“凑够数量”会把不限域全网结果塞进来，导致用户选「优酷」却看到
+    # 腾讯视频、选「小红书」却下载 v.qq.com —— 平台筛选因此失去意义。
+    # 全网补充只属于 web/domestic/foreign 聚合模式；明确单站时宁可结果少/为空，
+    # 也不冒充该平台结果。
 
     if not items:
         thin = THIN_INDEX_SITES.get(platform)

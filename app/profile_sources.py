@@ -532,6 +532,40 @@ def normalize_row(platform: str, r: dict) -> dict | None:
     }
 
 
+def mediacrawler_detail_item(platform: str, url: str, *, timeout: int = 300, on_note=None) -> dict:
+    """用已有 MediaCrawler 登录态解析单条内容；只作为现有 yt-dlp 失败后的兜底。"""
+    info = find_mediacrawler()
+    if not info["found"]:
+        return {"ok": False, "item": None, "error": info["reason"], "source": "MediaCrawler"}
+    if not login_cached(platform):
+        return {"ok": False, "item": None, "error": login_hint(platform), "source": "MediaCrawler"}
+    ok_slot, why = acquire_run_slot()
+    if not ok_slot:
+        return {"ok": False, "item": None, "error": why, "source": "MediaCrawler"}
+    log_path = Path(info["data_dir"]) / "crawler_run.log"
+    _clear_jsonl(platform)
+    argv = [str(info["python"]),
+            str(info["wrapper"] or (Path(info["root"]) / "main.py")),
+            "--platform", platform, "--lt", "qrcode",
+            "--type", "detail", "--specified_id", url,
+            "--save_data_option", "jsonl", "--save_data_path", str(info["data_dir"]),
+            "--get_comment", "no", "--get_media", "no", "--headless", "yes"]
+    t_start = time.time()
+    try:
+        if on_note:
+            on_note(f"正在用已登录的 MediaCrawler 解析{PLATFORM_NAMES.get(platform, platform)}单条内容…")
+        rc, tail = _run(argv, Path(info["root"]), timeout, log_path)
+        rows = _read_jsonl(platform, "contents", prefer="detail", newer_than=t_start - 2)
+    finally:
+        release_run_slot()
+    for row in rows:
+        got = normalize_row(platform, row)
+        if got and got.get("direct_url"):
+            return {"ok": True, "item": got, "error": "", "rc": rc, "source": "MediaCrawler"}
+    why2 = tail or f"MediaCrawler 未返回可用视频（返回码 {rc}）"
+    return {"ok": False, "item": None, "error": why2[-500:], "rc": rc, "source": "MediaCrawler"}
+
+
 # ---------------------------------------------------------------- 来源二：gallery-dl
 # Pinterest / Instagram 交给成熟的开源下载器 gallery-dl（PyPI，长期维护）。
 # 它自带：登录态处理、翻页、HLS 视频解析（内部用 yt-dlp 合并音视频）。
@@ -1203,9 +1237,12 @@ def list_creator_items(
             # 媒体下载由我们自己的下载队列负责，这里只要元数据。
             "--get_media", "no",
             "--headless", "yes"]
+    # MediaCrawler 个别平台会在已经写出足够作品后继续等待浏览器/网络，
+    # 旧实现小批量也一律等 600 秒。按请求量收紧上限；超时后仍读取已经落盘的部分结果。
+    effective_timeout = min(int(timeout), max(90, min(600, max(1, int(limit)) * 20)))
     t_start = time.time()
     try:
-        rc, tail = _run(argv, Path(info["root"]), timeout, log_path)
+        rc, tail = _run(argv, Path(info["root"]), effective_timeout, log_path)
         rows = _read_jsonl(platform, "contents", prefer="creator",
                            newer_than=t_start - 2)
     finally:
@@ -1224,7 +1261,7 @@ def list_creator_items(
             # 但已抓到的部分已经落盘 —— 这种情况必须说明是「部分结果」，不能假装完整。
             note = (f"外部工具中途退出（返回码 {rc}），以下 {len(items)} 条是**已抓到的部分**。"
                     f"日志尾部：{tail[-200:] if tail else '（无）'}")
-        return items, note
+        return items[:max(1, int(limit))], note
     # 没结果：把日志尾部带出去，让用户能判断是风控、未登录还是别的
     err = "外部工具没有返回作品列表。"
     if rc == -1:

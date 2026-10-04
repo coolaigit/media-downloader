@@ -1,0 +1,4 @@
+Name: markdown-it-py
+Version: 4.2.0
+License: 
+Home: https://github.com/executablebooks/markdown-it-py
