@@ -18,7 +18,7 @@
 ;   属当前预期）。
 
 #define MyAppName "MediaDownloader"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "2.0.0"
 ; 固定 AppId（2026-10-01 生成一次后固化，禁止随构建变化）
 #define MyAppId "{{3A40E79A-76F4-4EEA-B328-5D122EFE7F5F}"
 
@@ -42,7 +42,7 @@ ArchitecturesAllowed=x64compatible
 CloseApplications=yes
 ; 输出
 OutputDir=output
-OutputBaseFilename=MediaDownloader-Setup-1.0.0-RC3
+OutputBaseFilename=MediaDownloader-Setup-2.0.0-RC1
 SetupIconFile=..\app_icon.ico
 ; 压缩：稳定性优先，禁 UPX / 裁剪资源
 Compression=lzma2

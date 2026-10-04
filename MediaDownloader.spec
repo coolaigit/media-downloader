@@ -6,7 +6,7 @@
 （1C probe 踩过的坑：add-data 相对路径是相对 --specpath 解析的）。
 
 构建（必须用隔离构建 venv，禁止裸 python/pip）：
-    cd /d "D:\\QWen Project\\media-downloader"
+    cd /d "D:\\QWen Project\\media-downloader-2.0-work"
     .venv-build\\Scripts\\python.exe -m PyInstaller --noconfirm MediaDownloader.spec
 
 控制台排错版（同一 spec，弹 console 窗口看 stdout）：
