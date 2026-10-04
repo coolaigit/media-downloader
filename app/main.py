@@ -67,6 +67,29 @@ def _cookie_args_for_url(url: str, settings: dict) -> tuple[str | None, str | No
     return settings.get("cookies_file") or None, settings.get("cookies_from_browser") or None
 
 
+def _direct_item_probe(item: dict, webpage_url: str, extractor: str) -> dict:
+    """把受信来源已经解析出的真实视频直链直接映射成前端 probe 结果。"""
+    urls = []
+    for u in [item.get("direct_url"), *(item.get("variants") or [])]:
+        u = str(u or "").strip()
+        if u and u not in urls:
+            urls.append(u)
+    formats = [{
+        "format_id": f"direct-{i+1}", "ext": "mp4", "width": None, "height": None,
+        "fps": None, "vcodec": "direct", "acodec": "unknown", "has_video": True,
+        "has_audio": True, "filesize": None, "tbr": None, "format_note": "平台视频直链",
+        "quality_label": f"视频直链 {i+1}",
+    } for i, _u in enumerate(urls)]
+    return {
+        "ok": bool(formats), "id": "", "title": item.get("title") or "",
+        "duration": item.get("duration"), "duration_string": "", "uploader": item.get("uploader") or "",
+        "upload_date": "", "view_count": None, "webpage_url": webpage_url,
+        "thumbnail": item.get("cover") or "", "extractor": extractor, "description": "",
+        "formats": formats, "quality_options": [], "is_live": False, "ffmpeg": True,
+        "direct_source": True,
+    }
+
+
 @app.on_event("startup")
 def _startup_reaper():
     """启动即收割上一实例留下的孤儿 ffmpeg，并常驻定时收割。
@@ -605,12 +628,7 @@ def api_video_probe(req: VideoProbeReq):
             if not xr.get("ok"):
                 return {"ok": False, "error": xr.get("error") or "小红书解析失败", "url": url}
             item = xr["item"]
-            res = probe_video(item["direct_url"], include_playlist=False)
-            if res.get("ok"):
-                res["title"] = item.get("title") or res.get("title") or ""
-                res["thumbnail"] = item.get("cover") or res.get("thumbnail") or ""
-                res["webpage_url"] = url
-                res["extractor"] = "XHS/" + str(xr.get("source") or "signed")
+            res = _direct_item_probe(item, url, "XHS/" + str(xr.get("source") or "signed"))
         else:
             ck_file, ck_browser = _cookie_args_for_url(url, settings)
             res = probe_video(
@@ -637,12 +655,7 @@ def api_video_probe(req: VideoProbeReq):
                     mr = profile_sources.mediacrawler_detail_item(platform, url)
                     if mr.get("ok") and mr.get("item"):
                         item = mr["item"]
-                        res = probe_video(item["direct_url"], include_playlist=False)
-                        if res.get("ok"):
-                            res["title"] = item.get("title") or res.get("title") or ""
-                            res["thumbnail"] = item.get("cover") or res.get("thumbnail") or ""
-                            res["webpage_url"] = url
-                            res["extractor"] = f"MediaCrawler/{platform}"
+                        res = _direct_item_probe(item, url, f"MediaCrawler/{platform}")
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"解析失败: {type(e).__name__}: {e}")
     if not res.get("ok"):
