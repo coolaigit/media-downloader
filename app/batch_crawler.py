@@ -1319,29 +1319,53 @@ def crawl_list(
     # 完全不含站点专用规则。命中就直接返回，不再走后面的网页抓取（省时且结果更全）。
     if expand_listing and want_kinds and "video" in want_kinds:
         _emit("list", 0, 1, "正在判断这是不是一个视频列表 / 博主页…")
-        exp, exp_err = _expand_video_listing(
-            list_url,
-            limit=max(2, int(max_items or 0) or 60),
-            cookies_file=cookies_file,
-            cookies_from_browser=cookies_from_browser,
-            on_note=lambda s: _emit("list", 0, 1, s),
-        )
-        if exp is not None:
-            exp["stats"]["elapsed"] = round(time.time() - t0, 2)
-            _emit("merge", 0, 0, f"已展开 {len(exp.get('items') or [])} 条视频")
-            return exp
+        # 已知必须靠签名接口 / 登录态拿作品列表的平台，专用来源必须放在前面。
+        # 旧顺序先跑通用 yt-dlp，抖音主页会白等约 90 秒后才轮到 MediaCrawler，
+        # 甚至在超时/锁竞争时直接 0 条。YouTube/B站等仍维持通用列表优先。
+        from . import profile_sources as _profile_sources
+        platform0 = _profile_sources.platform_for_url(list_url)
+        profile_first = platform0 in {"dy", "xhs", "ks", "wb", "zhihu", "pin", "ig"}
+        exp = None
+        exp_err = ""
+        pt_exp = None
+        pt_note = ""
 
-        # 第二条路：抖音 / 小红书这类「主页要签名 + 登录态」的平台，
-        # 交给本机已安装的外部工具（yt-dlp 没有它们的用户主页提取器）。
-        pt_exp, pt_note = _expand_via_profile_tool(
-            list_url,
-            limit=max(2, min(int(max_items or 30) or 30, 200)),
-            on_note=lambda s: _emit("list", 0, 1, s),
-        )
-        if pt_exp is not None:
-            pt_exp["stats"]["elapsed"] = round(time.time() - t0, 2)
-            _emit("merge", 0, 0, f"已展开 {len(pt_exp.get('items') or [])} 条作品")
-            return pt_exp
+        if profile_first:
+            pt_exp, pt_note = _expand_via_profile_tool(
+                list_url,
+                limit=max(2, min(int(max_items or 30) or 30, 200)),
+                on_note=lambda s: _emit("list", 0, 1, s),
+            )
+            if pt_exp is not None:
+                pt_exp["stats"]["elapsed"] = round(time.time() - t0, 2)
+                _emit("merge", 0, 0, f"已展开 {len(pt_exp.get('items') or [])} 条作品")
+                return pt_exp
+
+        # 权威平台（dy/ks/xhs/pin/ig）专用来源失败后，不再白跑第二个通用 90 秒。
+        # 这些主页的作品列表本来就不在普通 HTML / yt-dlp 通用列表里。
+        if not (profile_first and _profile_sources.authoritative(list_url)):
+            exp, exp_err = _expand_video_listing(
+                list_url,
+                limit=max(2, int(max_items or 0) or 60),
+                cookies_file=cookies_file,
+                cookies_from_browser=cookies_from_browser,
+                on_note=lambda s: _emit("list", 0, 1, s),
+            )
+            if exp is not None:
+                exp["stats"]["elapsed"] = round(time.time() - t0, 2)
+                _emit("merge", 0, 0, f"已展开 {len(exp.get('items') or [])} 条视频")
+                return exp
+
+        if not profile_first:
+            pt_exp, pt_note = _expand_via_profile_tool(
+                list_url,
+                limit=max(2, min(int(max_items or 30) or 30, 200)),
+                on_note=lambda s: _emit("list", 0, 1, s),
+            )
+            if pt_exp is not None:
+                pt_exp["stats"]["elapsed"] = round(time.time() - t0, 2)
+                _emit("merge", 0, 0, f"已展开 {len(pt_exp.get('items') or [])} 条作品")
+                return pt_exp
 
         # 两条路都没成：把原因都写清楚，再退回网页抓取
         hints = [h for h in (exp_err, pt_note) if h]

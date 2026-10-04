@@ -1227,7 +1227,9 @@ def list_creator_items(
             # `Failed to parse creator URL: Expecting value`。
             "--creator_id", (url if ("xsec_token=" in url) else (creator_id_from_url(url) or url)),
             "--crawler_max_notes_count", str(max(1, int(limit))),
-            *(["--get_comment", "no"] if platform == "xhs" else []),
+            # MediaDownloader 这里只需要作品列表/媒体地址，不抓评论；否则抖音等平台
+            # 会为评论额外翻页，既慢又增加风控概率。
+            "--get_comment", "no",
             "--save_data_option", "jsonl",
             "--save_data_path", str(info["data_dir"]),
             # ⚠️ 这两个参数**不能省**（2026-09-23 实测）：
@@ -1259,7 +1261,8 @@ def list_creator_items(
         if rc != 0:
             # 实测：抖音 creator 跑到一半浏览器页面被关闭（TargetClosedError），
             # 但已抓到的部分已经落盘 —— 这种情况必须说明是「部分结果」，不能假装完整。
-            note = (f"外部工具中途退出（返回码 {rc}），以下 {len(items)} 条是**已抓到的部分**。"
+            shown = min(len(items), max(1, int(limit)))
+            note = (f"外部工具中途退出（返回码 {rc}），已抓到 {len(items)} 条；本次返回前 {shown} 条**部分结果**。"
                     f"日志尾部：{tail[-200:] if tail else '（无）'}")
         return items[:max(1, int(limit))], note
     # 没结果：把日志尾部带出去，让用户能判断是风控、未登录还是别的

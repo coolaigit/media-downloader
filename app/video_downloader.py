@@ -14,6 +14,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yt_dlp
 
@@ -220,7 +221,7 @@ def build_format_selector(
     if height_cap:
         # 有 ffmpeg 时用「最佳视频+最佳音频」合并；同时给出单文件兜底
         if ffmpeg_available():
-            base = f"bestvideo{ext_part}[height<={height_cap}]+bestaudio/best{ext_part}[height<={height_cap}][vcodec!=none]/best[height<={height_cap}][vcodec!=none]"
+            base = f"bestvideo{ext_part}[height<={height_cap}]+bestaudio/best{ext_part}[height<={height_cap}][vcodec!=none]/best[height<={height_cap}][vcodec!=none]/best{ext_part}[height<={height_cap}]/best[height<={height_cap}]"
         else:
             # 无 ffmpeg：优先自带音轨的完整视频；至少也必须包含视频轨。
             base = f"best{ext_part}[height<={height_cap}][vcodec!=none][acodec!=none]/best{ext_part}[height<={height_cap}][vcodec!=none]/best[height<={height_cap}][vcodec!=none]"
@@ -233,11 +234,11 @@ def build_format_selector(
         # 最小分离流合并 -> 最小完整视频 -> 最小视频。任何视频模式都禁止
         # 最终退到纯音频（TikTok 曾因此“任务成功”却落盘 .mp3）。
         if ffmpeg_available():
-            return f"worstvideo{ext_part}+worstaudio/worst{ext_part}[vcodec!=none][acodec!=none]/worst{ext_part}[vcodec!=none]/worst[vcodec!=none]"
-        return f"worst{ext_part}[vcodec!=none][acodec!=none]/worst{ext_part}[vcodec!=none]/worst[vcodec!=none]"
+            return f"worstvideo{ext_part}+worstaudio/worst{ext_part}[vcodec!=none][acodec!=none]/worst{ext_part}[vcodec!=none]/worst[vcodec!=none]/worst{ext_part}[height>0]/worst[height>0]"
+        return f"worst{ext_part}[vcodec!=none][acodec!=none]/worst{ext_part}[vcodec!=none]/worst[vcodec!=none]/worst{ext_part}[height>0]/worst[height>0]"
     if ffmpeg_available():
-        return f"bestvideo{ext_part}+bestaudio/best{ext_part}[vcodec!=none]/best[vcodec!=none]"
-    return f"best{ext_part}[vcodec!=none]/best[vcodec!=none]"
+        return f"bestvideo{ext_part}+bestaudio/best{ext_part}[vcodec!=none]/best[vcodec!=none]/best{ext_part}[height>0]/best[height>0]"
+    return f"best{ext_part}[vcodec!=none]/best[vcodec!=none]/best{ext_part}[height>0]/best[height>0]"
 
 
 def _fallback_format_selector(container: str = "") -> str:
@@ -249,8 +250,8 @@ def _fallback_format_selector(container: str = "") -> str:
     """
     ext_part = f"[ext={container}]" if container else ""
     if ffmpeg_available():
-        return f"bestvideo{ext_part}+bestaudio/best{ext_part}[vcodec!=none]/best[vcodec!=none]"
-    return f"best{ext_part}[vcodec!=none]/best[vcodec!=none]"
+        return f"bestvideo{ext_part}+bestaudio/best{ext_part}[vcodec!=none]/best[vcodec!=none]/best{ext_part}[height>0]/best[height>0]"
+    return f"best{ext_part}[vcodec!=none]/best[vcodec!=none]/best{ext_part}[height>0]/best[height>0]"
 
 
 def _is_media_forbidden(low_msg: str) -> bool:
@@ -325,9 +326,18 @@ def probe_video(
         }
 
     summary = _summarize_info(info)
-    # 这是“视频解析”入口：若上游只返回纯音频，不能把它当成视频解析成功。
-    # TikTok 2026-10 的页面曾出现这种情况，旧逻辑会让“下载视频”最终落成 .mp3。
-    has_video_format = any(bool(f.get("has_video")) for f in (summary.get("formats") or []))
+    # 这是“视频解析”入口：若上游明确只返回纯音频，不能把它当成视频解析成功。
+    # 但 Generic 直链（例如小红书/抖音签名后的 .mp4）常不填 vcodec/acodec，
+    # 此时 ext=mp4/webm/... 已足以证明是视频；不能因为 codec 元数据未知就误判失败。
+    video_exts = {"mp4", "webm", "mkv", "mov", "avi", "flv", "m4v", "mpg", "mpeg", "3gp", "ts"}
+    formats = summary.get("formats") or []
+    has_video_format = any(
+        bool(f.get("has_video")) or (
+            str(f.get("ext") or "").lower() in video_exts
+            and str(f.get("vcodec") or "").lower() != "none"
+        )
+        for f in formats
+    )
     if not has_video_format and not summary.get("is_live"):
         return {
             "ok": False,
@@ -874,8 +884,16 @@ def download_video(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    fmt = build_format_selector(quality, container, prefer_audio_only, max_height,
-                                format_id=format_id)
+    # 已经解析出的签名媒体直链（XHS/Douyin 等）不要再套网页格式选择器。
+    # Generic extractor 对这类 .mp4 经常不填 vcodec/acodec/height；继续使用
+    # [vcodec!=none] 会把真实视频错误过滤成“格式不存在”。音频直链扩展名不会进这里。
+    direct_video_exts = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".flv", ".m4v", ".mpg", ".mpeg", ".3gp", ".ts"}
+    direct_ext = Path(urlparse(url).path).suffix.lower()
+    # MediaCrawler/XHS 给出的签名播放地址有些并不带扩展名，但 yt-dlp 对它们只会走 Generic。
+    # 这类地址已经是“解析后的媒体”，不应再二次挑格式；完全省略 format 最稳。
+    is_generic_media = (direct_ext in direct_video_exts) or (not has_specific_extractor(url))
+    fmt = None if (is_generic_media and not prefer_audio_only and quality != "audio" and not format_id) else build_format_selector(
+        quality, container, prefer_audio_only, max_height, format_id=format_id)
 
     opts = _base_ydl_opts(
         task_id,
