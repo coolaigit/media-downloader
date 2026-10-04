@@ -36,9 +36,11 @@ DEFAULTS = {
     # 点击桌面窗口右上角 X 的行为：exit=直接退出；tray=隐藏到系统托盘。
     # 默认保持 1.x/RC1 的直接退出行为，避免升级后悄悄常驻后台。
     "close_behavior": "exit",
-    # 首次使用向导完成标记。登录态本身按平台保存在 DATA_ROOT/platform_profiles，
-    # 不写进设置文件，也不会进入安装包。
+    # 首次使用向导：complete 只代表用户点过“完成”，version 用于识别
+    # “完成的是不是当前版本的向导”。这样升级到新的首次使用流程时会再显示一次，
+    # 但同一版本反复安装不会每次骚扰用户。
     "onboarding_complete": False,
+    "onboarding_version": "",
 }
 
 _LOCK = threading.RLock()

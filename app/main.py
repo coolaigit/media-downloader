@@ -40,6 +40,10 @@ browser_profile.set_provider(lambda: {
 
 app = FastAPI(title="媒体下载工具", version="1.0.0")
 
+# 首次使用向导版本。只有用户完成了“当前版本”的向导才算完成。
+# 旧版只有 onboarding_complete=true、没有 version，因此升级到 2.0 后会重新展示一次。
+ONBOARDING_VERSION = "2.0"
+
 
 def _is_instagram_url(url: str) -> bool:
     host = (urlparse(url or "").hostname or "").lower()
@@ -544,7 +548,13 @@ def api_platform_login(payload: dict = Body(...)):
 @app.get("/api/onboarding")
 def api_onboarding():
     st = store.load()
-    return {"complete": bool(st.get("onboarding_complete")),
+    complete = (
+        bool(st.get("onboarding_complete"))
+        and str(st.get("onboarding_version") or "") == ONBOARDING_VERSION
+    )
+    return {"complete": complete,
+            "onboarding_version": str(st.get("onboarding_version") or ""),
+            "required_onboarding_version": ONBOARDING_VERSION,
             "downloads_dir": str(DOWNLOADS_DIR),
             "ffmpeg_available": bool(find_ffmpeg()),
             "js_runtime": bool(find_js_runtime()),
@@ -553,8 +563,11 @@ def api_onboarding():
 
 @app.post("/api/onboarding/complete")
 def api_onboarding_complete():
-    store.save({"onboarding_complete": True})
-    return {"ok": True, "complete": True}
+    store.save({
+        "onboarding_complete": True,
+        "onboarding_version": ONBOARDING_VERSION,
+    })
+    return {"ok": True, "complete": True, "onboarding_version": ONBOARDING_VERSION}
 
 
 @app.post("/api/browser/login")
