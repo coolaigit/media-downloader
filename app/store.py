@@ -33,9 +33,9 @@ DEFAULTS = {
     # ⚠️ 消费点是 app.config 的 DOWNLOADS_DIR（导入期常量），改了要重启才生效，
     # 端点层必须如实返回 restart_required，不能让用户以为立即生效。
     "downloads_dir": "",
-    # MediaCrawler（外部工具）的安装根目录：空 = 自动发现（env/常见路径/有限扫描），
-    # 消费点 profile_sources._candidates_root（每次查找实时读，改完即生效）。
-    "mediacrawler_root": "",
+    # 首次使用向导完成标记。登录态本身按平台保存在 DATA_ROOT/platform_profiles，
+    # 不写进设置文件，也不会进入安装包。
+    "onboarding_complete": False,
 }
 
 _LOCK = threading.RLock()

@@ -25,7 +25,7 @@ from .page_scanner import resolve_stream
 from .stream_downloader import stream_supported
 from .task_manager import manager
 from .video_downloader import ffmpeg_available, probe_video, search_videos
-from . import browser_profile, cookie_store, crawl_manager, profile_sources, store, subproc
+from . import browser_profile, cookie_store, crawl_manager, platform_login, profile_sources, store, subproc
 
 # 「设置」里配的 cookies.txt 也要用于**网页抓取与浏览器渲染**，不只是 yt-dlp：
 # 需要登录的平台（Instagram 等）匿名访问只会返回登录墙，正文里没有任何内容 ——
@@ -52,18 +52,12 @@ def _is_xhs_url(url: str) -> bool:
 
 
 def _cookie_args_for_url(url: str, settings: dict) -> tuple[str | None, str | None]:
-    if _is_instagram_url(url):
-        p = DATA_ROOT / "site_profiles" / "cookies_from_profile.txt"
-        if p.exists():
-            return str(p), None
-        # 兼容旧版本留下的共享登录 profile：只读已经导出的 Netscape 文件，
-        # 不再直接碰 Chrome Cookie 数据库。
-        prof = browser_profile.user_data_dir()
-        if prof:
-            exported = Path(prof).resolve().parent / "cookies_from_profile.txt"
-            if exported.exists():
-                return str(exported), None
-        return None, None
+    # 2.0：已识别平台只使用自己的独立登录态，禁止把 A 平台 Cookie/Profile
+    # 串给 B 平台。未识别的普通网站才继续使用高级设置里的通用 cookies。
+    platform = platform_login.platform_for_url(url)
+    if platform:
+        own = platform_login.cookie_file_for_platform(platform)
+        return (own or None), None
     return settings.get("cookies_file") or None, settings.get("cookies_from_browser") or None
 
 
@@ -265,7 +259,6 @@ class SettingsReq(BaseModel):
     browser_headed: bool | None = None
     # 下载根目录：导入期常量 DOWNLOADS_DIR 消费，改后需重启生效（端点如实返回）
     downloads_dir: str | None = Field(default=None, max_length=1000)
-    mediacrawler_root: str | None = Field(default=None, max_length=1000)
 
 
 # ---------- 工具 ----------
@@ -311,16 +304,6 @@ def _settings() -> dict:
     return store.load()
 
 
-def _mediacrawler_status() -> dict:
-    """MediaCrawler 外部工具状态（1B.1）。失败不致命——状态如实降级，不影响 /api/status。"""
-    try:
-        from . import profile_sources
-        return profile_sources.status()
-    except Exception as e:  # noqa: BLE001
-        return {"found": False, "root": "", "python": "", "data_dir": "",
-                "reason": f"状态检测失败：{type(e).__name__}: {e}", "platforms": {}}
-
-
 # ---------- 状态 ----------
 
 @app.get("/api/status")
@@ -360,9 +343,8 @@ def api_status():
         "cookies": cookie_store.status(),
         # 登录态浏览器配置：让用户知道「抖音/小红书主页」这条路是否已具备前提
         "browser_profile": browser_profile.info(),
-        # MediaCrawler（外部工具）状态：设置页填 mediacrawler_root 后能立刻看到
-        # 找没找到 / 哪些平台有登录态（1B.1；Desktop Mode 专用，Server Mode 不暴露）
-        "mediacrawler": _mediacrawler_status(),
+        # 2.0：每个平台自己的登录态。安装包不携带账号数据，首次使用按需登录。
+        "platform_logins": platform_login.all_status(),
         "filter_options": FILTER_OPTIONS,
     }
 
@@ -505,6 +487,59 @@ def api_crawl_cancel(job_id: str):
 
 # ---------------------------------------------------------------- 登录态浏览器
 
+@app.get("/api/platforms/status")
+def api_platform_status():
+    """返回各平台独立登录态；登录失效/过期会明确标记需要重新登录。"""
+    items = platform_login.all_status()
+    for item in items.values():
+        prof = item.get("profile_dir") or ""
+        item["in_use"] = bool(prof) and browser_profile.lock_state(prof) == "held"
+    return {"platforms": items}
+
+
+@app.post("/api/platforms/login")
+def api_platform_login(payload: dict = Body(...)):
+    """打开指定平台自己的持久化浏览器，不与其它平台共享 Profile/Cookies。"""
+    platform = str(payload.get("platform") or "").strip().lower()
+    cfg = platform_login.PLATFORMS.get(platform)
+    if not cfg:
+        raise HTTPException(400, "不支持的平台")
+    url = str(payload.get("url") or cfg["login_url"]).strip()
+    prof = str(platform_login.profile_dir(platform))
+    Path(prof).mkdir(parents=True, exist_ok=True)
+    cmd = subproc.build_internal_command(
+        "login-browser", url, "--dir", prof,
+        "--seconds", str(int(payload.get("seconds") or 900)))
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(ROOT), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=subproc.child_env(),
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"启动登录浏览器失败：{e}")
+    return {"ok": True, "pid": proc.pid, "platform": platform,
+            "name": cfg["name"], "dir": prof, "url": url,
+            "note": "登录完成后关闭窗口，状态会自动保存。"}
+
+
+@app.get("/api/onboarding")
+def api_onboarding():
+    st = store.load()
+    return {"complete": bool(st.get("onboarding_complete")),
+            "downloads_dir": str(DOWNLOADS_DIR),
+            "ffmpeg_available": bool(find_ffmpeg()),
+            "js_runtime": bool(find_js_runtime()),
+            "platforms": platform_login.all_status()}
+
+
+@app.post("/api/onboarding/complete")
+def api_onboarding_complete():
+    store.save({"onboarding_complete": True})
+    return {"ok": True, "complete": True}
+
+
 @app.post("/api/browser/login")
 def api_browser_login(payload: dict = Body(...)):
     """打开一个有头浏览器让用户登录（登录态留在 profile 目录里，之后渲染复用）。
@@ -518,25 +553,16 @@ def api_browser_login(payload: dict = Body(...)):
     url = str(payload.get("url") or "").strip() or "https://www.instagram.com/"
     if not _settings().get("allow_private_network") and _is_private_url(url):
         raise HTTPException(403, "已拒绝内网地址")
-    # 登录目录的优先级：请求里指定 > 「设置」里已配置的登录态目录 > 默认目录。
-    # ⚠️ 必须优先用**已配置的**目录：抓取时用的就是它（browser_profile.user_data_dir）。
-    # 如果登录写到别的目录，就会出现「登录了但抓取没生效」——实测最容易踩的坑。
-    if _is_instagram_url(url):
-        # Instagram 独立 profile：不再复用当前指向小红书 MediaCrawler 的 profile。
-        prof = str(DATA_ROOT / "site_profiles" / "instagram")
+    # 兼容旧入口：识别到的平台也必须落到自己的隔离目录；普通网站才允许
+    # 使用高级设置里的共享 profile。
+    platform = platform_login.platform_for_url(url)
+    if platform:
+        prof = str(platform_login.profile_dir(platform))
     else:
         prof = (str(payload.get("dir") or "").strip()
                 or browser_profile.user_data_dir()
                 or browser_profile.default_login_dir())
     Path(prof).mkdir(parents=True, exist_ok=True)
-    # 关键联动：如果设置里还没配「登录态浏览器配置目录」，就把这次登录用的目录写进设置 ——
-    # 否则会出现「登录了但不生效」（渲染仍用干净浏览器），实测这是最容易踩的坑。
-    try:
-        cur = str(store.load().get("browser_user_data_dir") or "").strip()
-        if not cur and not _is_instagram_url(url):
-            store.save({"browser_user_data_dir": prof, "browser_headed": True})
-    except Exception:  # noqa: BLE001
-        pass
     # 1C：经统一 dispatcher 起 internal 子命令 —— frozen 下 sys.executable 是
     # MediaDownloader.exe，不能再假设它是 python.exe；子进程边界保持不变
     # （生命周期长、可独立终止，不改成进程内调用）。
@@ -650,12 +676,16 @@ def api_video_probe(req: VideoProbeReq):
                         res["thumbnail"] = res.get("thumbnail") or gi.get("cover") or ""
                         res["title"] = res.get("title") or gi.get("title") or ""
             if not res.get("ok"):
-                platform = profile_sources.platform_for_url(url)
-                if platform in {"dy", "ks", "bili", "wb", "zhihu"} and profile_sources.login_cached(platform):
-                    mr = profile_sources.mediacrawler_detail_item(platform, url)
-                    if mr.get("ok") and mr.get("item"):
-                        item = mr["item"]
-                        res = _direct_item_probe(item, url, f"MediaCrawler/{platform}")
+                platform = platform_login.platform_for_url(url)
+                err = str(res.get("error") or "")
+                if platform and platform_login.looks_like_auth_error(err):
+                    if platform_login.ready(platform):
+                        platform_login.mark_invalid(platform, err)
+                        res["relogin_required"] = True
+                        res["error"] = (f"{platform_login.PLATFORMS[platform]['name']} 登录态已失效，"
+                                        "请到「平台登录中心」重新登录。 " + err)
+                    else:
+                        res["login_required"] = True
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"解析失败: {type(e).__name__}: {e}")
     if not res.get("ok"):
@@ -751,16 +781,7 @@ def api_download_video(req: DownloadVideoReq):
         item = xr["item"]
         download_url = item["direct_url"]
         download_title = download_title or item.get("title") or ""
-    else:
-        platform = profile_sources.platform_for_url(download_url)
-        if platform in {"dy", "ks", "bili", "wb", "zhihu"} and profile_sources.login_cached(platform):
-            # 仅在这些需要签名/登录态的平台复用已有 MediaCrawler 登录态。
-            # 其它平台仍完全沿用原下载路径。
-            mr = profile_sources.mediacrawler_detail_item(platform, download_url)
-            if mr.get("ok") and mr.get("item"):
-                item = mr["item"]
-                download_url = item["direct_url"]
-                download_title = download_title or item.get("title") or ""
+    # 其它平台直接交给内置 yt-dlp；需要账号时由各自独立 Cookie 提供登录态。
     ck_file, ck_browser = _cookie_args_for_url(req.url.strip(), st)
     tid = manager.submit_video(
         download_url,
@@ -868,25 +889,7 @@ def api_set_settings(req: SettingsReq):
     dd = str(patch.get("downloads_dir") or "").strip()
     if dd and not Path(dd).is_absolute():
         raise HTTPException(400, "下载根目录必须是绝对路径（如 D:\\Downloads\\MediaDownloader）")
-    old_mc = str(store.load().get("mediacrawler_root") or "").strip()
     data = store.save(patch)
-    # mediacrawler_root 变了 → 立即失效外部工具的发现缓存，不用等 60 秒 TTL
-    mc_warning = ""
-    if "mediacrawler_root" in patch and str(patch["mediacrawler_root"]).strip() != old_mc:
-        try:
-            from . import profile_sources
-            profile_sources.invalidate_cache()
-        except Exception:  # noqa: BLE001
-            pass
-        # 1B.1：填了但目录无效 → 仅提示，不拒绝保存（用户可能先填后建目录），
-        # 也不崩溃 —— 无效时 find_mediacrawler 会自动回退到「自动发现」链路
-        mc = str(patch["mediacrawler_root"]).strip()
-        if mc:
-            mc_path = Path(mc)
-            if not mc_path.is_dir():
-                mc_warning = "该目录不存在，MediaCrawler 将回退到自动发现"
-            elif not (mc_path / "main.py").exists():
-                mc_warning = "目录里没有 main.py，MediaCrawler 将回退到自动发现"
     # 下载根目录由导入期常量 DOWNLOADS_DIR 消费，改了配置当前进程也不会跟着走 ——
     # 必须明确告诉前端「重启后才生效」，杜绝「显示已保存但仍在写旧目录」的静默分叉
     cfg_dd = str(data.get("downloads_dir") or "").strip()
@@ -896,8 +899,7 @@ def api_set_settings(req: SettingsReq):
             restart_required = Path(cfg_dd).resolve() != DOWNLOADS_DIR.resolve()
         except OSError:
             restart_required = True
-    return {"ok": True, "settings": data, "restart_required": restart_required,
-            "mediacrawler_warning": mc_warning}
+    return {"ok": True, "settings": data, "restart_required": restart_required}
 
 
 # ---------- 文件访问与代理 ----------

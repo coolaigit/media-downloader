@@ -25,9 +25,10 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .config import BROWSER_CANDIDATES, DEFAULT_UA
-from . import browser_profile, cookie_store
+from . import browser_profile, cookie_store, platform_login
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -175,18 +176,31 @@ async def _render_async(
         # 自己的 JS 发请求、我们只拦响应；但前提是**已登录**且**有头窗口** ——
         # 实测同一抖音主页：无头模式拿到空壳（标题空、0 个 video），
         # 有头模式一次拿到 3 页接口响应、1438 条视频地址。
-        prof_dir = browser_profile.user_data_dir()
+        # 2.0：已识别平台优先且只使用自己的独立 Profile/Cookies。
+        # 普通网站仍可使用高级设置中的共享 profile，兼容旧功能。
+        platform_keys = {platform_login.platform_for_url(u) for u in urls}
+        platform_keys.discard("")
+        platform_key = next(iter(platform_keys)) if len(platform_keys) == 1 else ""
+        if platform_key:
+            prof_dir = platform_login.profile_dir_for_url(urls[0], ready_only=True)
+            effective_cookies = platform_login.playwright_cookies(platform_key)
+        else:
+            prof_dir = browser_profile.user_data_dir()
+            effective_cookies = cookies
         if prof_dir:
-            _chk = browser_profile.ensure_usable()
+            if platform_key:
+                _chk = {"ok": Path(prof_dir).is_dir(),
+                        "reason": f"平台登录态目录不存在：{prof_dir}"}
+            else:
+                _chk = browser_profile.ensure_usable()
             if not _chk.get("ok"):
-                # 配置目录不可用：直接如实说明，别让用户对着「渲染失败」猜
                 for r in results:
                     r.error = _chk.get("reason") or "登录态浏览器配置不可用"
                 return results
             try:
                 pctx = await p.chromium.launch_persistent_context(
                     user_data_dir=prof_dir,
-                    headless=not browser_profile.headed(),
+                    headless=False if platform_key else not browser_profile.headed(),
                     viewport={"width": 1600, "height": 1000},
                     locale="zh-CN",
                     user_agent=user_agent or DEFAULT_UA,
@@ -201,7 +215,7 @@ async def _render_async(
                 # 两者是不同的来源、可以同时存在。漏了这一步会出现
                 # 「配了 cookies 但因为同时开了登录态 profile，cookies 悄悄失效」
                 # （实测：test_cookies_offline 的渲染通道断言失败）。
-                _pw_ck = cookie_store.playwright_cookies()
+                _pw_ck = effective_cookies or []
                 if _pw_ck:
                     try:
                         await pctx.add_cookies(_pw_ck)
@@ -260,9 +274,9 @@ async def _render_async(
                         )
                         # 带上「设置」里配好的 cookies：需要登录的站点（Instagram 等）
                         # 匿名访问只会得到登录墙 / 「主页不存在」，正文里没有任何内容。
-                        if cookies:
+                        if effective_cookies:
                             try:
-                                await ctx.add_cookies(cookies)
+                                await ctx.add_cookies(effective_cookies)
                             except Exception:
                                 pass
                         page = await ctx.new_page()

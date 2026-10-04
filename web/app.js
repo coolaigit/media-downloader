@@ -111,6 +111,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
   if (name === 'library') loadLibrary();
+  if (name === 'login') loadPlatformStatuses();
 }
 
 /**
@@ -183,13 +184,16 @@ async function loadStatus() {
 }
 
 function renderHelpEnv(st) {
-  const core = $('hCoreEnv'), ck = $('hCookieEnv'), mc = $('hMcEnv');
+  const core = $('hCoreEnv'), ck = $('hCookieEnv'), lg = $('hLoginEnv');
   if (!st) return;
   if (core) core.textContent = `ffmpeg ${st.ffmpeg_available ? '✓' : '×'} · yt-dlp ${st.ytdlp_version || '未知'} · JS ${st.js_runtime ? '✓' : '×'}`;
-  if (ck) ck.textContent = (st.cookies && st.cookies.count) ? `已配置 ${st.cookies.count} 条` : '未配置（匿名访问）';
-  if (mc) mc.textContent = (st.mediacrawler && st.mediacrawler.found)
-    ? `已找到${Object.values(st.mediacrawler.platforms || {}).filter(x => x.logged_in).length ? '，有平台登录态' : ''}`
-    : '未安装/未发现（部分主页批量能力会降级）';
+  if (ck) ck.textContent = (st.cookies && st.cookies.count) ? `通用 Cookies ${st.cookies.count} 条` : '通用 Cookies 未配置';
+  if (lg) {
+    const vals = Object.values(st.platform_logins || {});
+    const ready = vals.filter(x => x.logged_in).length;
+    const bad = vals.filter(x => x.relogin_required).length;
+    lg.textContent = bad ? `${ready} 个已登录 · ${bad} 个需重新登录` : `${ready} 个平台已登录`;
+  }
 }
 
 // ---------- 关键词搜图 ----------
@@ -1847,65 +1851,97 @@ async function pollTasks() {
   });
 }
 
-// ---------- 设置 ----------
-function renderProfileStat(bp) {
-  const el = $('sProfileStat');
+// ---------- 平台登录中心 ----------
+const PLATFORM_ORDER = ['ig', 'xhs', 'dy', 'ks', 'tiktok', 'pin', 'bili', 'wb', 'zhihu', 'yt'];
+let platformStatusCache = {};
+
+function platformStateLabel(st) {
+  if (st.in_use) return ['登录窗口已打开', 'active'];
+  if (st.state === 'ready') return ['已登录', 'ready'];
+  if (st.state === 'invalid') return ['登录失效', 'bad'];
+  if (st.state === 'expired') return ['已过期', 'bad'];
+  if (st.state === 'unknown') return ['待确认', 'warn'];
+  return ['未登录', 'idle'];
+}
+
+function renderPlatformCards(targetId, items) {
+  const box = $(targetId);
+  if (!box) return;
+  box.innerHTML = '';
+  PLATFORM_ORDER.forEach(key => {
+    const st = items[key];
+    if (!st) return;
+    const [label, cls] = platformStateLabel(st);
+    const el = document.createElement('div');
+    el.className = 'platform-login-card';
+    const when = st.last_login_ts ? new Date(st.last_login_ts * 1000).toLocaleString() : '';
+    el.innerHTML = `
+      <div class="platform-login-head">
+        <b>${esc(st.name || key)}</b>
+        <span class="login-state ${cls}">${esc(label)}</span>
+      </div>
+      <div class="hint">${st.relogin_required ? esc(st.reason || '需要重新登录') :
+        (when ? '上次登录：' + esc(when) : '尚未建立本机登录态')}</div>
+      <div class="hint">Cookies：${Number(st.cookie_count || 0)} 条</div>
+      <button class="btn tiny ${st.relogin_required ? 'danger' : ''}" data-platform="${key}">
+        ${st.logged_in && !st.relogin_required ? '重新登录' : '登录'}
+      </button>`;
+    el.querySelector('button').onclick = () => loginPlatform(key);
+    box.appendChild(el);
+  });
+}
+
+function renderLoginAlert(items) {
+  const el = $('loginAlert');
   if (!el) return;
-  if (!bp || !bp.enabled) {
-    el.textContent = '未启用（每次用干净浏览器；抖音/小红书主页会拿不到内容）';
+  const bad = Object.values(items || {}).filter(x => x.relogin_required);
+  if (!bad.length) {
+    el.hidden = true;
+    el.innerHTML = '';
     return;
   }
-  if (!bp.exists) { el.textContent = '目录不存在：' + bp.dir; return; }
-  el.textContent = `已启用 ${bp.dir}` + (bp.headed ? '（有头窗口）' : '（无头）')
-    + (bp.has_default_profile ? '，检测到已有登录数据' : '，该目录还没有登录数据');
+  el.hidden = false;
+  el.innerHTML = `检测到 <b>${bad.map(x => esc(x.name)).join('、')}</b> 登录态已失效或过期。
+    <button class="btn tiny danger" id="btnReloginNow">去重新登录</button>`;
+  const btn = $('btnReloginNow');
+  if (btn) btn.onclick = () => switchTab('login');
 }
 
-async function openHelpLogin(url) {
+async function loadPlatformStatuses() {
   try {
-    const r = await api('/api/browser/login', { method: 'POST', body: { url, dir: '' } });
-    toast(`已打开登录窗口：登录完成后关闭该窗口即可（${r.dir}）`, 'ok');
+    const r = await api('/api/platforms/status');
+    platformStatusCache = r.platforms || {};
+    renderPlatformCards('platformLoginGrid', platformStatusCache);
+    renderPlatformCards('wizardLoginGrid', platformStatusCache);
+    renderLoginAlert(platformStatusCache);
+    const ready = Object.values(platformStatusCache).filter(x => x.logged_in).length;
+    const bad = Object.values(platformStatusCache).filter(x => x.relogin_required).length;
+    const msg = $('platformLoginMsg');
+    if (msg) msg.textContent = bad ? `${ready} 个已登录，${bad} 个需要重新登录` : `${ready} 个平台已登录`;
+    return platformStatusCache;
   } catch (e) {
-    toast('打开登录浏览器失败：' + e.message, 'err');
+    const msg = $('platformLoginMsg');
+    if (msg) msg.textContent = '状态读取失败：' + e.message;
+    return {};
   }
 }
 
-async function openLoginBrowser() {
-  const url = ($('sLoginSite') && $('sLoginSite').value) || 'https://www.instagram.com/';
-  const dir = ($('sProfileDir') && $('sProfileDir').value.trim()) || '';
-  const msg = $('sLoginMsg');
-  if (msg) msg.textContent = '正在打开浏览器窗口…';
+async function loginPlatform(platform) {
   try {
-    const r = await api('/api/browser/login', { method: 'POST', body: { url, dir } });
-    if (msg) {
-      msg.textContent = `已打开 ${url} 的登录窗口（pid ${r.pid}）：登录完成后**关闭该窗口**即可，`
-        + `登录态会保存到 ${r.dir}`;
-    }
-    toast('浏览器窗口已打开：登录完成后关闭窗口即可', 'ok');
+    const r = await api('/api/platforms/login', { method: 'POST', body: { platform } });
+    toast(`${r.name || platform} 登录窗口已打开；登录完成后关闭窗口即可`, 'ok');
+    setTimeout(loadPlatformStatuses, 1200);
   } catch (e) {
-    if (msg) msg.textContent = '打开失败：' + e.message;
-    toast('打开登录浏览器失败：' + e.message, 'err');
+    toast('打开登录窗口失败：' + e.message, 'err');
   }
 }
 
-async function refreshLoginState() {
-  try {
-    const r = await api('/api/browser/login/state');
-    const msg = $('sLoginMsg');
-    const st = r.last_login || {};
-    const doms = Object.keys(st.domains || {});
-    if (msg && doms.length) {
-      const when = st.ts ? new Date(st.ts * 1000).toLocaleString() : '';
-      msg.textContent = `上次登录：${when}，覆盖 ${doms.slice(0, 4).join('、')}`
-        + `（共 ${doms.length} 个域）`;
-    }
-  } catch (e) { /* 状态拿不到不影响使用 */ }
-}
-
+// ---------- 设置 ----------
 function renderCookiesStat(ck) {
   const el = $('sCookiesStat');
   if (!el) return;
   if (!ck || !ck.count) {
-    el.textContent = (ck && ck.file) ? '文件读不到或没有条目（检查路径与格式）' : '未配置（匿名访问）';
+    el.textContent = (ck && ck.file) ? '文件读不到或没有条目（检查路径与格式）' : '未配置';
     return;
   }
   const doms = (ck.domains || []).slice(0, 4).join('、');
@@ -1922,29 +1958,8 @@ function fillSettings(s) {
   $('sSkip').checked = !!s.skip_existing;
   $('sCookiesFile').value = s.cookies_file || '';
   $('sCookiesBrowser').value = s.cookies_from_browser || '';
-  // 保存后立即刷新「当前生效的 Cookies」，否则用户改完看不出有没有生效
-  loadStatus().then(() => renderCookiesStat(statusInfo && statusInfo.cookies)).catch(() => {});
-  renderCookiesStat(statusInfo && statusInfo.cookies);
-  $('sProfileDir').value = s.browser_user_data_dir || '';
-  $('sProfileHeaded').checked = !!s.browser_headed;
-  $('sMcRoot').value = s.mediacrawler_root || '';
-  renderMcStat(statusInfo && statusInfo.mediacrawler);
-  refreshLoginState();
-  renderProfileStat(statusInfo && statusInfo.browser_profile);
   $('sAllowPrivate').checked = !!s.allow_private_network;
-}
-
-// MediaCrawler（外部工具）状态：找到/没找到都如实显示，失败给可操作原因
-function renderMcStat(mc) {
-  const el = $('sMcStat');
-  if (!el) return;
-  if (!mc) { el.textContent = '检测中…'; return; }
-  if (mc.found) {
-    const logged = Object.values(mc.platforms || {}).filter(p => p.logged_in).length;
-    el.textContent = `已找到：${mc.root}` + (logged ? `（${logged} 个平台已有登录态）` : '（暂无平台登录态）');
-  } else {
-    el.textContent = mc.reason || '未找到（抖音/快手/B站主页展开不可用，其余功能不受影响）';
-  }
+  renderCookiesStat(statusInfo && statusInfo.cookies);
 }
 
 async function loadSettings() {
@@ -1965,9 +1980,6 @@ async function saveSettings() {
     stream_concurrency: parseInt($('sStreamConcurrency').value, 10) || 4,
     video_quality_default: $('sQuality').value,
     skip_existing: $('sSkip').checked,
-    browser_user_data_dir: $('sProfileDir').value.trim(),
-    browser_headed: $('sProfileHeaded').checked,
-    mediacrawler_root: $('sMcRoot').value.trim(),
     cookies_file: $('sCookiesFile').value.trim(),
     cookies_from_browser: $('sCookiesBrowser').value,
     allow_private_network: $('sAllowPrivate').checked,
@@ -1975,27 +1987,71 @@ async function saveSettings() {
   try {
     const r = await api('/api/settings', { method: 'POST', body });
     fillSettings(r.settings || body);
-    // 下载根目录由启动时的常量消费：后端明确返回要不要重启，必须如实提示，
-    // 不能只显示「已保存」让用户以为当前进程已经写新目录
-    if (r.restart_required) {
-      $('settingsMsg').textContent = '已保存（下载根目录将在重启程序后生效）';
-      $('settingsMsg').style.color = 'var(--warn, #d80)';
-      toast('已保存；下载根目录重启程序后生效', 'ok');
-    } else if (r.mediacrawler_warning) {
-      $('settingsMsg').textContent = '已保存，但 ' + r.mediacrawler_warning;
-      $('settingsMsg').style.color = 'var(--warn, #d80)';
-      toast('已保存；' + r.mediacrawler_warning, 'ok');
-    } else {
-      $('settingsMsg').textContent = '已保存';
-      $('settingsMsg').style.color = 'var(--ok)';
-      toast('设置已保存', 'ok');
-    }
+    $('settingsMsg').textContent = r.restart_required
+      ? '已保存（下载根目录将在重启程序后生效）' : '已保存';
+    $('settingsMsg').style.color = r.restart_required ? 'var(--warn)' : 'var(--ok)';
+    toast(r.restart_required ? '已保存；下载根目录重启后生效' : '设置已保存', 'ok');
+    await loadStatus();
     setTimeout(() => { $('settingsMsg').textContent = ''; }, 4000);
-    loadStatus().then(() => renderMcStat(statusInfo && statusInfo.mediacrawler))
-                .catch(() => {});
   } catch (e) {
     $('settingsMsg').textContent = '保存失败：' + e.message;
     $('settingsMsg').style.color = 'var(--err)';
+  }
+}
+
+// ---------- 首次使用向导 ----------
+let wizardStep = 1;
+
+function showWizardStep(n) {
+  wizardStep = Math.max(1, Math.min(3, n));
+  [1, 2, 3].forEach(i => {
+    const el = $('wizardStep' + i);
+    if (el) el.hidden = i !== wizardStep;
+  });
+  $('wizardStepLabel').textContent = `步骤 ${wizardStep} / 3`;
+  $('wizardBack').hidden = wizardStep === 1;
+  $('wizardNext').hidden = wizardStep === 3;
+  $('wizardFinish').hidden = wizardStep !== 3;
+}
+
+async function loadOnboarding() {
+  try {
+    const r = await api('/api/onboarding');
+    $('wFfmpeg').textContent = r.ffmpeg_available ? '可用 ✓' : '缺失 ×';
+    $('wJs').textContent = r.js_runtime ? '可用 ✓' : '缺失 ×';
+    $('wDownloadNow').textContent = r.downloads_dir || '未知';
+    platformStatusCache = r.platforms || platformStatusCache;
+    renderPlatformCards('wizardLoginGrid', platformStatusCache);
+    if (!r.complete) {
+      $('firstUseWizard').hidden = false;
+      showWizardStep(1);
+    }
+  } catch (e) {
+    console.warn('onboarding status failed', e);
+  }
+}
+
+async function wizardNext() {
+  if (wizardStep === 2) {
+    const dd = $('wDownloadsDir').value.trim();
+    try {
+      await api('/api/settings', { method: 'POST', body: { downloads_dir: dd } });
+    } catch (e) {
+      toast('下载目录设置失败：' + e.message, 'err');
+      return;
+    }
+  }
+  showWizardStep(wizardStep + 1);
+  if (wizardStep === 3) loadPlatformStatuses();
+}
+
+async function finishWizard() {
+  try {
+    await api('/api/onboarding/complete', { method: 'POST' });
+    $('firstUseWizard').hidden = true;
+    toast('首次使用设置已完成', 'ok');
+  } catch (e) {
+    toast('保存向导状态失败：' + e.message, 'err');
   }
 }
 
@@ -2003,7 +2059,7 @@ async function saveSettings() {
 function bindEvents() {
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => switchTab(t.dataset.tab));
   document.querySelectorAll('.help-login').forEach(btn => {
-    btn.onclick = () => openHelpLogin(btn.dataset.url || 'https://www.instagram.com/');
+    btn.onclick = () => loginPlatform(btn.dataset.platform || 'ig');
   });
 
   $('btnSearch').onclick = doSearch;
@@ -2089,8 +2145,12 @@ function bindEvents() {
   $('libFilter').onchange = () => { libFilterType = $('libFilter').value; renderLibrary(); };
 
   $('btnSaveSettings').onclick = saveSettings;
-  if ($('btnOpenLogin')) $('btnOpenLogin').onclick = openLoginBrowser;
   $('btnReloadSettings').onclick = loadSettings;
+  if ($('btnRefreshPlatforms')) $('btnRefreshPlatforms').onclick = loadPlatformStatuses;
+  if ($('wizardNext')) $('wizardNext').onclick = wizardNext;
+  if ($('wizardBack')) $('wizardBack').onclick = () => showWizardStep(wizardStep - 1);
+  if ($('wizardFinish')) $('wizardFinish').onclick = finishWizard;
+  if ($('wizardClose')) $('wizardClose').onclick = () => { $('firstUseWizard').hidden = true; };
 
   $('btnClearTasks').onclick = async () => {
     try { const r = await api('/api/tasks/clear-finished', { method: 'POST' }); toast(`已清除 ${r.removed} 条`, 'ok'); pollTasks(); }
@@ -2191,6 +2251,9 @@ function updateFilterSummary() {
   bindModeSwitches();
   await loadStatus();
   await loadSettings();
+  await loadPlatformStatuses();
+  await loadOnboarding();
+  setInterval(loadPlatformStatuses, 20000);
   startTaskPolling();
   msg('searchMsg', '输入关键词开始搜索。默认仅启用 Bing；清晰度筛选会探测原图真实分辨率，请按需开启。', 'info');
 })();

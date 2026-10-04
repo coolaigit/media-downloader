@@ -16,9 +16,8 @@
   launcher.py / 打包入口在最顶部先分流 `--internal`，**绝不递归启动服务器**。
   业务模块里不要自行判断 sys.frozen —— 都走这里。
 
-- **外部工具**（ffmpeg / MediaCrawler / explorer）不经这里：
-  MediaCrawler 必须用它自己的 Python（MEDIACRAWLER_PYTHON / 它的 .venv），
-  frozen 下 sys.executable 是本程序 EXE，绝不能当 MediaCrawler 的解释器。
+- **外部程序**（ffmpeg / explorer 等）不经 internal dispatcher；
+  argv 由调用方明确提供，不能把 frozen 下的本程序 EXE 当成 Python 解释器。
 
 - **子进程环境**：cwd 必须绝对化（frozen/安装版启动目录可能是 Desktop、
   Program Files、浏览器启动目录，不能依赖"当前目录刚好是项目目录"）。
@@ -80,7 +79,7 @@ def popen_internal(cmd: str, *args: str, cwd: Path | str | None = None,
 def run_external(argv: list, *, cwd: Path | str | None = None,
                  env_extra: dict | None = None, timeout: float | None = None,
                  **run_kw) -> subprocess.CompletedProcess:
-    """运行**真正的外部工具**（ffmpeg / MediaCrawler / explorer）。
+    """运行**真正的外部程序**（如 ffmpeg / explorer）。
 
     与 internal 的区别：argv 由调用方给全（可执行文件必须是绝对路径或 PATH 可见），
     这里只统一 cwd/env/flags，不解释 argv[0]。

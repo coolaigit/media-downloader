@@ -31,9 +31,11 @@
   <button class="tab active" data-tab="image">抓取图片</button>
   <button class="tab" data-tab="video">抓取视频</button>
   <button class="tab" data-tab="library">已下载</button>
+  <button class="tab" data-tab="login">平台登录</button>
   <button class="tab" data-tab="settings">设置</button>
   <button class="tab" data-tab="help">使用说明</button>
 </nav>
+<div id="loginAlert" class="login-alert" hidden></div>
 
 <main>
 
@@ -702,6 +704,20 @@
   <div class="grid" id="libGrid"></div>
 </section>
 
+<!-- ============ 平台登录中心 ============ -->
+<section class="panel" id="panel-login">
+  <h2 style="margin-top:0">平台登录中心</h2>
+  <div class="notice">
+    <p>每个平台使用独立的浏览器 Profile 和 Cookies，互不混用。公开内容能直接抓取时无需登录；遇到登录墙、权限限制或登录失效时，再登录对应平台。</p>
+    <p>登录态保存在本机 <b>%LOCALAPPDATA%\\MediaDownloader\\platform_profiles</b>，不会进入安装包。换电脑后按需重新登录。</p>
+  </div>
+  <div class="filter-actions" style="margin:12px 0">
+    <button class="btn tiny" id="btnRefreshPlatforms">刷新状态</button>
+    <span class="hint" id="platformLoginMsg">正在检测…</span>
+  </div>
+  <div class="platform-login-grid" id="platformLoginGrid"></div>
+</section>
+
 <!-- ============ 设置 ============ -->
 <section class="panel" id="panel-settings">
   <h3 class="sec-title">下载设置</h3>
@@ -753,12 +769,12 @@
     <div id="historyBox" class="detail-box" style="grid-column:1/-1" hidden></div>
   </div>
 
-  <h3 class="sec-title">站点访问（应对需要登录的站点）</h3>
+  <h3 class="sec-title">通用站点访问（高级）</h3>
   <div class="settings">
-    <label>Cookies 文件路径
-      <input type="text" id="sCookiesFile" placeholder="如 D:\cookies\bilibili.txt（Netscape 格式）">
+    <label>通用 Cookies 文件路径
+      <input type="text" id="sCookiesFile" placeholder="仅用于未列入平台登录中心的普通网站（Netscape 格式）">
     </label>
-    <label>或从浏览器读取 Cookies
+    <label>或从浏览器读取通用 Cookies
       <select id="sCookiesBrowser">
         <option value="">不使用</option>
         <option value="chrome">Chrome</option>
@@ -767,36 +783,10 @@
         <option value="brave">Brave</option>
       </select>
     </label>
-    <label class="wide">登录态浏览器配置目录（持久化，可复用已登录的账号）
-      <input type="text" id="sProfileDir" placeholder="如 D://media-downloader//data//browser_profile
-（留空 = 每次都用干净浏览器；填了就能复用该目录里的登录态）">
-    </label>
-    <label class="chk wide"><input type="checkbox" id="sProfileHeaded">
-      显示浏览器窗口（有头模式）—— 抖音、小红书等会识别无头浏览器并只返回空壳，抓它们的主页时需要打开</label>
-    <div class="kv" style="grid-column:1/-1"><span>登录态浏览器</span><b id="sProfileStat">检测中…</b></div>
-    <div class="wide" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <button class="btn" id="btnOpenLogin">打开浏览器去登录</button>
-      <select id="sLoginSite" style="min-width:150px">
-        <option value="https://www.instagram.com/">Instagram</option>
-        <option value="https://www.pinterest.com/">Pinterest</option>
-        <option value="https://www.douyin.com/">抖音</option>
-        <option value="https://www.xiaohongshu.com/">小红书</option>
-        <option value="https://www.tiktok.com/">TikTok</option>
-      </select>
-      <span class="hint" id="sLoginMsg">登录一次即可长期复用（登录态存在上面的配置目录里）</span>
-    </div>
-    <div class="kv" style="grid-column:1/-1"><span>当前生效的 Cookies</span><b id="sCookiesStat">检测中…</b></div>
-    <label class="wide">MediaCrawler 根目录（外部工具，抖音/快手/B站主页展开用；留空 = 自动发现）
-      <input type="text" id="sMcRoot" placeholder="如 D:\MediaCrawler（需含 main.py，用它自己的 Python 环境）">
-    </label>
-    <div class="kv" style="grid-column:1/-1"><span>MediaCrawler 状态</span><b id="sMcStat">检测中…</b></div>
+    <div class="kv" style="grid-column:1/-1"><span>当前通用 Cookies</span><b id="sCookiesStat">检测中…</b></div>
     <label class="chk wide"><input type="checkbox" id="sAllowPrivate"> 允许访问内网 / 本机地址（有安全风险，默认关闭）</label>
-    <p class="hint">用途：部分站点（如 B 站、Instagram）对未登录访问有风控或不返回内容
-      （返回 412 / 403，或页面只有登录墙）。在浏览器登录后，把 Cookies 导出为 Netscape 格式
-      文件填入此处，即可复用登录态 —— <b>网页抓取、浏览器渲染、视频解析三条链路都会用上它</b>。
-      「从浏览器读取」需要先完全退出该浏览器（运行中会锁住 cookie 数据库），
-      导出成文件的方式不需要关浏览器，更稳。
-      Cookies 含账号凭据，请妥善保管，不要提交到公共仓库。</p>
+    <p class="hint">Instagram、抖音、小红书、TikTok、快手、B站、微博、知乎、Pinterest、YouTube
+      请使用独立的「平台登录」页，不要在这里共用 Cookies。这里仅保留给普通网站或特殊兼容场景。</p>
   </div>
 
   <h3 class="sec-title">运行环境</h3>
@@ -822,7 +812,7 @@
       以取得真实分辨率，因此筛选越严格、耗时越长，这是准确性的必要代价。</p>
     <p><b>关于部分站点抓不到</b>：有些站点用 Cloudflare / Anubis 等人机验证，或依赖 JS 动态渲染，
       静态抓取会被拦截，工具会明确提示原因，而不是静默返回空结果。
-      需要登录的站点可在设置里配置 Cookies。</p>
+      需要登录的已支持平台请在「平台登录」页建立独立登录态。</p>
     <p><b>合规</b>：本工具仅供个人学习与备份用途。请勿用于侵犯版权、绕过付费墙或大规模抓取。
       下载的内容版权归原作者与站点所有，请遵守目标站点服务条款与当地法律。</p>
   </div>
@@ -836,8 +826,8 @@
       Bot Check、结果明显不完整，或主页/账号批量抓取为空时，再为对应平台建立登录态。</p>
     <p><b>换电脑不会自动带走登录态</b>：安装包不包含你的 Cookies、账号、浏览器 Profile、下载记录或私人配置。
       每台电脑需要按实际需要重新登录。程序自己的 ffmpeg、yt-dlp、gallery-dl、JS 运行时已随安装包提供。</p>
-    <p><b>外部增强能力</b>：MediaCrawler 目前仍是外部可选工具，不随安装包分发。没有它时，
-      抖音/快手/B站/微博/知乎等部分“账号主页批量展开”能力会降级或不可用；单条公开链接和其它平台不因此失效。</p>
+    <p><b>2.0 自包含</b>：主页/列表能力由程序内置的 yt-dlp、gallery-dl、xhshow 与登录浏览器共同完成，
+      不再需要另外安装 MediaCrawler、Python 项目或配置外部项目路径。</p>
   </div>
 
   <h3 class="sec-title">平台登录建议</h3>
@@ -845,10 +835,10 @@
     <table>
       <thead><tr><th>平台</th><th>公开单条</th><th>主页/批量</th><th>建议</th><th></th></tr></thead>
       <tbody>
-        <tr><td>Instagram</td><td>有时免登录</td><td>强烈建议登录</td><td>批量/Reels 易遇登录墙或 429；登录一次长期复用</td><td><button class="btn tiny help-login" data-url="https://www.instagram.com/">去登录</button></td></tr>
-        <tr><td>小红书</td><td>当前可直接解析多数公开笔记</td><td>建议登录</td><td>批量、风控或内容受限时使用登录态更稳</td><td><button class="btn tiny help-login" data-url="https://www.xiaohongshu.com/">去登录</button></td></tr>
-        <tr><td>抖音 / 快手</td><td>视页面而定</td><td>通常建议登录</td><td>主页批量更依赖登录态；完整能力还依赖本机 MediaCrawler</td><td><button class="btn tiny help-login" data-url="https://www.douyin.com/">去登录</button></td></tr>
-        <tr><td>Pinterest</td><td>部分公开内容可用</td><td>建议登录</td><td>未登录容易遇登录墙/空页面</td><td><button class="btn tiny help-login" data-url="https://www.pinterest.com/">去登录</button></td></tr>
+        <tr><td>Instagram</td><td>有时免登录</td><td>强烈建议登录</td><td>批量/Reels 易遇登录墙或 429；登录一次长期复用</td><td><button class="btn tiny help-login" data-platform="ig">去登录</button></td></tr>
+        <tr><td>小红书</td><td>当前可直接解析多数公开笔记</td><td>建议登录</td><td>批量、风控或内容受限时使用登录态更稳</td><td><button class="btn tiny help-login" data-platform="xhs">去登录</button></td></tr>
+        <tr><td>抖音 / 快手</td><td>视页面而定</td><td>通常建议登录</td><td>主页批量会优先使用内置提取器，必要时用该平台独立登录浏览器</td><td><button class="btn tiny help-login" data-platform="dy">抖音登录</button> <button class="btn tiny help-login" data-platform="ks">快手登录</button></td></tr>
+        <tr><td>Pinterest</td><td>部分公开内容可用</td><td>建议登录</td><td>未登录容易遇登录墙/空页面</td><td><button class="btn tiny help-login" data-platform="pin">去登录</button></td></tr>
         <tr><td>YouTube</td><td>通常免登录</td><td>多数公开频道免登录</td><td>年龄限制、会员内容、Bot Check 时再配置登录态</td><td></td></tr>
         <tr><td>B站 / 微博 / 知乎</td><td>公开内容常可免登录</td><td>建议登录</td><td>高清、频繁访问、主页批量时更容易触发限制</td><td></td></tr>
         <tr><td>普通网站 / 媒体直链</td><td>通常不需要</td><td>通常不需要</td><td>除非网站本身要求账号或验证码</td><td></td></tr>
@@ -860,15 +850,15 @@
   <div class="settings">
     <div class="kv"><span>核心运行依赖</span><b id="hCoreEnv">检测中…</b></div>
     <div class="kv"><span>Cookies</span><b id="hCookieEnv">检测中…</b></div>
-    <div class="kv"><span>MediaCrawler</span><b id="hMcEnv">检测中…</b></div>
+    <div class="kv"><span>平台登录</span><b id="hLoginEnv">检测中…</b></div>
   </div>
 
   <h3 class="sec-title">遇到问题先这样判断</h3>
   <div class="notice">
-    <p><b>403 / 412 / 登录墙</b>：通常是站点要求登录或当前 Cookie 失效。先到「设置 → 站点访问」登录对应平台。</p>
+    <p><b>403 / 412 / 登录墙</b>：通常是站点要求登录或当前 Cookie 失效。先到「平台登录」重新登录对应平台。</p>
     <p><b>429</b>：通常是访问频率或 IP 风控。降低频率、稍后重试；登录态有效也不代表一定不会被限流。</p>
     <p><b>Sign in to confirm you're not a bot / Bot Check</b>：多半是网络/IP/站点风控，不等于安装失败。换正常网络后再试。</p>
-    <p><b>批量能抓但数量明显少</b>：先确认是否已登录，再看该电脑是否配置 MediaCrawler；不同账号、IP、地区看到的内容也可能不同。</p>
+    <p><b>批量能抓但数量明显少</b>：先确认对应平台登录态是否有效；不同账号、IP、地区看到的内容也可能不同。</p>
     <p><b>缩略图空白但视频能解析</b>：通常是图床防盗链或登录态问题；Instagram 已有登录态/代理兜底，仍异常时先刷新登录态。</p>
     <p><b>程序打不开</b>：桌面壳默认使用 Windows WebView2；若桌面壳初始化失败，会回退到默认浏览器。
       也可用 <code>MediaDownloader.exe --browser</code> 强制浏览器模式排错。</p>
@@ -884,6 +874,44 @@
 </section>
 
 </main>
+
+
+<!-- ============ 首次使用向导 ============ -->
+<div class="wizard-backdrop" id="firstUseWizard" hidden>
+  <div class="wizard-card">
+    <div class="wizard-head">
+      <div><b>Media Downloader 2.0 首次使用向导</b><div class="hint" id="wizardStepLabel">步骤 1 / 3</div></div>
+      <button class="btn tiny ghost" id="wizardClose">稍后设置</button>
+    </div>
+    <div class="wizard-step" id="wizardStep1">
+      <h3>1. 运行环境</h3>
+      <p>2.0 为自包含版本，不需要 MediaCrawler 或其它外部 Python 项目。</p>
+      <div class="settings">
+        <div class="kv"><span>ffmpeg</span><b id="wFfmpeg">检测中…</b></div>
+        <div class="kv"><span>JS 运行时</span><b id="wJs">检测中…</b></div>
+        <div class="kv"><span>下载目录</span><b id="wDownloadNow">检测中…</b></div>
+      </div>
+    </div>
+    <div class="wizard-step" id="wizardStep2" hidden>
+      <h3>2. 下载目录</h3>
+      <p class="hint">留空使用系统默认下载目录。自定义目录会在重启程序后生效。</p>
+      <label>自定义下载根目录
+        <input type="text" id="wDownloadsDir" placeholder="留空 = %USERPROFILE%\Downloads\MediaDownloader">
+      </label>
+    </div>
+    <div class="wizard-step" id="wizardStep3" hidden>
+      <h3>3. 平台登录（可选）</h3>
+      <p>公开链接能直接使用时不必登录。你也可以现在登录常用平台；每个平台的登录态完全独立。</p>
+      <div class="platform-login-grid compact" id="wizardLoginGrid"></div>
+    </div>
+    <div class="wizard-actions">
+      <button class="btn ghost" id="wizardBack" hidden>上一步</button>
+      <div class="spacer"></div>
+      <button class="btn primary" id="wizardNext">下一步</button>
+      <button class="btn primary" id="wizardFinish" hidden>完成</button>
+    </div>
+  </div>
+</div>
 
 <!-- ============ 任务面板 ============ -->
 <div class="taskdock" id="taskDock">

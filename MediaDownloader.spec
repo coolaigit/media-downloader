@@ -14,7 +14,7 @@
 
 资源白名单制：datas 只收明确列出的项（web/ + bin/ffmpeg.exe + 证书/
 playwright 运行时数据）。downloads/ data/ config.json cookies profile
-login_state .workbuddy .wbapp_* _pylibs MediaCrawler build-probe
+login_state .workbuddy .wbapp_* _pylibs build-probe
 .venv-build 等 sensitive/外部项从不进入 —— 它们不在白名单里。
 """
 import os

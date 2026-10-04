@@ -889,7 +889,7 @@ def download_video(
     # [vcodec!=none] 会把真实视频错误过滤成“格式不存在”。音频直链扩展名不会进这里。
     direct_video_exts = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".flv", ".m4v", ".mpg", ".mpeg", ".3gp", ".ts"}
     direct_ext = Path(urlparse(url).path).suffix.lower()
-    # MediaCrawler/XHS 给出的签名播放地址有些并不带扩展名，但 yt-dlp 对它们只会走 Generic。
+    # 内置平台来源给出的签名播放地址有些并不带扩展名，但 yt-dlp 对它们只会走 Generic。
     # 这类地址已经是“解析后的媒体”，不应再二次挑格式；完全省略 format 最稳。
     is_generic_media = (direct_ext in direct_video_exts) or (not has_specific_extractor(url))
     fmt = None if (is_generic_media and not prefer_audio_only and quality != "audio" and not format_id) else build_format_selector(

@@ -1,436 +1,30 @@
 # -*- coding: utf-8 -*-
-"""平台主页作品列表：把「抖音 / 小红书 / 快手 / B站 / 微博 / 知乎 的个人主页」交给
-本机已安装并登录的 **MediaCrawler**（GitHub: NanmiCoder/MediaCrawler）来展开。
+"""Self-contained platform homepage/detail sources for MediaDownloader 2.0.
 
-## 为什么不自己写解析（2026-09-23 实测结论）
-
-这些平台的主页接口都要**签名参数 + 登录态**，而且是对抗性的：
-
-| 尝试过的路子 | 实测结果 |
-|---|---|
-| 我们的渲染引擎渲染主页 HTML | 抖音 793KB 页面里 `aweme_id` **0 个**、`/video/` 链接 **0 个**（作品列表全靠签名接口异步拿）；标题能拿到 |
-| 抖音免签名老接口 `iesdouyin.com/web/api/v2/aweme/post/` | HTTP 200 但**响应体 0 字节**（已停用） |
-| 抖音 web 接口 `/aweme/v1/web/aweme/post/` | **403 `Blocked by ArgusSecurityPlugin Uifid Not Found`** |
-| 抖音分享页 `iesdouyin.com/share/user/<sec_uid>` | 返回 72KB **混淆 JS 反爬盾**页，无数据 |
-| MediaCrawler creator 模式（旧版 d6f7c5b） | 同样 403 Uifid Not Found |
-| **MediaCrawler 更新到上游 380b426** | ✅ **成功**：抖音主页 35 条作品，每条都带签名直链 `video_download_url` |
-
-所以这里的做法是**升级并使用现成工具**，而不是重写 a_bogus / x-s 签名：
-上游 380b426 的提交名就是 `fix(dy): 补上 ArgusSecurityPlugin 要求的 x-tt-argus 请求头`。
-
-## 本模块的职责（**不是**站点解析规则）
-
-1. **发现工具**：定位 MediaCrawler 根目录 / 它的 python / 数据目录（设置 → 环境变量 → 常见路径）
-2. **认平台**：URL 宿主 → MediaCrawler 的平台短名（dy/xhs/ks/bili/wb/zhihu）
-   —— 这只是「把地址交给哪个现成工具」的映射，不是内容解析规则
-3. **查登录态**：browser_data/{platform}_user_data_dir
-4. **调用 + **读结果**：<MC>/wrapper.py --type creator ... → 读 JSONL → 统一成项目条目
-5. 失败时**如实说明**（没装 / 未登录 / 被风控 / 超时），并给出下一步怎么做
+Runtime sources are bundled libraries (yt-dlp, gallery-dl, xhshow) plus the
+application's own Playwright renderer. There is no external crawler process,
+external Python environment, or project-path dependency.
 """
 from __future__ import annotations
 
-import glob
 import json
 import os
 import re
-import shutil
 import subprocess
-import sys
-import threading
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
-from .config import DATA_ROOT, FROZEN, RESOURCE_ROOT
-from . import subproc
+from .config import RESOURCE_ROOT
+from . import platform_login, subproc
 
-# URL 宿主 → MediaCrawler 平台短名（现成工具的平台键，不是解析规则）
-_HOST_TO_PLATFORM = {
-    "douyin.com": "dy",
-    "iesdouyin.com": "dy",
-    "xiaohongshu.com": "xhs",
-    "xhslink.com": "xhs",
-    "kuaishou.com": "ks",
-    "bilibili.com": "bili",
-    "weibo.com": "wb",
-    "weibo.cn": "wb",
-    "zhihu.com": "zhihu",
-    "pinterest.com": "pin",
-    "instagram.com": "ig",
-}
-PLATFORM_NAMES = {"dy": "抖音", "xhs": "小红书", "ks": "快手",
-                  "bili": "B站", "wb": "微博", "zhihu": "知乎",
-                  "pin": "Pinterest", "ig": "Instagram"}
-# 平台短名 → store 层写出的数据目录名
-_PLATFORM_DIR = {"dy": "douyin", "xhs": "xhs", "ks": "kuaishou",
-                 "bili": "bilibili", "wb": "weibo", "zhihu": "zhihu"}
-
-_search_cache: tuple[float, dict] | None = None
-SEARCH_TTL = 60.0
-
-# MediaCrawler 用的是**独占的**浏览器 profile 目录（browser_data/<platform>_user_data_dir），
-# 同时跑两个实例会直接崩：实测（2026-09-23）并发时的报错是
-#   BrowserType.launch_persistent_context: Target page, context or browser has been closed
-# 外加 httpx.ReadTimeout —— 于是「明明能抓的平台突然什么都抓不到」。
-# 所以这里必须串行：进程内用锁，跨进程再用一个带时间戳的锁文件兜底。
-_run_lock = threading.Lock()
-_LOCK_FILE = DATA_ROOT / "data" / "mediacrawler.lock"
-_LOCK_STALE_S = 20 * 60
-_lock_local = threading.local()
-
-
-def _pid_alive(pid: int) -> bool:
-    """进程还活着吗（Windows 用 OpenProcess，不引入 psutil）。
-
-    为什么需要：抓取被 Ctrl-C / 超时杀掉时，锁文件会留在磁盘上，而旧逻辑要等
-    20 分钟才算「陈旧」—— 这 20 分钟里所有抓取都被拒（实测本轮连续两次被自己的
-    僵尸锁挡住，白等 300 秒）。这里直接用「进程是否还在」判断，僵尸锁立刻可抢。
-    """
-    if not pid or pid <= 0:
-        return False
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
-    try:
-        import ctypes
-        from ctypes import wintypes
-        SYNCHRONIZE = 0x00100000
-        k32 = ctypes.windll.kernel32
-        h = k32.OpenProcess(SYNCHRONIZE, False, int(pid))
-        if not h:
-            return False
-        try:
-            # 0 超时：WAIT_TIMEOUT(258) = 还在跑；WAIT_OBJECT_0(0) = 已退出
-            return k32.WaitForSingleObject(h, 0) == 0x00000102
-        finally:
-            k32.CloseHandle(h)
-    except Exception:  # noqa: BLE001
-        return True          # 判断不了就当它活着（保守）
-
-
-def acquire_run_slot(timeout_s: float = 600.0) -> tuple[bool, str]:
-    """拿到「跑一次 MediaCrawler」的名额（串行）。返回 (ok, 说明)。"""
-    got = _run_lock.acquire(timeout=timeout_s)
-    if not got:
-        return False, "另一个抓取任务正在使用外部工具，请稍后再试。"
-    _lock_local.held = True
-    try:
-        _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if _LOCK_FILE.exists():
-            try:
-                info = json.loads(_LOCK_FILE.read_text(encoding="utf-8"))
-                age = time.time() - float(info.get("ts") or 0)
-            except Exception:  # noqa: BLE001
-                info, age = {}, _LOCK_STALE_S + 1
-            other = info.get("pid")
-            if other and other != os.getpid():
-                if _pid_alive(other) and age < _LOCK_STALE_S:
-                    # 跨进程占用（比如另一条 import 了本模块的进程/脚本）
-                    _release_run_slot()
-                    return False, (f"外部工具正被另一个进程占用（pid={other}，"
-                                   f"{int(age)} 秒前开始）。请等它跑完再试。")
-                # 进程已经不在（被 Ctrl-C / 超时杀掉）→ 僵尸锁，直接抢过来
-                _LOCK_FILE.unlink(missing_ok=True)
-        _LOCK_FILE.write_text(json.dumps({"pid": os.getpid(), "ts": time.time()}),
-                              encoding="utf-8")
-    except OSError:
-        pass
-    return True, ""
-
-
-def _release_run_slot() -> None:
-    if getattr(_lock_local, "held", False):
-        _lock_local.held = False
-        try:
-            _LOCK_FILE.unlink()
-        except OSError:
-            pass
-        try:
-            _run_lock.release()
-        except RuntimeError:
-            pass
-
-
-def release_run_slot() -> None:
-    _release_run_slot()
+PLATFORM_NAMES = {k: v["name"] for k, v in platform_login.PLATFORMS.items()}
 
 
 def platform_for_url(url: str) -> str:
-    """URL 属于哪个平台（不认识返回空串）。只按域名后缀匹配，避免 notyoutube.com 这类误判。"""
-    try:
-        host = (urlparse(url or "").hostname or "").lower()
-    except ValueError:
-        return ""
-    if host.startswith("www."):
-        host = host[4:]
-    for dom, key in _HOST_TO_PLATFORM.items():
-        if host == dom or host.endswith("." + dom):
-            return key
-    return ""
-
-
-_SKIP_DIRS = {
-    "node_modules", ".git", ".venv", "venv", "site-packages", "__pycache__",
-    "windows", "program files", "program files (x86)", "programdata", "appdata",
-    "$recycle.bin", "system volume information", "miniconda3", "anaconda3",
-    "playwright-browsers", "ms-playwright", "cache", "temp", "tmp",
-}
-
-
-def _scan_for_tool(root: Path, max_depth: int = 3, max_dirs: int = 4000,
-                   budget_s: float = 2.5) -> list[Path]:
-    """在 root 下**有限深度**地找名为 MediaCrawler 的目录。
-
-    ⚠️ 血泪教训（2026-09-23）：第一版用 `root.glob("**/MediaCrawler")` 扫 E:/ 和 D:/，
-    直接把进程卡死（用户等了两分钟没反应）。全盘递归搜索绝不能出现在请求路径上 ——
-    现在限制深度 + 跳过常见大目录 + 目录数上限 + 时间预算。
-    """
-    found: list[Path] = []
-    if not root.exists():
-        return found
-    t0 = time.time()
-    stack: list[tuple[Path, int]] = [(root, 0)]
-    seen = 0
-    while stack:
-        d, depth = stack.pop()
-        if time.time() - t0 > budget_s or seen > max_dirs:
-            break
-        try:
-            entries = list(os.scandir(d))
-        except OSError:
-            continue
-        for e in entries:
-            seen += 1
-            if seen > max_dirs:
-                break
-            try:
-                if not e.is_dir(follow_symlinks=False):
-                    continue
-            except OSError:
-                continue
-            name = e.name.lower()
-            if name in ("mediacrawler", "mediacrawler-mcp"):
-                found.append(Path(e.path))
-            if depth + 1 < max_depth and name not in _SKIP_DIRS and not name.startswith("$"):
-                stack.append((Path(e.path), depth + 1))
-    return found
-
-
-def _candidates_root() -> list[Path]:
-    """可能藏着 MediaCrawler 的目录（按可靠性排序，先便宜后贵）。"""
-    out: list[Path] = []
-    env = os.environ.get("MEDIACRAWLER_ROOT")
-    if env:
-        out.append(Path(env))
-    try:
-        from . import store
-        cfg = store.load().get("mediacrawler_root")
-        if cfg:
-            out.append(Path(str(cfg)))
-    except Exception:  # noqa: BLE001
-        pass
-    here = RESOURCE_ROOT
-    out.append(here / "MediaCrawler")
-    out.append(here.parent / "MediaCrawler")
-    return out
-
-
-def _discover_root() -> Path | None:
-    """先查便宜位置，再在少量根目录里做**有限深度**扫描。"""
-    for cand in _candidates_root():
-        if _check_root(cand):
-            return cand
-    roots = [Path("E:/"), Path("D:/"), Path.home() / "Documents",
-             RESOURCE_ROOT.parent]
-    for root in roots:
-        for hit in _scan_for_tool(root):
-            if _check_root(hit):
-                return hit
-    return None
-
-
-def _check_root(root: Path) -> dict | None:
-    """一个目录是不是可用的 MediaCrawler。"""
-    if not root or not (root / "main.py").exists():
-        return None
-    # wrapper.py 由 MCP 维护（无头模式必需）；没有它也能跑 main.py，只是风控更严
-    wrapper = root / "wrapper.py"
-    py_env = os.environ.get("MEDIACRAWLER_PYTHON")
-    # ⚠️ 1C：frozen 下 sys.executable 是 MediaDownloader.exe，拿它跑 MediaCrawler
-    # 的 main.py 等于「用自己跑别人的脚本」—— 必须排除，只认外部解释器：
-    # MEDIACRAWLER_PYTHON > MediaCrawler 自己的 .venv > （源码模式才允许）当前解释器。
-    # 都没有时如实报「未找到」，宁可降级也不伪造（找不到的提示语见 find_mediacrawler）。
-    for py in ([Path(py_env)] if py_env else []) + [
-            root / ".venv" / "Scripts" / "python.exe",
-            root / ".venv" / "bin" / "python",
-            *([] if FROZEN else [Path(sys.executable)])]:
-        if py and Path(py).exists():
-            data_env = os.environ.get("MEDIACRAWLER_DATA_DIR")
-            sib = root.parent / "data"
-            data_dir = Path(data_env) if data_env else (sib if sib.exists() else root / "data")
-            return {"root": root, "python": Path(py), "data_dir": data_dir,
-                    "wrapper": wrapper if wrapper.exists() else None}
-    return None
-
-
-def invalidate_cache() -> None:
-    """设置里改了 mediacrawler_root 后调用：下一次查找立即重扫，不等 SEARCH_TTL。"""
-    global _search_cache
-    _search_cache = None
-
-
-def find_mediacrawler(force: bool = False) -> dict:
-    """定位 MediaCrawler（带缓存）。返回 {found, root, python, data_dir, wrapper, reason}。"""
-    global _search_cache
-    if not force and _search_cache and time.time() - _search_cache[0] < SEARCH_TTL:
-        return _search_cache[1]
-    info: dict = {"found": False, "root": None, "python": None, "data_dir": None,
-                  "wrapper": None, "reason": ""}
-    root = _discover_root()
-    ok = _check_root(root) if root else None
-    if ok:
-        # 统一转成字符串：这个 dict 会进 /api/status 之类的 JSON 响应，
-        # Path 对象不可序列化（实测踩过：诊断脚本 json.dumps 直接抛 TypeError）
-        info.update({k: (str(v) if v is not None else None) for k, v in ok.items()})
-        info["found"] = True
-    else:
-        info["reason"] = ("未找到 MediaCrawler（需要它的 main.py 与虚拟环境）。"
-                          "安装：git clone https://github.com/NanmiCoder/MediaCrawler，"
-                          "装好依赖后在本工具的「设置」里填它的根目录（mediacrawler_root）。")
-    _search_cache = (time.time(), info)
-    return info
-
-
-def login_cached(platform: str) -> bool:
-    """该平台是否已有登录态缓存（browser_data/{platform}_user_data_dir）。"""
-    info = find_mediacrawler()
-    if not info["found"]:
-        return False
-    d = Path(info["root"]) / "browser_data" / f"{platform}_user_data_dir"
-    try:
-        return d.exists() and any(d.iterdir())
-    except OSError:
-        return False
-
-
-def status() -> dict:
-    """给设置页/接口用：工具是否就绪、各平台登录态。"""
-    info = find_mediacrawler()
-    plats = {}
-    if info["found"]:
-        for key, name in PLATFORM_NAMES.items():
-            plats[key] = {"name": name, "logged_in": login_cached(key)}
-    return {"found": info["found"], "root": str(info["root"] or ""),
-            "python": str(info["python"] or ""), "data_dir": str(info["data_dir"] or ""),
-            "reason": info["reason"], "platforms": plats}
-
-
-def login_hint(platform: str) -> str:
-    """未登录时给用户的一句可执行指引。"""
-    info = find_mediacrawler()
-    if not info["found"]:
-        return info["reason"]
-    name = PLATFORM_NAMES.get(platform, platform)
-    return (f"{name}尚未登录。在终端执行一次扫码登录即可（登录态会缓存复用）：\n"
-            f'  cd "{info["root"]}"\n'
-            f'  "{info["python"]}" main.py --platform {platform} --lt qrcode '
-            f'--type search --keywords "测试"')
-
-
-def _run(argv: list[str], cwd: Path, timeout: int, log_path: Path) -> tuple[int, str]:
-    """跑子进程，stdout/stderr 落文件（便于超时后排查），返回 (返回码, 日志尾部)。"""
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    # playwright 浏览器路径：子进程不继承时容易找不到浏览器（与 MCP 的处理一致）
-    if not env.get("PLAYWRIGHT_BROWSERS_PATH"):
-        for p in (r"E:\AI\playwright-browsers",
-                  str(Path.home() / "AppData/Local/ms-playwright")):
-            if os.path.isdir(p):
-                env["PLAYWRIGHT_BROWSERS_PATH"] = p
-                break
-    with open(log_path, "ab") as f:
-        f.write(f"\n[{time.strftime('%H:%M:%S')}] cmd={' '.join(argv[-8:])}\n".encode())
-        try:
-            from .win_job import run_bound
-            # 父死子灭：服务重启/被杀时 MediaCrawler 不留孤儿
-            proc = run_bound(argv, timeout=timeout, cwd=str(cwd),
-                             stdin=subprocess.DEVNULL, stdout=f, stderr=f,
-                             env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except subprocess.TimeoutExpired:
-            return -1, f"执行超时（超过 {timeout} 秒）"
-        except Exception as e:  # noqa: BLE001
-            return -2, f"启动失败：{type(e).__name__}: {e}"
-    tail = ""
-    try:
-        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-            tail = "\n".join([l for l in f.read().splitlines() if l.strip()][-40:])[-1500:]
-    except OSError:
-        pass
-    return proc.returncode, tail
-
-
-def _read_jsonl(platform: str, kind: str = "contents", prefer: str = "",
-                newer_than: float = 0.0) -> list[dict]:
-    """读本次抓取的 JSONL（文件名形如 {type}_{kind}_{日期}.jsonl）。
-
-    两个必须的约束（2026-09-23 实测踩到）：
-      prefer —— 只认本次用的类型前缀（creator_ / search_ / detail_）。
-        工具把不同类型的输出放在**同一个目录**、文件名前缀不同；
-        旧逻辑取「最新修改的那个」，于是失败的 creator 抓取会把上一次 search
-        的结果当成「主页作品」返回（假成功，比 0 条更糟）。
-      newer_than —— 只认本次开跑之后改动过的文件，彻底排除陈年结果。
-    """
-    info = find_mediacrawler()
-    if not info["found"]:
-        return []
-    dirs = [Path(info["data_dir"]) / _PLATFORM_DIR.get(platform, platform) / "jsonl",
-            Path(info["root"]) / "data" / _PLATFORM_DIR.get(platform, platform) / "jsonl"]
-    files: list[str] = []
-    for d in dirs:
-        files += glob.glob(str(d / f"*_{kind}_*.jsonl"))
-    if prefer:
-        picked = [f for f in files if os.path.basename(f).startswith(prefer + "_")]
-        if picked:
-            files = picked
-    if newer_than:
-        fresh = [f for f in files if os.path.getmtime(f) >= newer_than]
-        if fresh:
-            files = fresh
-        else:
-            return []          # 没有本次产生的结果 → 如实返回空，不拿旧的凑数
-    if not files:
-        return []
-    latest = max(files, key=os.path.getmtime)
-    rows: list[dict] = []
-    with open(latest, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return rows
-
-
-def _clear_jsonl(platform: str) -> None:
-    """清掉该平台旧结果，避免把上一次的内容当成这一次的。"""
-    info = find_mediacrawler()
-    if not info["found"]:
-        return
-    for d in (Path(info["data_dir"]) / _PLATFORM_DIR.get(platform, platform) / "jsonl",
-              Path(info["root"]) / "data" / _PLATFORM_DIR.get(platform, platform) / "jsonl"):
-        for p in glob.glob(str(d / "*.jsonl")):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+    return platform_login.platform_for_url(url)
 
 
 _COLLECTION_SEG_NAMES = frozenset((
@@ -440,53 +34,12 @@ _COLLECTION_SEG_NAMES = frozenset((
 ))
 
 
-# 作品列表**只存在于签名接口**里的平台（网页抓取必然 0 条或只剩站点自己的宣传片）。
-# 实测依据：抖音主页 793KB HTML 里 aweme_id 0 个、/video/ 链接 0 个；
-# 快手同类。对它们，外部工具失败时应如实收尾，不要回退网页抓取制造垃圾。
-#
-# ⚠️ 小红书**不在**这个名单里（2026-09-26 实测更正）：它的主页页面上有 100+ 条
-# `/explore/<id>?xsec_token=…` 笔记链接，而且**登录态渲染的笔记页里直接带 mp4 主地址**
-# （`masterUrl: …/xxx_259.mp4?sign=…`）。所以小红书走「网页抓取 + 下钻」这条路是**能拿到视频**的，
-# 只是前提是渲染用的是一个已登录的配置（browser_user_data_dir）。
-_AUTHORITATIVE = frozenset(("dy", "ks", "xhs", "pin", "ig"))
-
-
-def authoritative(url: str) -> bool:
-    """这个平台的「主页作品列表」是否只能靠外部来源（回退网页抓取没有意义）。
-
-    dy/ks：作品列表只在签名接口里，网页抓取全是站点宣传片（实测）。
-    pin/ig：未登录就是登录墙、登录后数据也在接口里 —— 我们自己的网页管线
-    实测拿不过 gallery-dl（用户的画板明明有视频 pin，网页管线 0 条）。
-    """
-    return platform_for_url(url) in _AUTHORITATIVE
-
-
-def source_name(platform: str) -> str:
-    """给界面看的来源名（哪个平台用哪个工具）。"""
-    return {
-        "dy": "MediaCrawler", "ks": "MediaCrawler", "bili": "MediaCrawler",
-        "wb": "MediaCrawler", "zhihu": "MediaCrawler",
-        "xhs": "xhshow / MediaCrawler",
-        "pin": "gallery-dl", "ig": "gallery-dl",
-    }.get(platform, "外部来源")
-
-
 def creator_id_from_url(url: str) -> str:
-    """从主页地址里取出「创作者标识」，取不到就返回空串。
-
-    为什么要这一步（2026-09-23 实测）：把**整条 URL** 交给 MediaCrawler 的
-    `--creator_id` 时，它内部会先做一次网络请求去解析地址，实测在抖音主页上
-    `httpx.ReadTimeout`（跑到 111 秒后整条失败）；而直接给它标识（如抖音的
-    sec_uid）秒级成功。这不是站点解析规则，只是「地址里本来就带着标识，别让它再解析一遍」：
-    取最后一个像标识的路径段（够长 / 纯数字 / 含大小写混合都算像），
-    跳过集合名词段（/user/profile/<id> 取 <id>，/@x/videos 取 @x）。
-    """
     try:
         p = urlparse(url or "")
     except ValueError:
         return ""
     segs = [s for s in (p.path or "").split("/") if s]
-    # 有些平台把标识放在查询串里（?uid= / ?id=）
     q = dict(kv.split("=", 1) for kv in (p.query or "").split("&") if "=" in kv)
     for k in ("sec_uid", "uid", "user_id", "id", "mid", "creator_id"):
         v = q.get(k)
@@ -494,113 +47,68 @@ def creator_id_from_url(url: str) -> str:
             return v
     for seg in reversed(segs):
         s = seg.strip()
-        if not s or s.lower() in _COLLECTION_SEG_NAMES:
-            continue
-        if s.startswith(("#", "?")):
+        if not s or s.lower() in _COLLECTION_SEG_NAMES or s.startswith(("#", "?")):
             continue
         if len(s) >= 6 or s.isdigit():
             return s
     return ""
 
 
-def normalize_row(platform: str, r: dict) -> dict | None:
-    """把外部工具的一行 JSONL 映射成我们的条目（字段名各平台不同，这里统一）。
-
-    实测字段差异：
-      抖音   aweme_url + video_download_url
-      小红书 note_url  + video_url（多个档位用逗号拼在一个字段里）
-    只认一种会让另一个平台永远 0 条 —— 所以两种都认、逗号拆开。
-    """
-    page = (r.get("aweme_url") or r.get("note_url") or "").strip()
-    raw_direct = (r.get("video_download_url") or r.get("video_url") or "").strip()
-    alts = [u.strip() for u in raw_direct.split(",") if u.strip()]
-    direct = alts[0] if alts else ""
-    if not page and not direct:
-        return None
-    return {
-        "page_url": page,
-        "direct_url": direct,
-        "variants": alts[1:],
-        "title": (r.get("title") or r.get("desc") or "").strip()[:150],
-        "cover": (r.get("cover_url") or "").strip(),
-        "uploader": (r.get("nickname") or "").strip(),
-        "site": (urlparse(page).hostname or "").replace("www.", ""),
-        "duration": r.get("duration"),
-        "stats": {k: r.get(k) for k in ("liked_count", "comment_count",
-                                       "collected_count", "share_count")
-                  if r.get(k) is not None},
-    }
+_AUTHORITATIVE = frozenset(("dy", "ks", "xhs", "pin", "ig"))
 
 
-def mediacrawler_detail_item(platform: str, url: str, *, timeout: int = 300, on_note=None) -> dict:
-    """用已有 MediaCrawler 登录态解析单条内容；只作为现有 yt-dlp 失败后的兜底。"""
-    info = find_mediacrawler()
-    if not info["found"]:
-        return {"ok": False, "item": None, "error": info["reason"], "source": "MediaCrawler"}
-    if not login_cached(platform):
-        return {"ok": False, "item": None, "error": login_hint(platform), "source": "MediaCrawler"}
-    ok_slot, why = acquire_run_slot()
-    if not ok_slot:
-        return {"ok": False, "item": None, "error": why, "source": "MediaCrawler"}
-    log_path = Path(info["data_dir"]) / "crawler_run.log"
-    _clear_jsonl(platform)
-    argv = [str(info["python"]),
-            str(info["wrapper"] or (Path(info["root"]) / "main.py")),
-            "--platform", platform, "--lt", "qrcode",
-            "--type", "detail", "--specified_id", url,
-            "--save_data_option", "jsonl", "--save_data_path", str(info["data_dir"]),
-            "--get_comment", "no", "--get_media", "no", "--headless", "yes"]
-    t_start = time.time()
-    try:
-        if on_note:
-            on_note(f"正在用已登录的 MediaCrawler 解析{PLATFORM_NAMES.get(platform, platform)}单条内容…")
-        rc, tail = _run(argv, Path(info["root"]), timeout, log_path)
-        rows = _read_jsonl(platform, "contents", prefer="detail", newer_than=t_start - 2)
-    finally:
-        release_run_slot()
-    for row in rows:
-        got = normalize_row(platform, row)
-        if got and got.get("direct_url"):
-            return {"ok": True, "item": got, "error": "", "rc": rc, "source": "MediaCrawler"}
-    why2 = tail or f"MediaCrawler 未返回可用视频（返回码 {rc}）"
-    return {"ok": False, "item": None, "error": why2[-500:], "rc": rc, "source": "MediaCrawler"}
+def authoritative(url: str) -> bool:
+    return platform_for_url(url) in _AUTHORITATIVE
 
 
-# ---------------------------------------------------------------- 来源二：gallery-dl
-# Pinterest / Instagram 交给成熟的开源下载器 gallery-dl（PyPI，长期维护）。
-# 它自带：登录态处理、翻页、HLS 视频解析（内部用 yt-dlp 合并音视频）。
-# 我们只做元数据模式（--dump-json，不落盘），拿到直链后仍走自己的下载队列。
+def source_name(platform: str) -> str:
+    if platform == "xhs":
+        return "内置 xhshow"
+    if platform in {"ig", "pin"}:
+        return "内置 gallery-dl / yt-dlp"
+    return "内置 yt-dlp / gallery-dl / 浏览器"
+
+
+def status() -> dict:
+    return {"self_contained": True, "external_runtime": False,
+            "platforms": platform_login.all_status()}
+
+
+def invalidate_cache() -> None:
+    return None
+
+
+def login_cached(platform: str) -> bool:
+    return platform_login.ready(platform)
+
+
+def login_hint(platform: str) -> str:
+    st = platform_login.status(platform)
+    name = st.get("name") or platform
+    if st.get("relogin_required"):
+        return f"{name} 登录态已失效，请到「平台登录中心」重新登录。"
+    return f"{name} 当前未登录；如公开访问失败，请到「平台登录中心」登录一次。"
+
+
+def _load_cookie_dict(keyword: str) -> tuple[dict, str]:
+    key = "xhs" if "xiaohongshu" in keyword else ""
+    if not key:
+        return {}, ""
+    ck = platform_login.requests_cookie_dict(key)
+    f = platform_login.cookie_file_for_platform(key)
+    return ck, f
+
 
 _VIDEO_EXTS = {"mp4", "m3u8", "mov", "webm", "mkv", "flv"}
 
 
-def _candidate_cookie_files() -> list[str]:
-    """可能装有登录态的 cookies 文件（按优先级）。
-
-    1. 设置里配置的 cookies_file
-    2. 登录助手导出的那份（跟登录态 profile 放在一起）
-    """
-    out: list[str] = []
-    # Instagram 使用 MediaDownloader 自己的独立登录态，避免和小红书/MediaCrawler profile 混用。
-    site_cookie = DATA_ROOT / "site_profiles" / "cookies_from_profile.txt"
-    if site_cookie.exists():
-        out.append(str(site_cookie))
-    try:
-        from . import store
-        f = str(store.load().get("cookies_file") or "").strip()
-        if f:
-            out.append(f)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from . import browser_profile
-        d = browser_profile.user_data_dir() or browser_profile.default_login_dir()
-        cand = str(Path(d).resolve().parent / "cookies_from_profile.txt")
-        if cand not in out:
-            out.append(cand)
-    except Exception:  # noqa: BLE001
-        pass
-    return [f for f in out if Path(f).expanduser().exists()]
+def _candidate_cookie_files(url: str = "") -> list[str]:
+    """Cookies for a known platform come only from that platform's isolated login."""
+    platform = platform_for_url(url)
+    if platform:
+        own = platform_login.cookie_file_for_platform(platform)
+        return [own] if own else []
+    return []
 
 
 def _cookie_file_has_domain(cookie_file: str, keyword: str) -> bool:
@@ -608,7 +116,7 @@ def _cookie_file_has_domain(cookie_file: str, keyword: str) -> bool:
         txt = Path(cookie_file).read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return False
-    return any(keyword in line and not line.startswith("#")
+    return any(keyword in line and not (line.startswith("#") and not line.startswith("#HttpOnly_"))
                for line in txt.splitlines())
 
 
@@ -622,7 +130,7 @@ def gallery_dl_items(url: str, *, limit: int = 60, timeout: int = 300,
     限流窗口通常几分钟内解除，所以失败后等一段时间再整体重跑。
     """
     cookie_file = ""
-    for f in _candidate_cookie_files():
+    for f in _candidate_cookie_files(url):
         cookie_file = f
         break                      # 有就带上（Pinterest 匿名也能用，带上无害）
     argv_extra = ["-o", "sleep-429=30"]   # 429 时每 30 秒重试，别误报「用户不存在」
@@ -686,7 +194,7 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
         on_note("正在用 gallery-dl 读取该页的作品列表（成熟开源下载器，只取元数据不下载）…")
     try:
         from .win_job import run_bound
-        # 父死子灭：同 MediaCrawler
+        # 父进程退出时一并收掉元数据子进程。
         proc = run_bound(argv, timeout=timeout, stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          cwd=str(RESOURCE_ROOT),
@@ -818,32 +326,7 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
             "login_required": False}
 
 
-def _load_cookie_dict(keyword: str) -> tuple[dict, str]:
-    """从候选 cookies 文件里取出指定域的 cookie dict（给签名接口用）。"""
-    for f in _candidate_cookie_files():
-        if not _cookie_file_has_domain(f, keyword):
-            continue
-        ck: dict = {}
-        try:
-            for line in Path(f).read_text(encoding="utf-8", errors="ignore").splitlines():
-                # ⚠️ `#HttpOnly_` 开头的行是**数据**不是注释 —— 小红书的 web_session
-                # 恰好就是 HttpOnly cookie，把它当注释跳过 = 永远「登录态失效」。
-                if not line or (line.startswith("#") and not line.startswith("#HttpOnly_")):
-                    continue
-                parts_ = line.split("\t")
-                if len(parts_) < 7 or keyword not in parts_[0]:
-                    continue
-                ck[parts_[5]] = parts_[6]
-        except OSError:
-            continue
-        if ck:
-            return ck, f
-    return {}, ""
 
-
-# ---------------------------------------------------------------- 来源三：xhshow 签名接口
-# 小红书「账号作品列表」官方接口需要 x-s / x-t 签名。自己实现签名是打地鼠，
-# 这里用开源签名库 xhshow（XHS-Downloader 同款依赖，专为小红书接口签名而生）。
 
 _XHS_USER_API = "https://edith.xiaohongshu.com/api/sns/web/v1/user_posted"
 
@@ -959,7 +442,7 @@ def xhs_author_items(url: str, *, limit: int = 30, timeout: int = 90,
 
 
 def _xhs_signed_detail_item(url: str, *, timeout: int = 60) -> dict:
-    """用 xhshow + 已导出的登录 cookie 直接解析一条小红书笔记，不依赖 MediaCrawler。"""
+    """用 xhshow + 该平台独立登录 cookie 直接解析一条小红书笔记。"""
     try:
         from xhshow import Xhshow
         from urllib.parse import parse_qs
@@ -1092,197 +575,215 @@ def _xhs_signed_detail_item(url: str, *, timeout: int = 60) -> dict:
     return {"ok": True, "item": item, "error": "", "source": "xhshow"}
 
 
+
 def xhs_detail_item(url: str, *, timeout: int = 300, on_note=None) -> dict:
-    """解析一条小红书笔记：内置 xhshow 优先，外部 MediaCrawler 仅作备用。"""
     direct = _xhs_signed_detail_item(url, timeout=min(timeout, 60))
     if direct.get("ok"):
         return direct
+    msg = str(direct.get("error") or "")
+    if platform_login.looks_like_auth_error(msg):
+        platform_login.mark_invalid("xhs", msg)
+        direct["error"] = "小红书登录态已失效，请到「平台登录中心」重新登录。" + (f" {msg}" if msg else "")
+    return direct
 
-    info = find_mediacrawler()
-    if not info["found"] or not login_cached("xhs"):
-        return direct
-    ok_slot, why = acquire_run_slot()
-    if not ok_slot:
-        return direct if direct.get("error") else {"ok": False, "item": None, "error": why}
-    log_path = Path(info["data_dir"]) / "crawler_run.log"
-    _clear_jsonl("xhs")
-    argv = [str(info["python"]),
-            str(info["wrapper"] or (Path(info["root"]) / "main.py")),
-            "--platform", "xhs", "--lt", "qrcode",
-            "--type", "detail", "--specified_id", url,
-            "--save_data_option", "jsonl", "--save_data_path", str(info["data_dir"]),
-            "--get_comment", "no", "--get_media", "no", "--headless", "yes"]
-    t_start = time.time()
+
+def _entry_item(entry: dict, source_url: str) -> dict | None:
+    page = str(entry.get("webpage_url") or entry.get("original_url") or entry.get("url") or "").strip()
+    if page and not page.startswith("http"):
+        page = ""
+    direct = ""
+    raw_url = str(entry.get("url") or "").strip()
+    if raw_url.startswith("http") and any(raw_url.lower().split("?", 1)[0].endswith("." + x)
+                                           for x in ("mp4", "webm", "m3u8", "mov", "flv")):
+        direct = raw_url
+    page = page or (source_url if direct else "")
+    if not page and not direct:
+        return None
+    return {
+        "page_url": page,
+        "direct_url": direct,
+        "variants": [],
+        "title": str(entry.get("title") or entry.get("description") or "")[:150],
+        "cover": str(entry.get("thumbnail") or ""),
+        "uploader": str(entry.get("uploader") or entry.get("channel") or ""),
+        "site": (urlparse(page or source_url).hostname or "").replace("www.", ""),
+        "duration": entry.get("duration"),
+        "kind_hint": "video",
+    }
+
+
+def ytdlp_items(url: str, *, limit: int = 30, on_note=None) -> dict:
     try:
-        if on_note:
-            on_note("内置接口未成功，正在回退到已登录的 MediaCrawler…")
-        rc, tail = _run(argv, Path(info["root"]), timeout, log_path)
-        rows = _read_jsonl("xhs", "contents", prefer="detail", newer_than=t_start - 2)
-    finally:
-        release_run_slot()
+        import yt_dlp
+    except ImportError:
+        return {"ok": False, "items": [], "login_required": False, "error": "内置 yt-dlp 不可用"}
+    platform = platform_for_url(url)
+    cookie = platform_login.cookie_file_for_platform(platform) if platform else ""
+    opts = {
+        "quiet": True, "no_warnings": True, "skip_download": True,
+        "extract_flat": "in_playlist", "playlistend": max(1, int(limit)),
+        "ignoreerrors": True, "noplaylist": False,
+    }
+    if cookie:
+        opts["cookiefile"] = cookie
+    if on_note:
+        on_note("正在用内置 yt-dlp 展开主页/列表…")
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:  # noqa: BLE001
+        msg = f"{type(e).__name__}: {e}"
+        auth = platform_login.looks_like_auth_error(msg)
+        if auth and platform and platform_login.ready(platform):
+            platform_login.mark_invalid(platform, msg)
+        return {"ok": False, "items": [], "login_required": auth, "error": msg[:500]}
+    if not isinstance(info, dict):
+        return {"ok": False, "items": [], "login_required": False, "error": "yt-dlp 未返回可解析数据"}
+    rows = list(info.get("entries") or [])
+    if not rows and info.get("id"):
+        rows = [info]
+    items = []
+    seen = set()
     for row in rows:
-        got = normalize_row("xhs", row)
-        if got and got.get("direct_url"):
-            return {"ok": True, "item": got, "error": "", "rc": rc, "source": "MediaCrawler"}
-    why2 = tail or f"MediaCrawler 未返回可用视频（返回码 {rc}）"
-    return {"ok": False, "item": None,
-            "error": (direct.get("error") or "") + "；MediaCrawler 回退也失败：" + why2[-400:]}
+        if not isinstance(row, dict):
+            continue
+        got = _entry_item(row, url)
+        if not got:
+            continue
+        key = got.get("page_url") or got.get("direct_url")
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(got)
+        if len(items) >= int(limit):
+            break
+    return {"ok": bool(items), "items": items, "login_required": False,
+            "error": "" if items else "yt-dlp 没有返回主页作品条目"}
 
 
-# ---------------------------------------------------------------- 统一入口：按平台挑来源
+_MEDIA_RE = re.compile(r'https?://[^"\\\s<>]+?\.(?:mp4|webm|m3u8|mov|flv)(?:\?[^"\\\s<>]*)?', re.I)
+_HTTP_RE = re.compile(r'https?://[^"\\\s<>]+', re.I)
+
+
+def _same_site_candidate(base_url: str, candidate: str) -> bool:
+    try:
+        a, b = urlparse(base_url), urlparse(candidate)
+    except ValueError:
+        return False
+    if not b.scheme.startswith("http") or not b.hostname:
+        return False
+    base_platform = platform_for_url(base_url)
+    if base_platform and platform_for_url(candidate) != base_platform:
+        return False
+    if not base_platform and (a.hostname or "").lower() != (b.hostname or "").lower():
+        return False
+    path = (b.path or "").strip("/")
+    if not path:
+        return False
+    segs = [s for s in path.split("/") if s]
+    if len(segs) == 1 and segs[0].lower() in _COLLECTION_SEG_NAMES:
+        return False
+    return len(segs) >= 2 or len(segs[-1]) >= 8
+
+
+def browser_items(url: str, *, limit: int = 30, on_note=None) -> dict:
+    from bs4 import BeautifulSoup
+    from .renderer import render_page
+
+    platform = platform_for_url(url)
+    st = platform_login.status(platform) if platform else {}
+    if on_note:
+        on_note("正在用内置登录浏览器渲染主页并读取页面自己的网络响应…")
+    rr = render_page(url, timeout_ms=60000, settle_ms=3500, scroll_rounds=8,
+                     capture_types=("json", "javascript", "text"))
+    if not rr.ok:
+        msg = rr.error or "浏览器渲染失败"
+        return {"ok": False, "items": [], "login_required": False, "error": msg}
+    text = "\n".join(c.body for c in rr.captured if c.body)
+    items, seen = [], set()
+
+    for m in _MEDIA_RE.findall(text + "\n" + (rr.html or "")):
+        u = m.replace("\\/", "/").rstrip("\\")
+        if u in seen:
+            continue
+        seen.add(u)
+        items.append({"page_url": url, "direct_url": u, "variants": [], "title": "",
+                      "cover": "", "uploader": "", "site": (urlparse(url).hostname or ""),
+                      "kind_hint": "video"})
+        if len(items) >= int(limit):
+            break
+
+    if len(items) < int(limit):
+        candidates = []
+        try:
+            soup = BeautifulSoup(rr.html or "", "html.parser")
+            for a in soup.find_all("a", href=True):
+                candidates.append(urljoin(rr.final_url or url, a.get("href") or ""))
+        except Exception:
+            pass
+        for raw in _HTTP_RE.findall(text):
+            candidates.append(raw.replace("\\/", "/").rstrip("\\"))
+        for u in candidates:
+            if u in seen or not _same_site_candidate(url, u):
+                continue
+            seen.add(u)
+            items.append({"page_url": u, "direct_url": "", "variants": [], "title": "",
+                          "cover": "", "uploader": "", "site": (urlparse(u).hostname or ""),
+                          "kind_hint": "video"})
+            if len(items) >= int(limit):
+                break
+
+    try:
+        visible = BeautifulSoup(rr.html or "", "html.parser").get_text(" ", strip=True).lower()
+    except Exception:
+        visible = ""
+    login_wall = any(x in visible for x in ("登录", "扫码登录", "sign in", "log in"))
+    if not items and login_wall:
+        msg = "页面显示登录提示，当前平台登录态不可用。"
+        if platform and st.get("logged_in"):
+            platform_login.mark_invalid(platform, msg)
+        return {"ok": False, "items": [], "login_required": True, "error": msg}
+    return {"ok": bool(items), "items": items, "login_required": False,
+            "error": "" if items else "浏览器已打开主页，但没有识别到作品链接或视频地址"}
+
 
 def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
                       on_note=None) -> tuple[list[dict], str]:
-    """主页作品列表的统一入口：按平台挑最可靠的来源，失败时给可操作的原因。
-
-    来源优先级（都实测过）：
-      抖音/快手/B站/微博/知乎 → MediaCrawler（本工具已集成、已登录）
-      小红书                  → xhshow 签名接口（MediaCrawler 的 xhs 主页解析已坏）
-      Pinterest / Instagram   → gallery-dl（登录态走 cookies，Pinterest 匿名也可）
-    返回 (条目, 说明)。条目统一结构：page_url / direct_url / variants / title / cover。
-    """
     platform = platform_for_url(url)
     if not platform:
         return [], ""
     name = PLATFORM_NAMES.get(platform, platform)
+    attempts = []
 
     if platform == "xhs":
-        # 批量优先走轻量 xhshow（直接签名接口）；失败时才回退到已登录 MediaCrawler。
         res = xhs_author_items(url, limit=limit, on_note=on_note)
-        if not res.get("ok") and find_mediacrawler()["found"] and login_cached("xhs"):
-            mc_items, mc_note = list_creator_items(url, limit=limit, on_note=on_note)
-            if mc_items:
-                return mc_items, ("xhshow 未成功，已回退 MediaCrawler。" +
-                                  (f" {mc_note}" if mc_note else ""))
-    elif platform in ("pin", "ig"):
-        res = gallery_dl_items(url, limit=limit, video_only=want_video,
-                               retries=3 if platform == "ig" else 1,
-                               retry_wait=60, on_note=on_note)
-        # Instagram 对未登录访问要么 404 要么空数据 —— 拿不到任何文件时按「需要登录」处理，
-        # 否则用户会看到「没有视频」这种误导性结论。
-        if (platform == "ig" and not res.get("ok")
-                and not res.get("items") and not res.get("login_required")):
-            res["login_required"] = True
-        if not res.get("ok") and res.get("login_required"):
-            res["error"] = (
-                f"{name} 对未登录访问只返回登录墙。请在「设置」→「打开浏览器去登录」"
-                f"选 {name} 登录一次（登录态会自动保存并导出 cookies），之后长期复用。")
+        attempts.append(("xhshow", res))
     else:
-        # MediaCrawler 系
-        if not find_mediacrawler()["found"]:
-            return [], find_mediacrawler()["reason"]
-        if not login_cached(platform):
-            return [], login_hint(platform)
-        return list_creator_items(url, limit=limit, on_note=on_note)
+        res = {"ok": False, "items": [], "login_required": False, "error": ""}
+
+    if not res.get("ok") and platform in {"ig", "pin", "bili", "wb", "tiktok"}:
+        res = gallery_dl_items(url, limit=limit, video_only=want_video,
+                               retries=1, retry_wait=10, on_note=on_note)
+        attempts.append(("gallery-dl", res))
+
+    if not res.get("ok") and platform not in {"xhs", "ks"}:
+        res = ytdlp_items(url, limit=limit, on_note=on_note)
+        attempts.append(("yt-dlp", res))
+
+    if not res.get("ok"):
+        res = browser_items(url, limit=limit, on_note=on_note)
+        attempts.append(("browser", res))
 
     if res.get("ok"):
-        return res["items"], res.get("error") or ""
-    why = res.get("error") or "未知原因"
+        used = next((n for n, r in reversed(attempts) if r is res), "内置来源")
+        return res.get("items") or [], f"已用{used}展开{name}主页。"
+
+    why = str(res.get("error") or "没有返回作品")
     if res.get("login_required"):
-        return [], why
-    # 失败时带上来源名，方便用户判断是哪条路出的问题
-    return [], f"{name} 主页展开失败：{why}"
-
-
-def list_creator_items(
-    url: str,
-    *,
-    limit: int = 30,
-    timeout: int = 600,
-    on_note=None,
-) -> tuple[list[dict], str]:
-    """展开某个平台主页的作品列表，返回 (条目, 错误说明)。
-
-    条目统一结构（供 batch_crawler 直接转成项目里的媒体条目）：
-      {page_url, direct_url, title, cover, uploader, site, duration, stats}
-    `direct_url` 是工具给出的**带签名直链**（会过期，立即下载即可）；
-    没有它时退回 `page_url`（页面地址，交给 yt-dlp）。
-    """
-    platform = platform_for_url(url)
-    if not platform:
-        return [], ""
-    info = find_mediacrawler()
-    if not info["found"]:
-        return [], info["reason"]
-    if not login_cached(platform):
-        return [], login_hint(platform)
-
-    ok_slot, why = acquire_run_slot()
-    if not ok_slot:
-        return [], why
-    log_path = Path(info["data_dir"]) / "crawler_run.log"
-    _clear_jsonl(platform)
-    if on_note:
-        on_note(f"正在用外部工具（MediaCrawler）展开"
-                f"{PLATFORM_NAMES.get(platform, platform)}主页作品，需要登录态…")
-    argv = [str(info["python"]),
-            str(info["wrapper"] or (Path(info["root"]) / "main.py")),
-            "--platform", platform,
-            "--lt", "qrcode",                 # 有登录态缓存时自动跳过扫码
-            "--type", "creator",
-            # 优先给「标识」而不是整条 URL：给 URL 时工具会自己再发一次请求解析，
-            # 实测抖音上会 httpx.ReadTimeout 把整次抓取拖死（111 秒后 0 条）。
-            # ⚠️ 例外：地址里带风控令牌（如小红书 xsec_token）时必须把**整条 URL** 给它 ——
-            # 令牌就是它解析主页的凭据，剥掉就只剩裸 id，工具会报
-            # `Failed to parse creator URL: Expecting value`。
-            "--creator_id", (url if ("xsec_token=" in url) else (creator_id_from_url(url) or url)),
-            "--crawler_max_notes_count", str(max(1, int(limit))),
-            # MediaDownloader 这里只需要作品列表/媒体地址，不抓评论；否则抖音等平台
-            # 会为评论额外翻页，既慢又增加风控概率。
-            "--get_comment", "no",
-            "--save_data_option", "jsonl",
-            "--save_data_path", str(info["data_dir"]),
-            # ⚠️ 这两个参数**不能省**（2026-09-23 实测）：
-            # 不传 --get_media no 时，工具会自己去下载每条作品的媒体文件，
-            # 经过本机代理时 httpx 读超时，整次抓取以 ReadTimeout 失败、0 条结果；
-            # 不传 --headless yes 时，风控更严且行为不稳定。
-            # 媒体下载由我们自己的下载队列负责，这里只要元数据。
-            "--get_media", "no",
-            "--headless", "yes"]
-    # MediaCrawler 个别平台会在已经写出足够作品后继续等待浏览器/网络，
-    # 旧实现小批量也一律等 600 秒。按请求量收紧上限；超时后仍读取已经落盘的部分结果。
-    effective_timeout = min(int(timeout), max(90, min(600, max(1, int(limit)) * 20)))
-    t_start = time.time()
-    try:
-        rc, tail = _run(argv, Path(info["root"]), effective_timeout, log_path)
-        rows = _read_jsonl(platform, "contents", prefer="creator",
-                           newer_than=t_start - 2)
-    finally:
-        release_run_slot()
-
-    items: list[dict] = []
-    for r in rows:
-        got = normalize_row(platform, r)
-        if got:
-            items.append(got)
-
-    if items:
-        note = ""
-        if rc != 0:
-            # 实测：抖音 creator 跑到一半浏览器页面被关闭（TargetClosedError），
-            # 但已抓到的部分已经落盘 —— 这种情况必须说明是「部分结果」，不能假装完整。
-            shown = min(len(items), max(1, int(limit)))
-            note = (f"外部工具中途退出（返回码 {rc}），已抓到 {len(items)} 条；本次返回前 {shown} 条**部分结果**。"
-                    f"日志尾部：{tail[-200:] if tail else '（无）'}")
-        return items[:max(1, int(limit))], note
-    # 没结果：把日志尾部带出去，让用户能判断是风控、未登录还是别的
-    err = "外部工具没有返回作品列表。"
-    if rc == -1:
-        err = tail or "执行超时"
-    elif tail:
-        low = tail.lower()
-        if "uifid" in low or "argus" in low:
-            err += "疑似撞上平台风控（uifid/argus）。可把 MediaCrawler 更新到最新版后重试。"
-        elif "login" in low or "登录" in tail:
-            err += "疑似登录态失效，需要重新扫码登录。"
-        elif "parse creator url" in low or "expecting value" in low:
-            # 小红书专属（工具自己的输入要求，不是我们编的规则）：
-            # 它的 author 解析需要主页地址里的 xsec_token；只给裸 user_id 会解析失败
-            # （实测报 "Failed to parse creator URL: Expecting value"）。
-            if platform == "xhs":
-                err += ("小红书的主页地址需要带 xsec_token：在浏览器里登录小红书、点进该主页，"
-                        "把地址栏的整条链接（含 ?xsec_token=…）复制过来粘贴抓取即可。")
-            else:
-                err += "外部工具解析这个主页地址失败，请换用浏览器地址栏里的完整链接重试。"
-        err += f" 日志尾部：{tail[-300:]}"
-    return [], err
+        st = platform_login.status(platform)
+        if st.get("logged_in"):
+            platform_login.mark_invalid(platform, why)
+            why = f"{name} 登录态已失效，请到「平台登录中心」重新登录。 {why}"
+        else:
+            why = f"{name} 当前需要登录，请到「平台登录中心」登录一次。 {why}"
+    return [], why

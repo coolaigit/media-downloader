@@ -424,3 +424,86 @@ th { color: var(--txt-dim); font-weight: 500; position: sticky; top: 0; backgrou
   .vcard img { width: 100%; height: auto; }
   .env { width: 100%; margin-left: 0; }
 }
+
+
+/* ---------- Media Downloader 2.0：平台登录 / 首次向导 ---------- */
+.login-alert {
+  margin: 10px 20px 0;
+  padding: 10px 12px;
+  border: 1px solid #6f3a3a;
+  background: #2b1d20;
+  border-radius: var(--radius);
+  color: var(--err);
+}
+.login-alert .btn { margin-left: 8px; }
+
+.platform-login-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+.platform-login-grid.compact {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  max-height: 360px;
+  overflow: auto;
+}
+.platform-login-card {
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+.platform-login-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.login-state {
+  font-size: 12px;
+  padding: 2px 7px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  color: var(--txt-dim);
+}
+.login-state.ready { color: var(--ok); border-color: #274d38; }
+.login-state.bad { color: var(--err); border-color: #6f3a3a; }
+.login-state.warn, .login-state.active { color: var(--warn); border-color: #6d5231; }
+.platform-login-card .btn { margin-top: 10px; }
+
+.wizard-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, .72);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+.wizard-card {
+  width: min(760px, 96vw);
+  max-height: 90vh;
+  overflow: auto;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .45);
+}
+.wizard-head, .wizard-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.wizard-head {
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.wizard-step { padding: 14px 0; }
+.wizard-step h3 { margin-top: 0; }
+.wizard-actions {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}

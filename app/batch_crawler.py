@@ -1098,18 +1098,17 @@ def _expand_video_listing(
     }, ""
 
 
-def _expand_via_profile_tool(
+def _expand_via_platform_source(
     list_url: str,
     *,
     limit: int = 30,
     on_note=None,
 ) -> tuple[dict | None, str]:
-    """平台主页的第二条路：交给本机已安装的外部工具（MediaCrawler）。
+    """平台主页的自包含来源：内置提取器优先，必要时用独立登录浏览器。
 
-    为什么需要第二条路（2026-09-23 实测）：抖音/小红书的主页作品接口要**签名 + 登录态**，
-    网页抓取拿不到（抖音主页 793KB HTML 里 `aweme_id` 0 个、老接口响应体 0 字节、
-    web 接口 403 ArgusSecurityPlugin）。yt-dlp 又没有这两家的「用户主页」提取器。
-    本机已安装并登录的 MediaCrawler 正好补这块（详见 app/profile_sources.py）。
+    抖音/小红书等主页作品数据常依赖签名参数、登录态或页面自身的网络请求。
+    2.0 不再调用外部 Python 项目，而由 profile_sources 统一调度 yt-dlp、
+    gallery-dl、xhshow 与本程序 Playwright 渲染层。
 
     返回 (结果 | None, 说明)。
     """
@@ -1118,8 +1117,7 @@ def _expand_via_profile_tool(
     platform = profile_sources.platform_for_url(list_url)
     if not platform:
         return None, ""
-    # 统一入口：按平台挑来源（抖音/快手等 → MediaCrawler；小红书 → xhshow 签名接口；
-    # Pinterest/Instagram → gallery-dl）。见 profile_sources.list_author_items。
+    # 统一入口：按平台选择内置来源；见 profile_sources.list_author_items。
     items_raw, note = profile_sources.list_author_items(
         list_url, limit=limit, want_video=True, on_note=on_note)
     if not items_raw:
@@ -1142,7 +1140,7 @@ def _expand_via_profile_tool(
         _ext = target.rsplit("?", 1)[0].rsplit(".", 1)[-1].lower()
         _kind = "stream" if _ext in ("m3u8", "mpd") else "video"
         items.append(MediaItem(
-            url=target, kind=_kind, source=f"外部工具:{platform}",
+            url=target, kind=_kind, source=f"内置平台来源:{platform}",
             title=r.get("title") or "", thumbnail=r.get("cover") or "",
             referer=page or list_url, origin_page=page or list_url,
             extra={
@@ -1212,9 +1210,9 @@ def _expand_via_profile_tool(
 
     name = profile_sources.PLATFORM_NAMES.get(platform, platform)
     warnings = [
-        f"这是一个{name}主页，已用外部来源（{profile_sources.source_name(platform)}）"
+        f"这是一个{name}主页，已用内置来源（{profile_sources.source_name(platform)}）"
         f"展开 {len(items)} 条作品 —— 该平台的作品列表要签名参数 + 登录态，"
-        "网页抓取拿不到，所以交给了这个来源。",
+        "普通网页抓取不足时由该内置来源补齐。",
     ]
     if any(not m.extra.get("is_page") for m in items):
         warnings.append("工具返回的是**带签名的直链**（会过期），点「下载选中」会立刻下载；"
@@ -1224,7 +1222,7 @@ def _expand_via_profile_tool(
     return {
         "items": [m.to_dict() for m in items],
         "summary": summarize(items),
-        "pages": [{"page": 1, "url": list_url, "method": f"外部工具({name})",
+        "pages": [{"page": 1, "url": list_url, "method": f"内置来源({name})",
                    "html_bytes": 0, "media": len(items), "links": 0,
                    "elapsed": 0.0, "visible_text": 0}],
         "detail_pages": {"total": 0, "ok": 0, "failed": 0, "urls": []},
@@ -1233,7 +1231,7 @@ def _expand_via_profile_tool(
         "warnings": warnings,
         "list_url": list_url,
         "renderer": renderer_status(),
-        "via": f"profile-tool:{platform}",
+        "via": f"builtin-platform:{platform}",
     }, note
 
 
@@ -1320,8 +1318,8 @@ def crawl_list(
     if expand_listing and want_kinds and "video" in want_kinds:
         _emit("list", 0, 1, "正在判断这是不是一个视频列表 / 博主页…")
         # 已知必须靠签名接口 / 登录态拿作品列表的平台，专用来源必须放在前面。
-        # 旧顺序先跑通用 yt-dlp，抖音主页会白等约 90 秒后才轮到 MediaCrawler，
-        # 甚至在超时/锁竞争时直接 0 条。YouTube/B站等仍维持通用列表优先。
+        # 已知主页需要签名/登录态时先走内置平台来源，避免先让通用 yt-dlp 白等超时。
+        # YouTube/B站等仍维持通用列表优先。
         from . import profile_sources as _profile_sources
         platform0 = _profile_sources.platform_for_url(list_url)
         profile_first = platform0 in {"dy", "xhs", "ks", "wb", "zhihu", "pin", "ig"}
@@ -1331,7 +1329,7 @@ def crawl_list(
         pt_note = ""
 
         if profile_first:
-            pt_exp, pt_note = _expand_via_profile_tool(
+            pt_exp, pt_note = _expand_via_platform_source(
                 list_url,
                 limit=max(2, min(int(max_items or 30) or 30, 200)),
                 on_note=lambda s: _emit("list", 0, 1, s),
@@ -1357,7 +1355,7 @@ def crawl_list(
                 return exp
 
         if not profile_first:
-            pt_exp, pt_note = _expand_via_profile_tool(
+            pt_exp, pt_note = _expand_via_platform_source(
                 list_url,
                 limit=max(2, min(int(max_items or 30) or 30, 200)),
                 on_note=lambda s: _emit("list", 0, 1, s),

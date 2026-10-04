@@ -11,5 +11,5 @@
   "browser_headed": false,
   "video_quality_default": "best",
   "downloads_dir": "",
-  "mediacrawler_root": ""
+  "onboarding_complete": false
 }
