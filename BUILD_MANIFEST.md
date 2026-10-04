@@ -2,6 +2,29 @@
 
 > 每次正式发布前更新本文件。构建必须用隔离 venv，禁止裸 python/pip。
 
+## RC3 Final（2026-10-04）
+
+| 项 | 值 |
+|---|---|
+| 最终源码 HEAD | `48939bc` |
+| 桌面启动 | 默认 pywebview + WebView2 独立窗口；失败回退浏览器；`--browser` 可强制浏览器模式 |
+| EXE | 22,939,630 B；SHA256 `ED2569590AD7E8568EF4D5A0232913ED8C0BD0D9F2D76E8DF6C54BF8BFDCB710` |
+| dist | 421 files；289,472,762 B |
+| Installer | `MediaDownloader-Setup-1.0.0-RC3.exe`；91,323,074 B；SHA256 `4841D34F32B326F03121C6037CF3A55F872A24DE41E7ADC47844BDB89C1AADD6` |
+| 外发测试副本 | `D:\\MediaDownloader-Setup-1.0.0-RC3.exe` |
+| requirements.lock | 54 项；SHA256 `27947EE8A7FD6681B13BEEED090C6810132ADCFA7B177B769F72EDC4E35F82FD` |
+| 关键新依赖 | yt-dlp 2026.08.19 · curl-cffi 0.15.0 · pywebview 6.2.1 |
+| 使用说明 | 软件内“使用说明”页 + 安装目录根部 `使用说明.md` |
+| 图片安装版 QA | 12 PASS / 0 FAIL（6 种搜图条件，全部实际下载） |
+| 主流视频安装版 QA | 32 PASS / 6 BLOCKED / 0 FAIL（严格平台域名；能解析者真实下载） |
+| 批量/成人/非主流 QA | 10 PASS / 0 FAIL |
+| 退出 | 关闭窗口后进程 0、本地 HTTP 服务同步退出 |
+| 覆盖安装 | exit=0；config SHA256 不变；安装 EXE 与 dist EXE SHA256 一致 |
+| 卸载 | exit=0；程序文件删除；LOCALAPPDATA 配置和 Downloads 数据均保留 |
+| 重装 | exit=0；config 继续复用；抖音/小红书登录态解析再次 PASS |
+| 完整 QA 记录 | `RELEASE_QA_RC3.md` |
+| Code signing / Publisher / 项目 License | pending |
+
 ## Installer RC（1F，2026-10-01/02）
 
 | 项 | 值 |
@@ -60,13 +83,14 @@
 ## 关键依赖（锁定版本 = 已验证基线）
 
 fastapi 0.141.1 · uvicorn 0.52.4 · requests 2.34.2 · beautifulsoup4 4.15.0 ·
-lxml 6.1.1 · pillow 12.3.0 · **yt-dlp[default] 2026.7.4**（runtime：yt-dlp-ejs 0.8.0 /
-websockets 17.1 / brotli 1.2.0 / mutagen 1.48.1 / pycryptodomex 3.23.0 / certifi 2026.7.22）·
-pydantic 2.13.4 · playwright 1.62.0（pyee 13.0.1 / greenlet 3.5.6）·
-gallery_dl 1.32.13 · ddgs 9.16.0 · **xhshow 0.2.0**（XHS 签名）· pycryptodome 3.23.0
+lxml 6.1.1 · pillow 12.3.0 · **yt-dlp[default,curl-cffi] 2026.8.19**（runtime：yt-dlp-ejs 0.8.0 /
+websockets 17.1 / brotli 1.2.0 / mutagen 1.48.1 / pycryptodomex 3.23.0 / certifi 2026.7.22 /
+**curl-cffi 0.15.0**）· pydantic 2.13.4 · playwright 1.62.0（pyee 13.0.1 / greenlet 3.5.6）·
+**pywebview 6.2.1**（pythonnet/clr_loader/cffi）· gallery_dl 1.32.13 · ddgs 9.16.0 ·
+**xhshow 0.2.0**（XHS 签名）· pycryptodome 3.23.0
 
-`curl_cffi` 继续不装：yt-dlp 可选 extra（非 default），HTTP(S) 请求统一走
-requests/urllib3 handler，当前功能不需要；warn 文件中的 missing 属预期 optional。
+RC3 已启用 curl-cffi 浏览器 impersonation，实测用于修复 TikTok/Dailymotion 等站点变化；
+相关依赖已锁定并进入 Frozen 包。
 
 ## 二进制与外部资源
 
