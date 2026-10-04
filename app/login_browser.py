@@ -170,6 +170,10 @@ def run(url: str, profile_dir: str, seconds: int = 900, headless: bool = False) 
 
         deadline = time.time() + max(30, int(seconds))
         closed = False
+        # 持续保留“最后一次成功读取到的 Cookie 快照”。用户点浏览器 X 后，
+        # context 往往先销毁，此时再 ctx.cookies() 已经来不及；旧实现因此把
+        # 真正登录成功也落成 0 Cookie，平台页永远显示“待确认”。
+        last_cookies: list = []
 
         def _on_close(*_a):
             nonlocal closed
@@ -177,19 +181,11 @@ def run(url: str, profile_dir: str, seconds: int = 900, headless: bool = False) 
 
         ctx.on("close", _on_close)
 
-        # 看门狗：到点**强制**收尾并退出。
-        #
-        # 为什么必须有（2026-09-26 实测）：playwright 的同步 API 在用户正与页面交互
-        # （登录弹窗/验证码）时，ctx.cookies() 这类调用可能一直阻塞，主循环根本走不到
-        # deadline 判断 —— 表现为「窗口一直不关、登录态也没落盘、抓取还用不上」。
-        # 这里用独立线程到点就导出 cookies + 写状态 + 硬退出，不依赖主循环。
+        # 看门狗线程不能跨线程调用 Playwright sync API。超时时只使用主线程最近
+        # 一次成功快照收尾，避免线程安全问题。
         def _hard_finish(*_a):
             try:
-                cks = ctx.cookies()
-            except Exception:
-                cks = []
-            try:
-                _finish(profile_dir, url, cks)
+                _finish(profile_dir, url, list(last_cookies))
             except Exception:
                 pass
             os._exit(0)
@@ -201,23 +197,27 @@ def run(url: str, profile_dir: str, seconds: int = 900, headless: bool = False) 
         while time.time() < deadline:
             if closed:
                 break
-            # 用户把窗口关掉后 ctx.pages 会变空；用 cookies() 探测存活
             try:
-                ctx.cookies()
+                current = ctx.cookies()
+                if current:
+                    last_cookies = current
             except Exception:
                 break
-            time.sleep(2)
+            # 登录成功后用户通常很快关窗口，500ms 轮询能更可靠地拿到最后状态。
+            time.sleep(0.5)
 
         watchdog.cancel()
         try:
-            cks = ctx.cookies()
+            current = ctx.cookies()
+            if current:
+                last_cookies = current
         except Exception:
-            cks = []
+            pass
         try:
             ctx.close()
         except Exception:
             pass
-        _finish(profile_dir, url, cks)
+        _finish(profile_dir, url, last_cookies)
         return 0
 
 

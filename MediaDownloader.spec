@@ -29,6 +29,7 @@ datas = [
     (str(SPEC_DIR / "web"), "web"),                      # 前端静态资源
     (str(SPEC_DIR / "bin" / "ffmpeg.exe"), "bin"),       # ffmpeg 二进制（1E 策略：发行包自带）
     (str(SPEC_DIR / "使用说明.md"), "."),                    # 跨电脑安装/登录态/故障说明
+    (str(SPEC_DIR / "app_icon.ico"), "."),                       # 系统托盘复用应用图标
 ]
 datas += collect_data_files("certifi")                   # CA 证书（requests/yt-dlp 用）
 datas += collect_data_files("playwright")                # playwright 驱动（node.exe 等 Python 运行时，
@@ -58,6 +59,7 @@ hiddenimports = (
     + collect_submodules("xhshow")            # 小红书签名库
     + collect_submodules("yt_dlp.extractor")  # yt-dlp 同理
     + collect_submodules("webview")           # pywebview 后端按运行环境动态导入
+    + collect_submodules("pystray")           # 系统托盘后端按平台动态导入
     + _app_hidden
 )
 

@@ -259,6 +259,8 @@ class SettingsReq(BaseModel):
     browser_headed: bool | None = None
     # 下载根目录：导入期常量 DOWNLOADS_DIR 消费，改后需重启生效（端点如实返回）
     downloads_dir: str | None = Field(default=None, max_length=1000)
+    # 桌面窗口右上角 X：exit=直接退出；tray=隐藏到系统托盘
+    close_behavior: str | None = Field(default=None, pattern="^(exit|tray)$")
 
 
 # ---------- 工具 ----------
@@ -488,8 +490,23 @@ def api_crawl_cancel(job_id: str):
 # ---------------------------------------------------------------- 登录态浏览器
 
 @app.get("/api/platforms/status")
-def api_platform_status():
-    """返回各平台独立登录态；登录失效/过期会明确标记需要重新登录。"""
+def api_platform_status(
+    refresh: bool = Query(default=False),
+    platform: str = Query(default=""),
+):
+    """返回各平台独立登录态；refresh=true 时主动从已关闭的 Profile 重新导出 Cookie。"""
+    key = str(platform or "").strip().lower()
+    if refresh:
+        keys = [key] if key in platform_login.PLATFORMS else list(platform_login.PLATFORMS)
+        for k in keys:
+            prof = str(platform_login.profile_dir(k))
+            # 登录窗口仍开着时不碰 Profile，等窗口关闭后再刷新。
+            if Path(prof).is_dir() and browser_profile.lock_state(prof) != "held":
+                try:
+                    platform_login.refresh_from_profile(k)
+                except Exception:
+                    pass
+
     items = platform_login.all_status()
     for item in items.values():
         prof = item.get("profile_dir") or ""

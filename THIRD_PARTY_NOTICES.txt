@@ -22,7 +22,7 @@ Python 库（PyInstaller 打包）
 gallery-dl        1.32.13     GPL-2.0-only        ⚠️ GPL：源码见 https://github.com/mikf/gallery-dl (v1.32.13)
 xhshow            0.2.0       MIT                 https://github.com/cloxl/xhshow
 mutagen           1.48.1      GPL-2.0-or-later    ⚠️ GPL：源码见 https://github.com/quodlibet/mutagen (v1.48.1)
-yt-dlp            2026.7.4    Unlicense           https://github.com/yt-dlp/yt-dlp
+yt-dlp            2026.8.19   Unlicense           https://github.com/yt-dlp/yt-dlp
 yt-dlp-ejs        0.8.0       Unlicense AND MIT AND ISC
 playwright        1.62.0      Apache-2.0          （驱动运行时随包；浏览器不随包，复用用户系统 Chrome/Edge）
 pyee              13.0.1      MIT
@@ -61,6 +61,8 @@ markdown-it-py    4.2.0       详见随包 LICENSE
 mdurl             0.1.2       详见随包 LICENSE
 Pygments          2.21.0      BSD-2-Clause
 pywebview         6.2.1       BSD-3-Clause        https://pywebview.flowrl.com/
+pystray           0.19.5      LGPLv3              https://github.com/moses-palmer/pystray
+six               1.17.0      MIT                 https://github.com/benjaminp/six
 pythonnet         3.2.0       MIT                 https://pythonnet.github.io/
 clr_loader        0.3.1       详见随包 LICENSE
 proxy_tools       0.1.0       MIT

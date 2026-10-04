@@ -13,7 +13,7 @@ import traceback
 import webbrowser
 from pathlib import Path
 
-from .config import DATA_ROOT
+from .config import BUNDLE_DIR, DATA_ROOT, RESOURCE_ROOT
 from .ports import probe_running, resolve_port
 
 TITLE = "MediaDownloader"
@@ -82,6 +82,86 @@ def _show_error(text: str) -> None:
         pass
 
 
+def _close_behavior() -> str:
+    try:
+        from .store import load
+        value = str(load().get("close_behavior") or "exit").strip().lower()
+        return value if value in {"exit", "tray"} else "exit"
+    except Exception:
+        return "exit"
+
+
+def _tray_image():
+    from PIL import Image, ImageDraw
+
+    for candidate in (BUNDLE_DIR / "app_icon.ico", RESOURCE_ROOT / "app_icon.ico"):
+        if candidate.is_file():
+            try:
+                return Image.open(candidate).convert("RGBA")
+            except Exception:
+                pass
+
+    # 资源异常时仍给托盘一个可见图标，不让“缩小到托盘”变成无入口。
+    image = Image.new("RGBA", (64, 64), (79, 70, 229, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((28, 10, 36, 39), fill=(255, 255, 255, 255))
+    draw.polygon(((18, 32), (46, 32), (32, 49)), fill=(255, 255, 255, 255))
+    return image
+
+
+def _ensure_tray(window, state: dict):
+    icon = state.get("tray_icon")
+    if icon is not None:
+        return icon
+
+    import pystray
+
+    def _show(_icon=None, _item=None):
+        try:
+            window.show()
+            state["hidden_to_tray"] = False
+        except Exception:
+            _log("tray show failed:\n" + traceback.format_exc())
+
+    def _exit(icon_obj=None, _item=None):
+        state["force_exit"] = True
+        try:
+            if icon_obj is not None:
+                icon_obj.visible = False
+                icon_obj.stop()
+        except Exception:
+            pass
+        try:
+            window.destroy()
+        except Exception:
+            _log("tray exit failed:\n" + traceback.format_exc())
+
+    menu = pystray.Menu(
+        pystray.MenuItem("打开 MediaDownloader", _show, default=True),
+        pystray.MenuItem("退出", _exit),
+    )
+    icon = pystray.Icon("MediaDownloader", _tray_image(), TITLE, menu)
+    icon.run_detached()
+    state["tray_icon"] = icon
+    return icon
+
+
+def _handle_window_close(window, state: dict) -> bool | None:
+    """Return False to cancel close and hide to tray; None to allow real exit."""
+    if state.get("force_exit"):
+        return None
+    if _close_behavior() != "tray":
+        return None
+    try:
+        _ensure_tray(window, state)
+        window.hide()
+        state["hidden_to_tray"] = True
+        return False
+    except Exception:
+        _log("minimize-to-tray failed; falling back to exit:\n" + traceback.format_exc())
+        return None
+
+
 def _open_native(url: str, own_server: bool, holder: dict) -> int:
     try:
         import webview
@@ -103,13 +183,27 @@ def _open_native(url: str, own_server: bool, holder: dict) -> int:
             zoomable=True,
         )
 
+        state = {"force_exit": False, "hidden_to_tray": False, "tray_icon": None}
+
+        def _closing() -> bool | None:
+            # pywebview 的 cancellable closing 事件：返回 False = 取消真正关闭。
+            return _handle_window_close(window, state)
+
         def _closed() -> None:
+            icon = state.get("tray_icon")
+            if icon is not None:
+                try:
+                    icon.visible = False
+                    icon.stop()
+                except Exception:
+                    pass
             if own_server:
                 server = holder.get("server")
                 if server is not None:
                     server.should_exit = True
 
         if window is not None:
+            window.events.closing += _closing
             window.events.closed += _closed
 
         storage = DATA_ROOT / "webview"

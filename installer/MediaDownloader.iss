@@ -42,7 +42,7 @@ ArchitecturesAllowed=x64compatible
 CloseApplications=yes
 ; 输出
 OutputDir=output
-OutputBaseFilename=MediaDownloader-Setup-2.0.0-RC1
+OutputBaseFilename=MediaDownloader-Setup-2.0.0-RC2
 SetupIconFile=..\app_icon.ico
 ; 压缩：稳定性优先，禁 UPX / 裁剪资源
 Compression=lzma2

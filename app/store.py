@@ -33,6 +33,9 @@ DEFAULTS = {
     # ⚠️ 消费点是 app.config 的 DOWNLOADS_DIR（导入期常量），改了要重启才生效，
     # 端点层必须如实返回 restart_required，不能让用户以为立即生效。
     "downloads_dir": "",
+    # 点击桌面窗口右上角 X 的行为：exit=直接退出；tray=隐藏到系统托盘。
+    # 默认保持 1.x/RC1 的直接退出行为，避免升级后悄悄常驻后台。
+    "close_behavior": "exit",
     # 首次使用向导完成标记。登录态本身按平台保存在 DATA_ROOT/platform_profiles，
     # 不写进设置文件，也不会进入安装包。
     "onboarding_complete": False,

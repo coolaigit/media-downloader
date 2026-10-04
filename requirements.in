@@ -18,6 +18,7 @@ pydantic==2.13.4
 # ---- Desktop 可选能力 ----
 playwright==1.62.0       # JS 页渲染兜底 + 登录浏览器（复用系统 Chrome/Edge，不打包浏览器）
 pywebview==6.2.1         # Windows 桌面壳；默认用 WebView2 承载本地 UI，失败时回退浏览器
+pystray==0.19.5          # Windows 系统托盘：可配置点击 X 后缩小到托盘
 gallery-dl==1.32.13      # 单页作品列表提取（internal 子命令）
 xhshow==0.2.0           # 小红书账号作品列表签名接口（批量优先路径）
 ddgs==9.16.0             # DuckDuckGo 备用搜图（缺失时如实降级）

@@ -1880,9 +1880,9 @@ function renderPlatformCards(targetId, items) {
         <b>${esc(st.name || key)}</b>
         <span class="login-state ${cls}">${esc(label)}</span>
       </div>
-      <div class="hint">${st.relogin_required ? esc(st.reason || '需要重新登录') :
+      <div class="hint">${st.reason ? esc(st.reason) :
         (when ? '上次登录：' + esc(when) : '尚未建立本机登录态')}</div>
-      <div class="hint">Cookies：${Number(st.cookie_count || 0)} 条</div>
+      <div class="hint">Cookies：${Number(st.cookie_count || 0)} 条 · 登录凭据：${Number(st.auth_cookie_count || 0)} 条</div>
       <button class="btn tiny ${st.relogin_required ? 'danger' : ''}" data-platform="${key}">
         ${st.logged_in && !st.relogin_required ? '重新登录' : '登录'}
       </button>`;
@@ -1907,9 +1907,15 @@ function renderLoginAlert(items) {
   if (btn) btn.onclick = () => switchTab('login');
 }
 
-async function loadPlatformStatuses() {
+async function loadPlatformStatuses(force = false, platform = '') {
   try {
-    const r = await api('/api/platforms/status');
+    let url = '/api/platforms/status';
+    if (force) {
+      const q = new URLSearchParams({ refresh: 'true' });
+      if (platform) q.set('platform', platform);
+      url += '?' + q.toString();
+    }
+    const r = await api(url);
     platformStatusCache = r.platforms || {};
     renderPlatformCards('platformLoginGrid', platformStatusCache);
     renderPlatformCards('wizardLoginGrid', platformStatusCache);
@@ -1926,11 +1932,38 @@ async function loadPlatformStatuses() {
   }
 }
 
+async function watchPlatformLogin(platform) {
+  let rounds = 0;
+  let seenOpen = false;
+  const timer = setInterval(async () => {
+    rounds += 1;
+    try {
+      const r = await api('/api/platforms/status?platform=' + encodeURIComponent(platform));
+      const st = (r.platforms || {})[platform];
+      if (!st) return;
+      if (st.in_use) seenOpen = true;
+      platformStatusCache = r.platforms || platformStatusCache;
+      renderPlatformCards('platformLoginGrid', platformStatusCache);
+      renderPlatformCards('wizardLoginGrid', platformStatusCache);
+      renderLoginAlert(platformStatusCache);
+      // 子进程刚启动时 Chrome 可能还没来得及持有 Profile 锁；不能看到一次
+      // in_use=false 就误判“登录窗口已经关闭”。至少观察到打开过，或给 12 秒启动宽限。
+      if (!st.in_use && (seenOpen || rounds >= 8)) {
+        clearInterval(timer);
+        await loadPlatformStatuses(true, platform);
+      } else if (rounds >= 600) {
+        clearInterval(timer);
+      }
+    } catch (e) { /* 下一轮再试 */ }
+  }, 1500);
+}
+
 async function loginPlatform(platform) {
   try {
     const r = await api('/api/platforms/login', { method: 'POST', body: { platform } });
     toast(`${r.name || platform} 登录窗口已打开；登录完成后关闭窗口即可`, 'ok');
-    setTimeout(loadPlatformStatuses, 1200);
+    setTimeout(() => loadPlatformStatuses(false, platform), 800);
+    watchPlatformLogin(platform);
   } catch (e) {
     toast('打开登录窗口失败：' + e.message, 'err');
   }
@@ -1959,6 +1992,7 @@ function fillSettings(s) {
   $('sCookiesFile').value = s.cookies_file || '';
   $('sCookiesBrowser').value = s.cookies_from_browser || '';
   $('sAllowPrivate').checked = !!s.allow_private_network;
+  if ($('sCloseBehavior')) $('sCloseBehavior').value = s.close_behavior || 'exit';
   renderCookiesStat(statusInfo && statusInfo.cookies);
 }
 
@@ -1983,6 +2017,7 @@ async function saveSettings() {
     cookies_file: $('sCookiesFile').value.trim(),
     cookies_from_browser: $('sCookiesBrowser').value,
     allow_private_network: $('sAllowPrivate').checked,
+    close_behavior: $('sCloseBehavior') ? $('sCloseBehavior').value : 'exit',
   };
   try {
     const r = await api('/api/settings', { method: 'POST', body });
@@ -2146,7 +2181,7 @@ function bindEvents() {
 
   $('btnSaveSettings').onclick = saveSettings;
   $('btnReloadSettings').onclick = loadSettings;
-  if ($('btnRefreshPlatforms')) $('btnRefreshPlatforms').onclick = loadPlatformStatuses;
+  if ($('btnRefreshPlatforms')) $('btnRefreshPlatforms').onclick = () => loadPlatformStatuses(true);
   if ($('wizardNext')) $('wizardNext').onclick = wizardNext;
   if ($('wizardBack')) $('wizardBack').onclick = () => showWizardStep(wizardStep - 1);
   if ($('wizardFinish')) $('wizardFinish').onclick = finishWizard;
