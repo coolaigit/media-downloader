@@ -242,6 +242,12 @@
           <option value="5">5 页</option>
           <option value="10">10 页</option>
           <option value="20">20 页</option>
+          <option value="50">50 页</option>
+          <option value="100">100 页</option>
+          <option value="300">300 页</option>
+          <option value="500">500 页</option>
+          <option value="1000">1000 页</option>
+          <option value="2000">2000 页</option>
         </select>
       </label>
       <label id="imgCPagesLabelSite" hidden>抓取页数（整站）
@@ -251,6 +257,9 @@
           <option value="60">60 页</option>
           <option value="120">120 页</option>
           <option value="300">300 页</option>
+          <option value="500">500 页</option>
+          <option value="1000">1000 页</option>
+          <option value="2000">2000 页</option>
         </select>
       </label>
       <label id="imgCDepthLabel" hidden>跟随链接层数
@@ -269,13 +278,16 @@
           <option value="never">不下钻（只要列表页）</option>
         </select>
       </label>
-      <label id="imgCMaxItemsLabel">最多下钻
+      <label id="imgCMaxItemsLabel">最多作品 / 详情页
         <select id="imgCMaxItems">
-          <option value="10">10 个详情页</option>
+          <option value="10">10 个</option>
           <option value="30" selected>30 个</option>
           <option value="60">60 个</option>
           <option value="120">120 个</option>
           <option value="300">300 个</option>
+          <option value="500">500 个</option>
+          <option value="1000">1000 个</option>
+          <option value="2000">2000 个</option>
         </select>
       </label>
       <label>结果处理
@@ -517,6 +529,12 @@
           <option value="5">5 页</option>
           <option value="10">10 页</option>
           <option value="20">20 页</option>
+          <option value="50">50 页</option>
+          <option value="100">100 页</option>
+          <option value="300">300 页</option>
+          <option value="500">500 页</option>
+          <option value="1000">1000 页</option>
+          <option value="2000">2000 页</option>
         </select>
       </label>
       <label id="vidCPagesLabelSite" hidden>抓取页数（整站）
@@ -526,6 +544,9 @@
           <option value="60">60 页</option>
           <option value="120">120 页</option>
           <option value="300">300 页</option>
+          <option value="500">500 页</option>
+          <option value="1000">1000 页</option>
+          <option value="2000">2000 页</option>
         </select>
       </label>
       <label id="vidCDepthLabel" hidden>跟随链接层数
@@ -544,13 +565,16 @@
           <option value="never">不下钻（只要列表页）</option>
         </select>
       </label>
-      <label id="vidCMaxItemsLabel">最多下钻
+      <label id="vidCMaxItemsLabel">最多作品 / 详情页
         <select id="vidCMaxItems">
-          <option value="10">10 个详情页</option>
+          <option value="10">10 个</option>
           <option value="30" selected>30 个</option>
           <option value="60">60 个</option>
           <option value="120">120 个</option>
           <option value="300">300 个</option>
+          <option value="500">500 个</option>
+          <option value="1000">1000 个</option>
+          <option value="2000">2000 个</option>
         </select>
       </label>
       <label>结果处理
@@ -789,6 +813,53 @@
       请使用独立的「平台登录」页，不要在这里共用 Cookies。这里仅保留给普通网站或特殊兼容场景。</p>
   </div>
 
+  <h3 class="sec-title">界面外观</h3>
+  <div class="settings appearance-settings">
+    <div class="appearance-group wide">
+      <div class="appearance-label">基础外观</div>
+      <div class="base-theme-grid" id="baseThemeGrid" aria-label="基础外观选择">
+        <button type="button" class="base-theme-card" data-mode="dark">
+          <span class="theme-preview preview-dark"><i></i><b></b><em></em></span>
+          <span class="theme-copy"><strong>深灰</strong><small>默认，层级柔和</small></span>
+        </button>
+        <button type="button" class="base-theme-card" data-mode="black">
+          <span class="theme-preview preview-black"><i></i><b></b><em></em></span>
+          <span class="theme-copy"><strong>纯黑</strong><small>OLED 风格，高对比</small></span>
+        </button>
+        <button type="button" class="base-theme-card" data-mode="light">
+          <span class="theme-preview preview-light"><i></i><b></b><em></em></span>
+          <span class="theme-copy"><strong>纯白</strong><small>白底，高亮清爽</small></span>
+        </button>
+      </div>
+      <select id="sUiMode" class="appearance-hidden-select" aria-label="基础外观">
+        <option value="dark">深灰</option>
+        <option value="black">纯黑</option>
+        <option value="light">纯白</option>
+      </select>
+    </div>
+
+    <div class="appearance-group wide">
+      <div class="appearance-label">强调色</div>
+      <div class="theme-swatches" id="themeSwatches" aria-label="强调色快捷选择">
+        <button type="button" class="theme-swatch" data-theme="blue" title="蓝色"><i></i><span>蓝</span></button>
+        <button type="button" class="theme-swatch" data-theme="cyan" title="青色"><i></i><span>青</span></button>
+        <button type="button" class="theme-swatch" data-theme="violet" title="紫色"><i></i><span>紫</span></button>
+        <button type="button" class="theme-swatch" data-theme="green" title="绿色"><i></i><span>绿</span></button>
+        <button type="button" class="theme-swatch" data-theme="orange" title="橙色"><i></i><span>橙</span></button>
+        <button type="button" class="theme-swatch" data-theme="rose" title="玫红"><i></i><span>红</span></button>
+      </div>
+      <select id="sAccent" class="appearance-hidden-select" aria-label="强调色">
+        <option value="blue">蓝色</option>
+        <option value="cyan">青色</option>
+        <option value="violet">紫色</option>
+        <option value="green">绿色</option>
+        <option value="orange">橙色</option>
+        <option value="rose">玫红</option>
+      </select>
+    </div>
+    <p class="hint wide">基础外观会联动页面背景、顶部栏、卡片、输入框、表格、任务区、弹窗和文字层级；强调色只控制重点按钮、选中态和进度。切换后立即预览，保存后下次启动继续使用。</p>
+  </div>
+
   <h3 class="sec-title">桌面程序</h3>
   <div class="settings">
     <label>点击右上角 X 时
@@ -848,15 +919,15 @@
   <h3 class="sec-title">平台登录建议</h3>
   <div class="tablewrap" style="max-height:none">
     <table>
-      <thead><tr><th>平台</th><th>公开单条</th><th>主页/批量</th><th>建议</th><th></th></tr></thead>
+      <thead><tr><th>平台</th><th>公开单条</th><th>主页/批量</th><th>建议</th></tr></thead>
       <tbody>
-        <tr><td>Instagram</td><td>有时免登录</td><td>强烈建议登录</td><td>批量/Reels 易遇登录墙或 429；登录一次长期复用</td><td><button class="btn tiny help-login" data-platform="ig">去登录</button></td></tr>
-        <tr><td>小红书</td><td>当前可直接解析多数公开笔记</td><td>建议登录</td><td>批量、风控或内容受限时使用登录态更稳</td><td><button class="btn tiny help-login" data-platform="xhs">去登录</button></td></tr>
-        <tr><td>抖音 / 快手</td><td>视页面而定</td><td>通常建议登录</td><td>主页批量会优先使用内置提取器，必要时用该平台独立登录浏览器</td><td><button class="btn tiny help-login" data-platform="dy">抖音登录</button> <button class="btn tiny help-login" data-platform="ks">快手登录</button></td></tr>
-        <tr><td>Pinterest</td><td>部分公开内容可用</td><td>建议登录</td><td>未登录容易遇登录墙/空页面</td><td><button class="btn tiny help-login" data-platform="pin">去登录</button></td></tr>
-        <tr><td>YouTube</td><td>通常免登录</td><td>多数公开频道免登录</td><td>年龄限制、会员内容、Bot Check 时再配置登录态</td><td></td></tr>
-        <tr><td>B站 / 微博 / 知乎</td><td>公开内容常可免登录</td><td>建议登录</td><td>高清、频繁访问、主页批量时更容易触发限制</td><td></td></tr>
-        <tr><td>普通网站 / 媒体直链</td><td>通常不需要</td><td>通常不需要</td><td>除非网站本身要求账号或验证码</td><td></td></tr>
+        <tr><td>Instagram</td><td>有时免登录</td><td>强烈建议登录</td><td>批量/Reels 易遇登录墙或 429；登录一次长期复用</td></tr>
+        <tr><td>小红书</td><td>当前可直接解析多数公开笔记</td><td>建议登录</td><td>批量、风控或内容受限时使用登录态更稳</td></tr>
+        <tr><td>抖音 / 快手</td><td>视页面而定</td><td>通常建议登录</td><td>主页批量会优先使用内置提取器，必要时用该平台独立登录浏览器</td></tr>
+        <tr><td>Pinterest</td><td>部分公开内容可用</td><td>建议登录</td><td>未登录容易遇登录墙/空页面</td></tr>
+        <tr><td>YouTube</td><td>通常免登录</td><td>多数公开频道免登录</td><td>年龄限制、会员内容、Bot Check 时再配置登录态</td></tr>
+        <tr><td>B站 / 微博 / 知乎</td><td>公开内容常可免登录</td><td>建议登录</td><td>高清、频繁访问、主页批量时更容易触发限制</td></tr>
+        <tr><td>普通网站 / 媒体直链</td><td>通常不需要</td><td>通常不需要</td><td>除非网站本身要求账号或验证码</td></tr>
       </tbody>
     </table>
   </div>

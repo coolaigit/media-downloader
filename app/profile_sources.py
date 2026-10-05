@@ -168,12 +168,14 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
     # 要视频时必须扫更大的范围：画板/主页的文件是图和视频混排的，
     # 前 N 个文件可能全是图（实测 USKYLEDS/architecture 前 22 个全是图，
     # 视频 pin 混在后面）。只扫 limit 个会得出「没有视频」的错误结论。
-    scan = max(int(limit) * 6, 120) if video_only else max(1, min(int(limit), 200))
+    # 大批量主页抓取不再把 200 当硬上限。视频混排场景仍会适当多扫，
+    # 但给扫描范围设 2400 的保护上限，避免一次元数据读取无限膨胀。
+    scan = max(int(limit) * 4, 120) if video_only else max(1, min(int(limit), 2000))
     # 1C：经统一 dispatcher 调 gallery-dl（internal 子命令内部就是
     # gallery_dl.main()，CLI 参数/退出码/输出语义 100% 保持）——
     # frozen 下 sys.executable 是本程序 EXE，老的 `-m gallery_dl` 写法不成立
     argv = subproc.build_internal_command("gallery-dl", "--dump-json",
-                                          "--range", f"1-{min(scan, 400)}")
+                                          "--range", f"1-{min(scan, 2400)}")
     if cookie_file:
         argv += ["--cookies", cookie_file]
     argv += list(argv_extra or [])

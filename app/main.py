@@ -166,7 +166,7 @@ class ImageItem(BaseModel):
 
 
 class DownloadImagesReq(BaseModel):
-    items: list[ImageItem] = Field(min_length=1, max_length=500)
+    items: list[ImageItem] = Field(min_length=1, max_length=2000)
     subdir: str = "images"
     concurrency: int = Field(default=6, ge=1, le=16)
     skip_existing: bool = True
@@ -201,7 +201,7 @@ class DownloadVideosReq(BaseModel):
     与 DownloadDirectReq 的区别：那边收的是**媒体直链**（.mp4 等），
     这边收的是**视频页面地址**（YouTube / B 站 / 各站播放页），要交给 yt-dlp 解析。
     """
-    items: list[ImageItem] = Field(min_length=1, max_length=200)
+    items: list[ImageItem] = Field(min_length=1, max_length=2000)
     subdir: str = "videos"
     quality: str = "best"
     container: str = ""
@@ -211,7 +211,7 @@ class DownloadVideosReq(BaseModel):
 
 class DownloadDirectReq(BaseModel):
     """下载网页扫描出的媒体直链（图片或视频文件）。"""
-    items: list[ImageItem] = Field(min_length=1, max_length=500)
+    items: list[ImageItem] = Field(min_length=1, max_length=2000)
     subdir: str = "media"
     concurrency: int = Field(default=6, ge=1, le=16)
     skip_existing: bool = True
@@ -228,8 +228,8 @@ class CrawlReq(BaseModel):
     """
     url: str = Field(min_length=1, max_length=2000)
     mode: str = "list"                                     # list | site
-    max_pages: int = Field(default=1, ge=1, le=500)
-    max_items: int = Field(default=30, ge=0, le=300)       # 下钻的详情页数量上限
+    max_pages: int = Field(default=1, ge=1, le=2000)
+    max_items: int = Field(default=30, ge=0, le=2000)      # 列表/主页展开与详情页下钻数量上限
     drill_down: bool = True                                # 是否下钻详情页
     drill_mode: str = "auto"                               # auto | always
     allow_render: bool = True                              # 允许用浏览器渲染 JS 页面
@@ -265,6 +265,9 @@ class SettingsReq(BaseModel):
     downloads_dir: str | None = Field(default=None, max_length=1000)
     # 桌面窗口右上角 X：exit=直接退出；tray=隐藏到系统托盘
     close_behavior: str | None = Field(default=None, pattern="^(exit|tray)$")
+    # 基础界面模式与强调色分离；都只允许内置预设。
+    ui_mode: str | None = Field(default=None, pattern="^(dark|black|light)$")
+    ui_accent: str | None = Field(default=None, pattern="^(blue|cyan|violet|green|orange|rose)$")
 
 
 # ---------- 工具 ----------
@@ -871,9 +874,9 @@ def api_download_videos(req: DownloadVideosReq):
 
 
 @app.get("/api/tasks")
-def api_tasks(limit: int = Query(default=50, ge=1, le=200)):
-    """任务列表（含进度）。"""
-    return {"tasks": manager.list(limit)}
+def api_tasks(limit: int = Query(default=50, ge=1, le=2000)):
+    """任务列表（含进度）。列表可截断，但总数/活动数按完整队列统计。"""
+    return {"tasks": manager.list(limit), **manager.counts()}
 
 
 @app.get("/api/tasks/{task_id}")

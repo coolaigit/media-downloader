@@ -183,17 +183,27 @@ async function loadStatus() {
   renderHelpEnv(statusInfo);
 }
 
+function renderLoginSummary(items) {
+  const vals = Object.values(items || {});
+  const ready = vals.filter(x => x.logged_in).length;
+  const bad = vals.filter(x => x.relogin_required).length;
+  const total = vals.length;
+  const text = bad
+    ? `${ready} / ${total} 个平台已登录 · ${bad} 个登录状态需要处理`
+    : `${ready} / ${total} 个平台已登录`;
+  const msg = $('platformLoginMsg');
+  const help = $('hLoginEnv');
+  if (msg) msg.textContent = text;
+  if (help) help.textContent = text;
+  return { ready, bad, total };
+}
+
 function renderHelpEnv(st) {
-  const core = $('hCoreEnv'), ck = $('hCookieEnv'), lg = $('hLoginEnv');
+  const core = $('hCoreEnv'), ck = $('hCookieEnv');
   if (!st) return;
   if (core) core.textContent = `ffmpeg ${st.ffmpeg_available ? '✓' : '×'} · yt-dlp ${st.ytdlp_version || '未知'} · JS ${st.js_runtime ? '✓' : '×'}`;
   if (ck) ck.textContent = (st.cookies && st.cookies.count) ? `通用 Cookies ${st.cookies.count} 条` : '通用 Cookies 未配置';
-  if (lg) {
-    const vals = Object.values(st.platform_logins || {});
-    const ready = vals.filter(x => x.logged_in).length;
-    const bad = vals.filter(x => x.relogin_required).length;
-    lg.textContent = bad ? `${ready} 个已登录 · ${bad} 个需重新登录` : `${ready} 个平台已登录`;
-  }
+  renderLoginSummary(st.platform_logins || {});
 }
 
 // ---------- 关键词搜图 ----------
@@ -1003,57 +1013,65 @@ async function downloadCrawlSelected() {
 
   try {
     if (pages.length) {
-      // 视频页 → yt-dlp。清晰度取值与直链那套不同（yt-dlp 用 best/worst/高度），
-      // 所以在这里映射一次，避免把 ""/"highest" 直接丢给 yt-dlp。
+      // 视频页 → yt-dlp。大批量必须分块提交：旧版一次传 300 条时会撞上
+      // 请求模型 200 条上限而直接 422；同时也不能为每条瞬间创建线程。
+      // 后端现在有固定 worker 队列，这里再按 500 条分块，数量再大也只是排队。
       const q = (preferQ === 'lowest') ? 'worst'
         : (preferQ === 'highest' || !preferQ) ? 'best' : preferQ;
-      const r = await api('/api/download/videos', {
-        method: 'POST',
-        body: {
-          items: pages.map(i => ({ url: i.url, title: (i.title || '').slice(0, 60) })),
-          subdir: sub,
-          quality: q,
-          concurrency: Math.max(1, Math.min(8, conc)),
-        },
-      });
-      submitted += (r && r.count) || pages.length;
+      for (let off = 0; off < pages.length; off += 500) {
+        const batch = pages.slice(off, off + 500);
+        const r = await api('/api/download/videos', {
+          method: 'POST',
+          body: {
+            items: batch.map(i => ({ url: i.url, title: (i.title || '').slice(0, 60) })),
+            subdir: sub,
+            quality: q,
+            concurrency: Math.max(1, Math.min(8, conc)),
+          },
+        });
+        submitted += (r && r.count) || batch.length;
+      }
     }
     if (plain.length) {
-      await api('/api/download/direct', {
-        method: 'POST',
-        body: {
-          items: plain.map(i => ({
-            url: i.url,
-            referer: i.referer || '',
-            title: i.title || '',
-            // 同一媒体的其它档位地址：首选地址下不了时后端会自动换用，
-            // 避免「看起来最高清的那条其实拿不到」直接变成下载失败。
-            alternates: i.variants || [],
-          })),
-          subdir: sub,
-          concurrency: conc,
-          skip_existing: skip,
-          prefer_quality: preferQ,
-          title: `批量抓取 ${plain.length} 个文件`,
-        },
-      });
-      submitted += plain.length;
+      for (let off = 0; off < plain.length; off += 500) {
+        const batch = plain.slice(off, off + 500);
+        await api('/api/download/direct', {
+          method: 'POST',
+          body: {
+            items: batch.map(i => ({
+              url: i.url,
+              referer: i.referer || '',
+              title: i.title || '',
+              // 同一媒体的其它档位地址：首选地址下不了时后端会自动换用。
+              alternates: i.variants || [],
+            })),
+            subdir: sub,
+            concurrency: conc,
+            skip_existing: skip,
+            prefer_quality: preferQ,
+            title: `批量抓取 ${batch.length} 个文件`,
+          },
+        });
+        submitted += batch.length;
+      }
     }
     if (streams.length) {
-      // 流媒体（m3u8/mpd）需要先拉分片再用 ffmpeg 合并，走后端专用接口
-      await api('/api/download/stream', {
-        method: 'POST',
-        body: {
-          items: streams.map(i => ({
-            url: i.url, referer: i.referer || '', title: i.title || '',
-          })),
-          subdir: sub + '/streams',
-          // 清晰度偏好对 master playlist 生效：后端从变体里挑对应档位
-          prefer_quality: preferQ === 'highest' ? 'highest'
-            : preferQ === 'lowest' ? 'lowest' : preferQ,
-        },
-      });
-      submitted += streams.length;
+      // 流媒体也分块，避免极大请求体；每块在后端仍按流媒体并发设置执行。
+      for (let off = 0; off < streams.length; off += 200) {
+        const batch = streams.slice(off, off + 200);
+        await api('/api/download/stream', {
+          method: 'POST',
+          body: {
+            items: batch.map(i => ({
+              url: i.url, referer: i.referer || '', title: i.title || '',
+            })),
+            subdir: sub + '/streams',
+            prefer_quality: preferQ === 'highest' ? 'highest'
+              : preferQ === 'lowest' ? 'lowest' : preferQ,
+          },
+        });
+        submitted += batch.length;
+      }
     }
     toast(`已提交 ${submitted} 个资源到下载队列`, 'ok');
     // 必须立即启动任务轮询，否则底部「下载任务」栏要等下一次轮询周期
@@ -1782,9 +1800,13 @@ async function pollTasks() {
   try { res = await api('/api/tasks?limit=30'); }
   catch (e) { return; }
   const tasks = res.tasks || [];
-  $('taskCount').textContent = tasks.length;
+  const totalTasks = Number.isFinite(Number(res.total)) ? Number(res.total) : tasks.length;
+  $('taskCount').textContent = totalTasks;
 
-  const running = tasks.some(t => t.status === 'running' || t.status === 'queued');
+  // 面板只渲染最近 30 条，但是否继续轮询必须看完整队列。
+  // 否则 300 条批量任务里“最新 30 条”先结束后，前端会误以为全部结束并停止刷新。
+  const running = Number(res.active || 0) > 0
+    || tasks.some(t => t.status === 'running' || t.status === 'queued');
   if (!running && taskTimer) {
     clearInterval(taskTimer);
     taskTimer = null;
@@ -1903,10 +1925,7 @@ function renderLoginAlert(items) {
     return;
   }
   el.hidden = false;
-  el.innerHTML = `检测到 <b>${bad.map(x => esc(x.name)).join('、')}</b> 登录状态需要处理。
-    <button class="btn tiny danger" id="btnReloginNow">去处理登录</button>`;
-  const btn = $('btnReloginNow');
-  if (btn) btn.onclick = () => switchTab('login');
+  el.innerHTML = `检测到 <b>${bad.map(x => esc(x.name)).join('、')}</b> 登录状态需要处理。请打开“平台登录”查看具体状态。`;
 }
 
 async function loadPlatformStatuses(force = false, platform = '') {
@@ -1922,10 +1941,7 @@ async function loadPlatformStatuses(force = false, platform = '') {
     renderPlatformCards('platformLoginGrid', platformStatusCache);
     renderPlatformCards('wizardLoginGrid', platformStatusCache);
     renderLoginAlert(platformStatusCache);
-    const ready = Object.values(platformStatusCache).filter(x => x.logged_in).length;
-    const bad = Object.values(platformStatusCache).filter(x => x.relogin_required).length;
-    const msg = $('platformLoginMsg');
-    if (msg) msg.textContent = bad ? `${ready} 个已登录，${bad} 个登录状态需要处理` : `${ready} 个平台已登录`;
+    renderLoginSummary(platformStatusCache);
     return platformStatusCache;
   } catch (e) {
     const msg = $('platformLoginMsg');
@@ -1948,6 +1964,7 @@ async function watchPlatformLogin(platform) {
       renderPlatformCards('platformLoginGrid', platformStatusCache);
       renderPlatformCards('wizardLoginGrid', platformStatusCache);
       renderLoginAlert(platformStatusCache);
+      renderLoginSummary(platformStatusCache);
       // 子进程刚启动时 Chrome 可能还没来得及持有 Profile 锁；不能看到一次
       // in_use=false 就误判“登录窗口已经关闭”。至少观察到打开过，或给 12 秒启动宽限。
       if (!st.in_use && (seenOpen || rounds >= 8)) {
@@ -1972,6 +1989,47 @@ async function loginPlatform(platform) {
 }
 
 // ---------- 设置 ----------
+const BASE_THEMES = new Set(['dark', 'black', 'light']);
+
+const ACCENT_THEMES = {
+  blue:   { accent: '#4f8cff', hi: '#74a6ff', lightHi: '#2563d9' },
+  cyan:   { accent: '#18a8c9', hi: '#4cc6df', lightHi: '#0f7f98' },
+  violet: { accent: '#8b5cf6', hi: '#a98bff', lightHi: '#6d3de0' },
+  green:  { accent: '#2faa6e', hi: '#58c98f', lightHi: '#16794b' },
+  orange: { accent: '#e28735', hi: '#f1a45d', lightHi: '#b85f12' },
+  rose:   { accent: '#db5c86', hi: '#ef82a7', lightHi: '#b53e68' },
+};
+
+function applyBaseTheme(name) {
+  const key = BASE_THEMES.has(name) ? name : 'dark';
+  document.documentElement.dataset.mode = key;
+  const currentAccent = document.documentElement.dataset.accent || 'blue';
+  const sel = $('sUiMode');
+  if (sel && sel.value !== key) sel.value = key;
+  document.querySelectorAll('.base-theme-card').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === key);
+  });
+  applyAccentTheme(currentAccent);
+  return key;
+}
+
+function applyAccentTheme(name) {
+  const key = ACCENT_THEMES[name] ? name : 'blue';
+  const t = ACCENT_THEMES[key];
+  const root = document.documentElement.style;
+  root.setProperty('--accent', t.accent);
+  root.setProperty('--accent-hi', document.documentElement.dataset.mode === 'light' ? t.lightHi : t.hi);
+  root.setProperty('--accent-soft', `color-mix(in srgb, ${t.accent} 16%, var(--card))`);
+  root.setProperty('--accent-border', `color-mix(in srgb, ${t.accent} 48%, var(--line))`);
+  document.documentElement.dataset.accent = key;
+  const sel = $('sAccent');
+  if (sel && sel.value !== key) sel.value = key;
+  document.querySelectorAll('.theme-swatch').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.theme === key);
+  });
+  return key;
+}
+
 function renderCookiesStat(ck) {
   const el = $('sCookiesStat');
   if (!el) return;
@@ -1995,6 +2053,8 @@ function fillSettings(s) {
   $('sCookiesBrowser').value = s.cookies_from_browser || '';
   $('sAllowPrivate').checked = !!s.allow_private_network;
   if ($('sCloseBehavior')) $('sCloseBehavior').value = s.close_behavior || 'exit';
+  applyBaseTheme(s.ui_mode || 'dark');
+  applyAccentTheme(s.ui_accent || 'blue');
   renderCookiesStat(statusInfo && statusInfo.cookies);
 }
 
@@ -2020,6 +2080,8 @@ async function saveSettings() {
     cookies_from_browser: $('sCookiesBrowser').value,
     allow_private_network: $('sAllowPrivate').checked,
     close_behavior: $('sCloseBehavior') ? $('sCloseBehavior').value : 'exit',
+    ui_mode: $('sUiMode') ? $('sUiMode').value : 'dark',
+    ui_accent: $('sAccent') ? $('sAccent').value : 'blue',
   };
   try {
     const r = await api('/api/settings', { method: 'POST', body });
@@ -2095,9 +2157,6 @@ async function finishWizard() {
 // ---------- 事件绑定 ----------
 function bindEvents() {
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => switchTab(t.dataset.tab));
-  document.querySelectorAll('.help-login').forEach(btn => {
-    btn.onclick = () => loginPlatform(btn.dataset.platform || 'ig');
-  });
 
   $('btnSearch').onclick = doSearch;
   $('kwInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
@@ -2183,6 +2242,14 @@ function bindEvents() {
 
   $('btnSaveSettings').onclick = saveSettings;
   $('btnReloadSettings').onclick = loadSettings;
+  if ($('sUiMode')) $('sUiMode').onchange = () => applyBaseTheme($('sUiMode').value);
+  document.querySelectorAll('.base-theme-card').forEach(btn => {
+    btn.onclick = () => applyBaseTheme(btn.dataset.mode || 'dark');
+  });
+  if ($('sAccent')) $('sAccent').onchange = () => applyAccentTheme($('sAccent').value);
+  document.querySelectorAll('.theme-swatch').forEach(btn => {
+    btn.onclick = () => applyAccentTheme(btn.dataset.theme || 'blue');
+  });
   if ($('btnRefreshPlatforms')) $('btnRefreshPlatforms').onclick = () => loadPlatformStatuses(true);
   if ($('wizardNext')) $('wizardNext').onclick = wizardNext;
   if ($('wizardBack')) $('wizardBack').onclick = () => showWizardStep(wizardStep - 1);

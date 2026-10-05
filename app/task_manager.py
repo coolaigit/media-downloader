@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import uuid
@@ -136,12 +137,20 @@ class Task:
 
 
 class TaskManager:
-    def __init__(self, max_tasks: int = 200):
+    def __init__(self, max_tasks: int = 2000):
         self._tasks: dict[str, Task] = {}
         self._order: list[str] = []          # 新任务在前
         self._lock = threading.RLock()
         self._max_tasks = max_tasks
         self._cancel_flags: dict[str, threading.Event] = {}
+
+        # 视频批量下载以前是“每个条目立即起一个线程”。勾 300 条时会瞬间
+        # 创建 300 个线程，即使 _VIDEO_GATE 最终只允许 3~16 个 yt-dlp 真正开跑，
+        # 仍会先把本机线程/内存资源堆高。改成固定 16 个 daemon worker +
+        # 队列：提交多少都只是排队，不再按条目数量创建线程。
+        self._video_queue: queue.Queue[str] = queue.Queue()
+        self._video_workers_started = False
+        self._video_worker_lock = threading.Lock()
 
     # ---------- 基础操作 ----------
 
@@ -153,6 +162,19 @@ class TaskManager:
         with self._lock:
             ids = self._order[:limit]
             return [self._tasks[i].public() for i in ids if i in self._tasks]
+
+    def counts(self) -> dict:
+        """返回全队列统计；任务面板即使只渲染最近 30 条也不会误报总数/误停轮询。"""
+        with self._lock:
+            vals = list(self._tasks.values())
+            queued = sum(1 for t in vals if t.status == ST_QUEUED)
+            running = sum(1 for t in vals if t.status == ST_RUNNING)
+            return {
+                "total": len(vals),
+                "queued": queued,
+                "running": running,
+                "active": queued + running,
+            }
 
     def _prune(self):
         """超出上限时清理最旧的已结束任务。"""
@@ -172,6 +194,32 @@ class TaskManager:
             self._tasks[task.id] = task
             self._order.insert(0, task.id)
             self._prune()
+
+    def _ensure_video_workers(self) -> None:
+        if self._video_workers_started:
+            return
+        with self._video_worker_lock:
+            if self._video_workers_started:
+                return
+            for idx in range(16):
+                threading.Thread(
+                    target=self._video_worker,
+                    name=f"media-video-worker-{idx + 1}",
+                    daemon=True,
+                ).start()
+            self._video_workers_started = True
+
+    def _video_worker(self) -> None:
+        while True:
+            task_id = self._video_queue.get()
+            try:
+                self._run_video(task_id)
+            except Exception:
+                # _run_video/_run_video_inner 本身会把任务错误落到状态里；
+                # 这里兜底只为保证 worker 不会因为单条异常退出。
+                pass
+            finally:
+                self._video_queue.task_done()
 
     # ---------- 创建任务 ----------
 
@@ -239,7 +287,8 @@ class TaskManager:
         )
         self._register(task)
         self._cancel_flags[task.id] = threading.Event()
-        threading.Thread(target=self._run_video, args=(task.id,), daemon=True).start()
+        self._ensure_video_workers()
+        self._video_queue.put(task.id)
         return task.id
 
     def set_video_concurrency(self, n: int) -> int:

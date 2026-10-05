@@ -1331,7 +1331,7 @@ def crawl_list(
         if profile_first:
             pt_exp, pt_note = _expand_via_platform_source(
                 list_url,
-                limit=max(2, min(int(max_items or 30) or 30, 200)),
+                limit=max(2, min(int(max_items or 30) or 30, 2000)),
                 on_note=lambda s: _emit("list", 0, 1, s),
             )
             if pt_exp is not None:
@@ -1357,7 +1357,7 @@ def crawl_list(
         if not profile_first:
             pt_exp, pt_note = _expand_via_platform_source(
                 list_url,
-                limit=max(2, min(int(max_items or 30) or 30, 200)),
+                limit=max(2, min(int(max_items or 30) or 30, 2000)),
                 on_note=lambda s: _emit("list", 0, 1, s),
             )
             if pt_exp is not None:

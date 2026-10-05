@@ -12,6 +12,8 @@
   "video_quality_default": "best",
   "downloads_dir": "",
   "close_behavior": "exit",
+  "ui_mode": "dark",
+  "ui_accent": "blue",
   "onboarding_complete": false,
   "onboarding_version": ""
 }
