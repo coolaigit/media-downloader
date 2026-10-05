@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+import requests
+
 from .config import DATA_ROOT
 
 PLATFORMS = {
@@ -27,7 +29,10 @@ PLATFORMS = {
                "auth_cookies": ("sessionid", "sessionid_ss", "sid_tt", "sid_guard", "uid_tt")},
     "ks": {"name": "快手", "login_url": "https://www.kuaishou.com/",
            "domains": ("kuaishou.com",),
-           "auth_cookies": ("kuaishou.server.web_st", "userid")},
+           # userId/passToken 只能证明 id.kuaishou.com 身份流程留下过账号信息，
+           # 不能证明 www.kuaishou.com 已建立可用的 Web 会话。web_st 才是
+           # 当前下载/主页抓取真正需要的站点会话凭据。
+           "auth_cookies": ("kuaishou.server.web_st",)},
     "bili": {"name": "B站", "login_url": "https://www.bilibili.com/",
              "domains": ("bilibili.com", "b23.tv"), "auth_cookies": ("sessdata", "dedeuserid")},
     "wb": {"name": "微博", "login_url": "https://weibo.com/",
@@ -39,6 +44,11 @@ PLATFORMS = {
            "auth_cookies": ("sapisid", "__secure-1papisid", "__secure-3papisid", "login_info")},
 }
 PROFILE_ROOT = DATA_ROOT / "platform_profiles"
+
+# 有些平台仅凭 Cookie 名仍可能处在“账号风控/安全验证”中。Instagram
+# 已实测会出现 sessionid + ds_user_id 都存在，但页面被强制导向
+# update_risky_contactpoint，此时不能向用户显示“已登录”。
+ACTIVE_VERIFY_PLATFORMS = {"ig"}
 
 
 def platform_for_url(url: str) -> str:
@@ -137,6 +147,83 @@ def _auth_rows(platform: str, rows: list[dict], now: int | None = None) -> list[
     ]
 
 
+def _verify_platform_auth(platform: str, rows: list[dict]) -> dict:
+    """Actively verify account usability for platforms where auth cookies alone are insufficient."""
+    if platform not in ACTIVE_VERIFY_PLATFORMS:
+        return {"state": "not_required", "reason": ""}
+
+    auth = _auth_rows(platform, rows)
+    if not auth:
+        return {"state": "not_authenticated", "reason": "没有检测到账号登录凭据"}
+
+    if platform == "ig":
+        cookies = {str(r["name"]): str(r["value"]) for r in rows if r.get("value")}
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/154.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.instagram.com/",
+            # Instagram Web currently uses this public web app id for account reads.
+            "X-IG-App-ID": "936619743392459",
+        }
+        try:
+            resp = requests.get(
+                "https://www.instagram.com/api/v1/accounts/current_user/?edit=true",
+                cookies=cookies,
+                headers=headers,
+                timeout=12,
+                allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            return {
+                "state": "unknown",
+                "reason": f"在线验证失败：{type(exc).__name__}",
+            }
+
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
+            user = data.get("user") if isinstance(data, dict) else None
+            if isinstance(user, dict) and user:
+                return {"state": "verified", "reason": ""}
+            if isinstance(data, dict) and (
+                data.get("pk") or data.get("username")
+            ):
+                return {"state": "verified", "reason": ""}
+            msg = str(data.get("message") or "") if isinstance(data, dict) else ""
+            if "challenge" in msg.lower() or "login" in msg.lower():
+                return {
+                    "state": "verification_required",
+                    "reason": "Instagram 登录凭据已存在，但账号仍要求安全验证/登录确认",
+                }
+            return {
+                "state": "unknown",
+                "reason": "Instagram 返回了登录凭据，但未确认到可用账号会话",
+            }
+
+        if resp.status_code in {301, 302, 303, 307, 308}:
+            return {
+                "state": "verification_required",
+                "reason": "Instagram 登录凭据已存在，但账号仍要求安全验证/登录确认",
+            }
+        if resp.status_code in {401, 403}:
+            return {
+                "state": "verification_required",
+                "reason": "Instagram 登录凭据不可用，需要重新登录或完成账号验证",
+            }
+        return {
+            "state": "unknown",
+            "reason": f"Instagram 在线验证返回 HTTP {resp.status_code}",
+        }
+
+    return {"state": "unknown", "reason": "登录状态尚未验证"}
+
+
 def status(platform: str) -> dict:
     cfg = PLATFORMS.get(platform)
     if not cfg:
@@ -150,6 +237,9 @@ def status(platform: str) -> dict:
     now = int(time.time())
     login_ts = int(login.get("ts") or 0)
     invalid_ts = int(invalid.get("ts") or 0)
+    verification_state = str(login.get("verification_state") or "")
+    verification_reason = str(login.get("verification_reason") or "")
+    verification_ts = int(login.get("verification_ts") or 0)
 
     usable = [r for r in relevant if not r["expires"] or r["expires"] > now]
     auth = _auth_rows(platform, relevant, now)
@@ -167,7 +257,20 @@ def status(platform: str) -> dict:
         state = "invalid"
         reason = str(invalid.get("reason") or "登录态已失效")
     elif auth:
-        state = "ready"
+        if platform in ACTIVE_VERIFY_PLATFORMS:
+            if verification_state == "verified":
+                state = "ready"
+            elif verification_state == "verification_required":
+                state = "verification_required"
+                reason = verification_reason or "账号仍需要完成安全验证/登录确认"
+            elif verification_state == "unknown":
+                state = "unknown"
+                reason = verification_reason or "登录凭据已存在，但在线验证未完成"
+            else:
+                state = "unknown"
+                reason = "检测到登录凭据，但尚未完成在线验证；点击“刷新状态”重新确认"
+        else:
+            state = "ready"
     elif expired_auth:
         state = "expired"
         reason = "账号登录凭据已过期"
@@ -191,7 +294,9 @@ def status(platform: str) -> dict:
     return {
         "platform": platform, "name": cfg["name"], "login_url": cfg["login_url"],
         "state": state, "logged_in": state == "ready",
-        "relogin_required": state in {"invalid", "expired"}, "reason": reason,
+        "relogin_required": state in {"invalid", "expired", "verification_required"}, "reason": reason,
+        "verification_state": verification_state,
+        "verification_ts": verification_ts,
         "profile_dir": str(prof), "profile_exists": prof.exists(),
         "cookie_file": str(ck) if ck.exists() else "", "cookie_count": len(relevant),
         "auth_cookie_count": len(auth),
@@ -317,6 +422,15 @@ def refresh_from_profile(platform: str) -> dict:
                 cookie_file(platform).unlink(missing_ok=True)
             except OSError:
                 pass
+
+        rows = _relevant(platform, _cookie_rows(cookie_file(platform)))
+        auth = _auth_rows(platform, rows, now)
+        verification = (
+            _verify_platform_auth(platform, rows)
+            if auth else
+            {"state": "not_authenticated", "reason": ""}
+        )
+
         try:
             state_file(platform).write_text(json.dumps({
                 "ts": now,
@@ -326,13 +440,15 @@ def refresh_from_profile(platform: str) -> dict:
                 "note": "manual-refresh",
                 "cookie_file": result.get("path") or "",
                 "cookie_count": int(result.get("count") or 0),
+                "verification_state": verification.get("state") or "",
+                "verification_reason": verification.get("reason") or "",
+                "verification_ts": now if platform in ACTIVE_VERIFY_PLATFORMS and auth else 0,
             }, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
             pass
 
-    rows = _relevant(platform, _cookie_rows(cookie_file(platform)))
-    if _auth_rows(platform, rows, now):
-        clear_invalid(platform)
+        if auth and verification.get("state") in {"verified", "not_required"}:
+            clear_invalid(platform)
 
     st = status(platform)
     st["refresh_ok"] = bool(result.get("ok"))

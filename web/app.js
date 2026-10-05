@@ -1858,6 +1858,7 @@ let platformStatusCache = {};
 function platformStateLabel(st) {
   if (st.in_use) return ['登录窗口已打开', 'active'];
   if (st.state === 'ready') return ['已登录', 'ready'];
+  if (st.state === 'verification_required') return ['需验证', 'bad'];
   if (st.state === 'invalid') return ['登录失效', 'bad'];
   if (st.state === 'expired') return ['已过期', 'bad'];
   if (st.state === 'unknown') return ['待确认', 'warn'];
@@ -1884,7 +1885,8 @@ function renderPlatformCards(targetId, items) {
         (when ? '上次登录：' + esc(when) : '尚未建立本机登录态')}</div>
       <div class="hint">Cookies：${Number(st.cookie_count || 0)} 条 · 登录凭据：${Number(st.auth_cookie_count || 0)} 条</div>
       <button class="btn tiny ${st.relogin_required ? 'danger' : ''}" data-platform="${key}">
-        ${st.logged_in && !st.relogin_required ? '重新登录' : '登录'}
+        ${st.state === 'verification_required' ? '继续验证' :
+          (st.logged_in && !st.relogin_required ? '重新登录' : '登录')}
       </button>`;
     el.querySelector('button').onclick = () => loginPlatform(key);
     box.appendChild(el);
@@ -1901,8 +1903,8 @@ function renderLoginAlert(items) {
     return;
   }
   el.hidden = false;
-  el.innerHTML = `检测到 <b>${bad.map(x => esc(x.name)).join('、')}</b> 登录态已失效或过期。
-    <button class="btn tiny danger" id="btnReloginNow">去重新登录</button>`;
+  el.innerHTML = `检测到 <b>${bad.map(x => esc(x.name)).join('、')}</b> 登录状态需要处理。
+    <button class="btn tiny danger" id="btnReloginNow">去处理登录</button>`;
   const btn = $('btnReloginNow');
   if (btn) btn.onclick = () => switchTab('login');
 }
@@ -1923,7 +1925,7 @@ async function loadPlatformStatuses(force = false, platform = '') {
     const ready = Object.values(platformStatusCache).filter(x => x.logged_in).length;
     const bad = Object.values(platformStatusCache).filter(x => x.relogin_required).length;
     const msg = $('platformLoginMsg');
-    if (msg) msg.textContent = bad ? `${ready} 个已登录，${bad} 个需要重新登录` : `${ready} 个平台已登录`;
+    if (msg) msg.textContent = bad ? `${ready} 个已登录，${bad} 个登录状态需要处理` : `${ready} 个平台已登录`;
     return platformStatusCache;
   } catch (e) {
     const msg = $('platformLoginMsg');
