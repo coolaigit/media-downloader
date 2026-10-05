@@ -14,7 +14,7 @@ let libFilterType = '';
 let currentVideo = null;     // 当前解析出的视频信息
 let selectedFormatId = '';   // 「用此格式」精确选择的格式 ID（空 = 按清晰度档位）
 let statusInfo = null;
-let dockCollapsed = false;
+let dockCollapsed = true;
 let taskTimer = null;
 
 // ---------- 通用工具 ----------
@@ -1989,7 +1989,7 @@ async function loginPlatform(platform) {
 }
 
 // ---------- 设置 ----------
-const BASE_THEMES = new Set(['dark', 'black', 'light']);
+const BASE_THEMES = new Set(['gray', 'black', 'light']);
 
 const ACCENT_THEMES = {
   blue:   { accent: '#4f8cff', hi: '#74a6ff', lightHi: '#2563d9' },
@@ -2001,7 +2001,8 @@ const ACCENT_THEMES = {
 };
 
 function applyBaseTheme(name) {
-  const key = BASE_THEMES.has(name) ? name : 'dark';
+  const requested = name === 'dark' ? 'gray' : name;
+  const key = BASE_THEMES.has(requested) ? requested : 'light';
   document.documentElement.dataset.mode = key;
   const currentAccent = document.documentElement.dataset.accent || 'blue';
   const sel = $('sUiMode');
@@ -2018,7 +2019,7 @@ function applyAccentTheme(name) {
   const t = ACCENT_THEMES[key];
   const root = document.documentElement.style;
   root.setProperty('--accent', t.accent);
-  root.setProperty('--accent-hi', document.documentElement.dataset.mode === 'light' ? t.lightHi : t.hi);
+  root.setProperty('--accent-hi', document.documentElement.dataset.mode === 'black' ? t.hi : t.lightHi);
   root.setProperty('--accent-soft', `color-mix(in srgb, ${t.accent} 16%, var(--card))`);
   root.setProperty('--accent-border', `color-mix(in srgb, ${t.accent} 48%, var(--line))`);
   document.documentElement.dataset.accent = key;
@@ -2053,7 +2054,7 @@ function fillSettings(s) {
   $('sCookiesBrowser').value = s.cookies_from_browser || '';
   $('sAllowPrivate').checked = !!s.allow_private_network;
   if ($('sCloseBehavior')) $('sCloseBehavior').value = s.close_behavior || 'exit';
-  applyBaseTheme(s.ui_mode || 'dark');
+  applyBaseTheme(s.ui_mode || 'light');
   applyAccentTheme(s.ui_accent || 'blue');
   renderCookiesStat(statusInfo && statusInfo.cookies);
 }
@@ -2080,7 +2081,7 @@ async function saveSettings() {
     cookies_from_browser: $('sCookiesBrowser').value,
     allow_private_network: $('sAllowPrivate').checked,
     close_behavior: $('sCloseBehavior') ? $('sCloseBehavior').value : 'exit',
-    ui_mode: $('sUiMode') ? $('sUiMode').value : 'dark',
+    ui_mode: $('sUiMode') ? $('sUiMode').value : 'light',
     ui_accent: $('sAccent') ? $('sAccent').value : 'blue',
   };
   try {
@@ -2244,7 +2245,7 @@ function bindEvents() {
   $('btnReloadSettings').onclick = loadSettings;
   if ($('sUiMode')) $('sUiMode').onchange = () => applyBaseTheme($('sUiMode').value);
   document.querySelectorAll('.base-theme-card').forEach(btn => {
-    btn.onclick = () => applyBaseTheme(btn.dataset.mode || 'dark');
+    btn.onclick = () => applyBaseTheme(btn.dataset.mode || 'light');
   });
   if ($('sAccent')) $('sAccent').onchange = () => applyAccentTheme($('sAccent').value);
   document.querySelectorAll('.theme-swatch').forEach(btn => {
@@ -2264,6 +2265,7 @@ function bindEvents() {
     e.stopPropagation();
     dockCollapsed = !dockCollapsed;
     $('taskDock').classList.toggle('collapsed', dockCollapsed);
+    document.body.classList.toggle('dock-collapsed', dockCollapsed);
     $('btnToggleDock').textContent = dockCollapsed ? '展开' : '收起';
   };
   $('taskDockHead').onclick = (e) => {

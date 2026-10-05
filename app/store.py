@@ -37,7 +37,7 @@ DEFAULTS = {
     # 默认保持 1.x/RC1 的直接退出行为，避免升级后悄悄常驻后台。
     "close_behavior": "exit",
     # 基础界面模式与强调色分离：mode 控制整个界面明暗/表面层级，accent 只负责强调。
-    "ui_mode": "dark",
+    "ui_mode": "light",
     "ui_accent": "blue",
     # 首次使用向导：complete 只代表用户点过“完成”，version 用于识别
     # “完成的是不是当前版本的向导”。这样升级到新的首次使用流程时会再显示一次，

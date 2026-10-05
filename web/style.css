@@ -1,29 +1,52 @@
 /* 媒体下载工具 - 界面样式 */
 :root {
-  --bg: #0f1115;
-  --bg-soft: #171a21;
-  --card: #1c2029;
-  --card-hi: #232835;
-  --line: #2c3240;
-  --txt: #e6e8ee;
-  --txt-dim: #98a1b3;
+  --bg: #ffffff;
+  --bg-soft: #f7f9fc;
+  --card: #ffffff;
+  --card-hi: #f1f4f8;
+  --line: #d8dee8;
+  --txt: #172033;
+  --txt-dim: #667085;
   --accent: #4f8cff;
-  --accent-hi: #74a6ff;
-  --accent-soft: #1b2b47;
-  --accent-border: #355a91;
-  --ok: #3ddc84;
-  --warn: #ffb454;
-  --err: #ff6b6b;
-  --ok-bg: #1a2e22;
-  --ok-border: #274d38;
-  --warn-bg: #2e2416;
-  --warn-border: #5a4322;
-  --err-bg: #33201f;
-  --err-border: #6f3a3a;
-  --shadow-soft: rgba(0,0,0,.14);
-  --shadow-strong: rgba(0,0,0,.42);
+  --accent-hi: #2563d9;
+  --accent-soft: #eef4ff;
+  --accent-border: #9dbcf7;
+  --ok: #16794b;
+  --warn: #a95c08;
+  --err: #c23f50;
+  --ok-bg: #eaf7f0;
+  --ok-border: #afd8c1;
+  --warn-bg: #fff5e6;
+  --warn-border: #eccb95;
+  --err-bg: #fff0f2;
+  --err-border: #e8b9bf;
+  --shadow-soft: rgba(16,24,40,.08);
+  --shadow-strong: rgba(16,24,40,.18);
   --radius: 10px;
-  color-scheme: dark;
+  color-scheme: light;
+}
+
+html[data-mode="gray"],
+html[data-mode="dark"] {
+  --bg: #d6dbe1;
+  --bg-soft: #e4e8ed;
+  --card: #eef1f4;
+  --card-hi: #e0e5ea;
+  --line: #b8c0ca;
+  --txt: #202938;
+  --txt-dim: #5e6877;
+  --ok: #16794b;
+  --warn: #9c570b;
+  --err: #b43b49;
+  --ok-bg: #deeee5;
+  --ok-border: #9fc5af;
+  --warn-bg: #f2e6d6;
+  --warn-border: #d7b881;
+  --err-bg: #f3e0e3;
+  --err-border: #d4a4aa;
+  --shadow-soft: rgba(30,41,59,.10);
+  --shadow-strong: rgba(30,41,59,.20);
+  color-scheme: light;
 }
 
 html[data-mode="black"] {
@@ -91,8 +114,9 @@ body {
   font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
   font-size: 14px;
   line-height: 1.6;
-  padding-bottom: 210px; /* 给底部任务栏留空间 */
+  padding-bottom: 210px; /* 展开任务栏时预留空间 */
 }
+body.dock-collapsed { padding-bottom: 52px; }
 
 /* ---------- 顶栏 ---------- */
 .topbar {
@@ -722,9 +746,9 @@ html[data-mode="light"] .vitem img {
 .theme-preview i { left: 6px; top: 17px; width: 24px; height: 7px; }
 .theme-preview b { left: 35px; top: 17px; right: 6px; height: 7px; }
 .theme-preview em { left: 6px; top: 30px; right: 6px; height: 12px; }
-.preview-dark { background: #0f1115; }
-.preview-dark i, .preview-dark b { background: #2b313d; }
-.preview-dark em { background: #1c2029; }
+.preview-gray { background: #d6dbe1; }
+.preview-gray i, .preview-gray b { background: #b8c0ca; }
+.preview-gray em { background: #eef1f4; border: 1px solid #b8c0ca; }
 .preview-black { background: #000; }
 .preview-black i, .preview-black b { background: #171a20; }
 .preview-black em { background: #0c0e11; border: 1px solid #262a31; }

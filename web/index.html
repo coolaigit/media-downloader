@@ -7,7 +7,7 @@
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="dock-collapsed">
 
 <header class="topbar">
   <div id="deadBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99;background:#b3261e;color:#fff;padding:10px 16px;font-weight:600;text-align:center;">
@@ -818,9 +818,9 @@
     <div class="appearance-group wide">
       <div class="appearance-label">基础外观</div>
       <div class="base-theme-grid" id="baseThemeGrid" aria-label="基础外观选择">
-        <button type="button" class="base-theme-card" data-mode="dark">
-          <span class="theme-preview preview-dark"><i></i><b></b><em></em></span>
-          <span class="theme-copy"><strong>深灰</strong><small>默认，层级柔和</small></span>
+        <button type="button" class="base-theme-card" data-mode="gray">
+          <span class="theme-preview preview-gray"><i></i><b></b><em></em></span>
+          <span class="theme-copy"><strong>灰色</strong><small>中性灰，层级清晰</small></span>
         </button>
         <button type="button" class="base-theme-card" data-mode="black">
           <span class="theme-preview preview-black"><i></i><b></b><em></em></span>
@@ -832,7 +832,7 @@
         </button>
       </div>
       <select id="sUiMode" class="appearance-hidden-select" aria-label="基础外观">
-        <option value="dark">深灰</option>
+        <option value="gray">灰色</option>
         <option value="black">纯黑</option>
         <option value="light">纯白</option>
       </select>
@@ -1000,12 +1000,12 @@
 </div>
 
 <!-- ============ 任务面板 ============ -->
-<div class="taskdock" id="taskDock">
+<div class="taskdock collapsed" id="taskDock">
   <div class="taskdock-head" id="taskDockHead">
     <span>下载任务 <b id="taskCount">0</b></span>
     <div class="spacer"></div>
     <button class="btn tiny ghost" id="btnClearTasks">清除已完成</button>
-    <button class="btn tiny ghost" id="btnToggleDock">收起</button>
+    <button class="btn tiny ghost" id="btnToggleDock">展开</button>
   </div>
   <div class="taskdock-body" id="taskList"></div>
 </div>

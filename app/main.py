@@ -266,7 +266,7 @@ class SettingsReq(BaseModel):
     # 桌面窗口右上角 X：exit=直接退出；tray=隐藏到系统托盘
     close_behavior: str | None = Field(default=None, pattern="^(exit|tray)$")
     # 基础界面模式与强调色分离；都只允许内置预设。
-    ui_mode: str | None = Field(default=None, pattern="^(dark|black|light)$")
+    ui_mode: str | None = Field(default=None, pattern="^(gray|dark|black|light)$")
     ui_accent: str | None = Field(default=None, pattern="^(blue|cyan|violet|green|orange|rose)$")
 
 
