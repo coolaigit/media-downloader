@@ -265,9 +265,33 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
                               json.dumps(data, ensure_ascii=False))
                 if m:
                     cover = m.group(0).replace("\\/", "/")
-            ctx = {"title": (data.get("title") or data.get("grid_title")
-                             or data.get("full_name") or data.get("username") or ""),
-                   "cover": cover}
+            page_info = data.get("page_info") if isinstance(data.get("page_info"), dict) else {}
+            media_info = page_info.get("media_info") if isinstance(page_info.get("media_info"), dict) else {}
+            if not cover:
+                big = media_info.get("big_pic_info") if isinstance(media_info.get("big_pic_info"), dict) else {}
+                for key in ("pic_big", "pic_middle", "pic_small"):
+                    node = big.get(key)
+                    if isinstance(node, dict) and str(node.get("url") or "").startswith("http"):
+                        cover = str(node.get("url"))
+                        break
+            if not cover:
+                pp = page_info.get("page_pic")
+                if isinstance(pp, dict):
+                    cover = str(pp.get("url") or pp.get("pic_big") or "")
+                elif isinstance(pp, str):
+                    cover = pp
+            user = data.get("user") if isinstance(data.get("user"), dict) else {}
+            uid = str(user.get("idstr") or user.get("id") or page_info.get("author_id") or "").strip()
+            mblogid = str(data.get("mblogid") or "").strip()
+            post_url = f"https://weibo.com/{uid}/{mblogid}" if uid and mblogid else ""
+            ctx = {
+                "title": (data.get("title") or data.get("grid_title")
+                          or data.get("text_raw") or page_info.get("content2")
+                          or data.get("full_name") or data.get("username") or ""),
+                "cover": cover,
+                "post_url": post_url,
+                "uploader": str(user.get("screen_name") or user.get("name") or ""),
+            }
         elif kind == 3 and isinstance(data, str):
             meta = pair[2] if len(pair) > 2 and isinstance(pair[2], dict) else {}
             # Instagram 的 video 项是 ytdl:<作品页>/1.mp4：这是 gallery-dl 给 yt-dlp 的
@@ -299,14 +323,20 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
             seen.add(data)
             ext = data.rsplit("?", 1)[0].rsplit(".", 1)[-1].lower()
             kind_i = "video" if ext in _VIDEO_EXTS else "image"
+            source_host = (urlparse(url).hostname or "").replace("www.", "")
+            page_url = str(ctx.get("post_url") or url)
+            # Weibo video CDN URLs are short-lived signed links (Expires/ssig).
+            # Keep the canonical post page as the downloadable item so yt-dlp resolves
+            # a fresh URL at click time instead of failing later with HTTP 403.
+            weibo_page_video = source_host.endswith("weibo.com") and kind_i == "video" and bool(ctx.get("post_url"))
             items.append({
-                "page_url": url,
-                "direct_url": data,
-                "variants": [],
+                "page_url": page_url,
+                "direct_url": "" if weibo_page_video else data,
+                "variants": [data] if weibo_page_video else [],
                 "title": ctx.get("title") or "",
                 "cover": ctx.get("cover") or "",
-                "uploader": "",
-                "site": (urlparse(url).hostname or "").replace("www.", ""),
+                "uploader": ctx.get("uploader") or "",
+                "site": source_host,
                 "kind_hint": kind_i,
             })
     if video_only:
@@ -834,7 +864,10 @@ def ytdlp_items(url: str, *, limit: int = 30, on_note=None) -> dict:
     cookie = platform_login.cookie_file_for_platform(platform) if platform else ""
     opts = {
         "quiet": True, "no_warnings": True, "skip_download": True,
-        "extract_flat": "in_playlist", "playlistend": max(1, int(limit)),
+        # Bilibili's flat space-playlist rows only contain BV URLs. Full metadata
+        # provides the real title/cover/duration and uses the saved Bilibili cookie.
+        "extract_flat": False if platform == "bili" else "in_playlist",
+        "playlistend": max(1, int(limit)),
         "ignoreerrors": True, "noplaylist": False,
     }
     if cookie:
@@ -897,6 +930,101 @@ def _same_site_candidate(base_url: str, candidate: str) -> bool:
     if len(segs) == 1 and segs[0].lower() in _COLLECTION_SEG_NAMES:
         return False
     return len(segs) >= 2 or len(segs[-1]) >= 8
+
+
+def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
+    """Read author video cards from the user's real logged-in browser.
+
+    Douyin author pages are not supported by yt-dlp/gallery-dl as playlists.
+    The normal Playwright renderer also gets an anti-bot shell on some accounts,
+    while the connected BrowserSkill window sees the user's real authenticated DOM.
+    We only collect canonical /video/<id> links + card covers here; each video is
+    still resolved/downloaded later by yt-dlp using the saved Douyin login state.
+    """
+    try:
+        from . import browser_skill
+    except Exception as e:
+        return {"ok": False, "items": [], "login_required": False, "error": str(e)}
+    if not browser_skill.available():
+        return {"ok": False, "items": [], "login_required": False,
+                "error": "BrowserSkill 未安装或不可用"}
+
+    sid = ""
+    try:
+        if on_note:
+            on_note("正在用 BrowserSkill 真实浏览器读取抖音博主作品卡片…")
+        opened = browser_skill.start_page(url, name="MediaDownloader 抖音博主抓取")
+        sid = str(opened.get("session_id") or "")
+        if not sid:
+            raise RuntimeError("BrowserSkill 未返回 session_id")
+        time.sleep(3.5)
+        found: dict[str, dict] = {}
+        rounds = max(3, min(18, (max(1, int(limit)) + 5) // 6))
+        expr = """Array.from(document.links)
+          .filter(a => a.href && a.href.includes('/video/'))
+          .map(a => ({
+            href: a.href,
+            title: (a.innerText || a.getAttribute('aria-label') || '').trim().slice(0, 180),
+            img: (a.querySelector('img') && a.querySelector('img').src) || ''
+          }))"""
+        for _ in range(rounds):
+            rows = browser_skill.evaluate(sid, expr, timeout=30) or []
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    href = str(row.get("href") or "").split("?", 1)[0]
+                    if not re.match(r"^https?://(?:www\.)?douyin\.com/video/\d+", href, re.I):
+                        continue
+                    found.setdefault(href, {
+                        "page_url": href,
+                        "direct_url": "",
+                        "variants": [],
+                        "title": re.sub(r"\s+", " ", str(row.get("title") or "")).strip()[:150],
+                        "cover": str(row.get("img") or ""),
+                        "uploader": "",
+                        "site": "douyin.com",
+                        "kind_hint": "video",
+                    })
+                    if len(found) >= int(limit):
+                        break
+            if len(found) >= int(limit):
+                break
+            browser_skill.evaluate(
+                sid,
+                "window.scrollBy(0, Math.max(1200, window.innerHeight * 2)); true",
+                timeout=15,
+            )
+            time.sleep(1.2)
+
+        items = list(found.values())[:max(1, int(limit))]
+        if items:
+            return {"ok": True, "items": items, "login_required": False, "error": ""}
+        # One simple verify/continue gate may be safely cleared once.
+        clicked = browser_skill.click_simple_verification(sid)
+        if clicked:
+            time.sleep(2)
+            rows = browser_skill.evaluate(sid, expr, timeout=30) or []
+            for row in rows if isinstance(rows, list) else []:
+                href = str((row or {}).get("href") or "").split("?", 1)[0]
+                if re.match(r"^https?://(?:www\.)?douyin\.com/video/\d+", href, re.I):
+                    found.setdefault(href, {
+                        "page_url": href, "direct_url": "", "variants": [],
+                        "title": re.sub(r"\s+", " ", str((row or {}).get("title") or "")).strip()[:150],
+                        "cover": str((row or {}).get("img") or ""),
+                        "uploader": "", "site": "douyin.com", "kind_hint": "video",
+                    })
+            items = list(found.values())[:max(1, int(limit))]
+        return {
+            "ok": bool(items), "items": items, "login_required": False,
+            "error": "" if items else "BrowserSkill 已打开抖音主页，但没有读到 /video/ 作品卡片",
+        }
+    except Exception as e:
+        return {"ok": False, "items": [], "login_required": False,
+                "error": f"{type(e).__name__}: {e}"}
+    finally:
+        if sid:
+            browser_skill.stop(sid)
 
 
 def browser_items(url: str, *, limit: int = 30, on_note=None) -> dict:
@@ -987,6 +1115,10 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
             return [], why
     else:
         res = {"ok": False, "items": [], "login_required": False, "error": ""}
+
+    if platform == "dy" and not res.get("ok"):
+        res = browser_skill_author_items(url, limit=limit, on_note=on_note)
+        attempts.append(("BrowserSkill", res))
 
     if not res.get("ok") and platform in {"ig", "pin", "bili", "wb", "tiktok"}:
         gallery_limit = limit

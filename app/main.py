@@ -152,6 +152,8 @@ class VideoSearchReq(BaseModel):
 class ImageItem(BaseModel):
     url: str
     referer: str = ""
+    origin_page: str = ""
+    thumbnail: str = ""
     title: str = ""
     filename: str = ""
     # 同一媒体的其它档位地址（下载首选失败时自动换用）。
@@ -762,6 +764,16 @@ def api_download_direct(req: DownloadDirectReq):
                 if _is_private_url(u):
                     raise HTTPException(403, "已拒绝内网地址")
     items = [it.model_dump() for it in req.items]
+    source_platforms = {
+        platform_login.platform_for_url(
+            str(it.get("origin_page") or it.get("referer") or it.get("url") or "")
+        )
+        for it in items
+    }
+    source_platforms.discard("")
+    direct_cookie_file = ""
+    if len(source_platforms) == 1:
+        direct_cookie_file = platform_login.cookie_file_for_platform(next(iter(source_platforms))) or ""
     tid = manager.submit_images(
         items,
         output_subdir=req.subdir or "media",
@@ -769,6 +781,7 @@ def api_download_direct(req: DownloadDirectReq):
         concurrency=req.concurrency,
         skip_existing=req.skip_existing,
         prefer_quality=req.prefer_quality,
+        cookies_file=direct_cookie_file,
     )
     return {"task_id": tid}
 
@@ -856,7 +869,12 @@ def api_download_videos(req: DownloadVideosReq):
 
     batch_ck_file = st.get("cookies_file") or ""
     batch_ck_browser = st.get("cookies_from_browser") or ""
-    if items and all(_is_instagram_url(x["url"]) for x in items):
+    batch_platforms = {platform_login.platform_for_url(x["url"]) for x in items}
+    batch_platforms.discard("")
+    # Batch downloads must follow the same per-platform login isolation as a
+    # single download. Previously only Instagram did this, so Bilibili batches
+    # silently lost SESSDATA/DedeUserID and hit anti-bot/412.
+    if len(batch_platforms) == 1:
         batch_ck_file, batch_ck_browser = _cookie_args_for_url(items[0]["url"], st)
     tids = manager.submit_videos(
         items,
@@ -979,6 +997,18 @@ def api_proxy(url: str = Query(..., max_length=2000), referer: str = Query(defau
         try:
             r = requests.get(url, headers=headers, timeout=20, stream=True,
                              allow_redirects=True)
+            if r.status_code == 403 and referer:
+                try:
+                    src = urlparse(referer)
+                    root_ref = f"{src.scheme or 'https'}://{src.netloc}/" if src.netloc else ""
+                except Exception:
+                    root_ref = ""
+                if root_ref and root_ref != headers.get("Referer"):
+                    r.close()
+                    h2 = dict(headers)
+                    h2["Referer"] = root_ref
+                    r = requests.get(url, headers=h2, timeout=20, stream=True,
+                                     allow_redirects=True)
             break
         except TRANSIENT as e:
             last_err = type(e).__name__

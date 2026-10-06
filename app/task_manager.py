@@ -231,6 +231,7 @@ class TaskManager:
         concurrency: int = 6,
         skip_existing: bool = True,
         prefer_quality: str = "",
+        cookies_file: str = "",
     ) -> str:
         out = _resolve_output(output_subdir)
         task = Task(
@@ -241,7 +242,7 @@ class TaskManager:
             total=len(urls),
             output_dir=str(out),
             options={"concurrency": concurrency, "skip_existing": skip_existing,
-                     "prefer_quality": prefer_quality},
+                     "prefer_quality": prefer_quality, "cookies_file": cookies_file},
         )
         self._register(task)
         self._cancel_flags[task.id] = threading.Event()
@@ -488,6 +489,7 @@ class TaskManager:
                 max_workers=int(t.options.get("concurrency", 6)),
                 skip_existing=bool(t.options.get("skip_existing", True)),
                 prefer_quality=str(t.options.get("prefer_quality", "") or ""),
+                cookies_file=str(t.options.get("cookies_file", "") or ""),
                 on_item_done=on_item_done,
                 on_progress=on_progress,
                 should_cancel=lambda: self._cancelled(task_id),

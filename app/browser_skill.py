@@ -88,6 +88,17 @@ def observe(session_id: str) -> str:
     return str(data.get("text") or "")
 
 
+def evaluate(session_id: str, expression: str, *, timeout: int = 30):
+    data = _json(
+        ["evaluate", "--session", session_id, expression, "--timeout", f"{timeout}s"],
+        timeout=timeout + 5,
+    )
+    if data.get("ok") is False:
+        err = data.get("error") or {}
+        raise RuntimeError(str(err.get("text") or err or "BrowserSkill evaluate failed"))
+    return data.get("value")
+
+
 def click_simple_verification(session_id: str) -> str:
     """Click one obvious verification/continue control and return its label."""
     text = observe(session_id)

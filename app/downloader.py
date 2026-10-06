@@ -306,6 +306,18 @@ def download_file(
                     headers2["Range"] = f"bytes={resume_from}-"
                 with sess.get(target_url, headers=headers2, timeout=timeout, stream=True,
                               allow_redirects=True) as r:
+                    if r.status_code == 403 and referer:
+                        try:
+                            src = urlparse(referer)
+                            root_ref = f"{src.scheme or 'https'}://{src.netloc}/" if src.netloc else ""
+                        except Exception:
+                            root_ref = ""
+                        if root_ref and headers2.get("Referer") != root_ref:
+                            r.close()
+                            h3 = dict(headers2)
+                            h3["Referer"] = root_ref
+                            r = sess.get(target_url, headers=h3, timeout=timeout, stream=True,
+                                         allow_redirects=True)
                     if r.status_code >= 400:
                         last_err = f"HTTP {r.status_code}"
                         if r.status_code == 416:
@@ -474,6 +486,7 @@ def batch_download_images(
     on_progress=None,
     should_cancel=None,
     prefer_quality: str = "",
+    cookies_file: str = "",
 ) -> dict:
     """并发批量下载图片。
 
@@ -494,6 +507,14 @@ def batch_download_images(
     output_dir.mkdir(parents=True, exist_ok=True)
     results: list[DownloadResult | None] = [None] * len(items)
     sess = requests.Session()
+    if cookies_file:
+        try:
+            from http.cookiejar import MozillaCookieJar
+            jar = MozillaCookieJar(str(cookies_file))
+            jar.load(ignore_discard=True, ignore_expires=True)
+            sess.cookies.update(jar)
+        except Exception:
+            pass
     cancel_flag = {"v": False}
 
     def _is_cancelled() -> bool:
