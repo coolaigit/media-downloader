@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -170,12 +171,31 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
     # 视频 pin 混在后面）。只扫 limit 个会得出「没有视频」的错误结论。
     # 大批量主页抓取不再把 200 当硬上限。视频混排场景仍会适当多扫，
     # 但给扫描范围设 2400 的保护上限，避免一次元数据读取无限膨胀。
-    scan = max(int(limit) * 4, 120) if video_only else max(1, min(int(limit), 2000))
-    # 1C：经统一 dispatcher 调 gallery-dl（internal 子命令内部就是
-    # gallery_dl.main()，CLI 参数/退出码/输出语义 100% 保持）——
-    # frozen 下 sys.executable 是本程序 EXE，老的 `-m gallery_dl` 写法不成立
-    argv = subproc.build_internal_command("gallery-dl", "--dump-json",
-                                          "--range", f"1-{min(scan, 2400)}")
+    host0 = (urlparse(url).hostname or "").lower()
+    weibo_video_mode = bool(
+        video_only and (host0 == "weibo.com" or host0.endswith(".weibo.com"))
+    )
+    if weibo_video_mode:
+        # Weibo galleries can contain many photos. --range counts individual media
+        # files, so a 9-image post can consume nine slots before the next video.
+        # Use post-range instead: it advances by Weibo posts, while --filter keeps
+        # only video media in the dump. This makes "30 videos" mean roughly 30
+        # video posts rather than "the first 30 files".
+        post_scan = min(1200, max(int(limit) * 2, 60))
+        argv = subproc.build_internal_command(
+            "gallery-dl", "--dump-json",
+            "--post-range", f"1-{post_scan}",
+            "--filter", "extension in ('mp4','m3u8','webm','mov','flv')",
+        )
+        scan = post_scan
+    else:
+        scan = max(int(limit) * 4, 120) if video_only else max(1, min(int(limit), 2000))
+        # 1C：经统一 dispatcher 调 gallery-dl（internal 子命令内部就是
+        # gallery_dl.main()，CLI 参数/退出码/输出语义 100% 保持）——
+        # frozen 下 sys.executable 是本程序 EXE，老的 `-m gallery_dl` 写法不成立
+        argv = subproc.build_internal_command(
+            "gallery-dl", "--dump-json", "--range", f"1-{min(scan, 2400)}"
+        )
     if cookie_file:
         argv += ["--cookies", cookie_file]
     argv += list(argv_extra or [])
@@ -855,6 +875,215 @@ def _entry_item(entry: dict, source_url: str) -> dict | None:
     }
 
 
+def _netscape_cookie_dict(path: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path:
+        return out
+    try:
+        for raw in Path(path).read_text(encoding="utf-8", errors="ignore").splitlines():
+            if not raw or raw.startswith("#"):
+                continue
+            cols = raw.split("\t")
+            if len(cols) >= 7 and cols[5]:
+                out[cols[5]] = cols[6]
+    except OSError:
+        pass
+    return out
+
+
+def weibo_author_items(url: str, *, limit: int = 30, want_video: bool = False,
+                       on_note=None) -> dict:
+    """Read Weibo's own paged profile feed; count requested videos/images, not raw media slots."""
+    uid = creator_id_from_url(url)
+    if not uid:
+        return {"ok": False, "items": [], "login_required": False,
+                "error": "无法从微博主页地址识别 UID"}
+    ck = platform_login.cookie_file_for_platform("wb") or ""
+    cookies = _netscape_cookie_dict(ck)
+    if not cookies:
+        return {"ok": False, "items": [], "login_required": True,
+                "error": "微博登录态不可用，请先到平台登录中心登录。"}
+
+    sess = requests.Session()
+    sess.cookies.update(cookies)
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 Chrome/154.0.0.0 Safari/537.36"),
+        "Referer": f"https://weibo.com/u/{uid}",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    target = max(1, min(int(limit or 30), 2000))
+    items: list[dict] = []
+    seen: set[str] = set()
+    empty_pages = 0
+    max_pages = min(120, max(4, target // 8 + 8))
+
+    if on_note:
+        kind = "视频" if want_video else "图片"
+        on_note(f"正在按微博作品页翻页读取{kind}，目标 {target} 个…")
+
+    for page_no in range(1, max_pages + 1):
+        try:
+            r = sess.get(
+                "https://weibo.com/ajax/statuses/mymblog",
+                params={"uid": uid, "page": page_no, "feature": 0},
+                headers=headers, timeout=18,
+            )
+        except Exception as e:
+            if items:
+                break
+            return {"ok": False, "items": [], "login_required": False,
+                    "error": f"微博作品流请求失败：{type(e).__name__}: {e}"}
+        if r.status_code in (401, 403, 418):
+            return {"ok": False, "items": items, "login_required": True,
+                    "error": f"微博作品流返回 HTTP {r.status_code}，登录态可能失效"}
+        try:
+            payload = r.json()
+        except Exception:
+            if items:
+                break
+            return {"ok": False, "items": [], "login_required": False,
+                    "error": f"微博作品流返回非 JSON（HTTP {r.status_code}）"}
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        rows = data.get("list") if isinstance(data, dict) else []
+        if not isinstance(rows, list) or not rows:
+            empty_pages += 1
+            if empty_pages >= 2:
+                break
+            continue
+        empty_pages = 0
+
+        for post in rows:
+            if not isinstance(post, dict):
+                continue
+            mblogid = str(post.get("mblogid") or "")
+            if not mblogid:
+                continue
+            post_url = f"https://weibo.com/{uid}/{mblogid}"
+            user = post.get("user") if isinstance(post.get("user"), dict) else {}
+            uploader = str(user.get("screen_name") or "")
+            pi = post.get("page_info") if isinstance(post.get("page_info"), dict) else {}
+            mi = pi.get("media_info") if isinstance(pi.get("media_info"), dict) else {}
+            title = str(post.get("text_raw") or pi.get("content2") or pi.get("content1") or "")
+            title = re.sub(r"<[^>]+>", "", title).strip()[:150]
+
+            if want_video:
+                is_video = (
+                    str(pi.get("object_type") or "").lower() == "video"
+                    or str(mi.get("media_type") or "").lower() == "video"
+                    or bool(mi.get("stream_url") or mi.get("stream_url_hd") or mi.get("h5_url"))
+                )
+                if not is_video or post_url in seen:
+                    continue
+                big = mi.get("big_pic_info") if isinstance(mi.get("big_pic_info"), dict) else {}
+                cover = ""
+                for key in ("pic_middle", "pic_big", "pic_small"):
+                    node = big.get(key)
+                    if isinstance(node, dict) and str(node.get("url") or "").startswith("http"):
+                        cover = str(node.get("url"))
+                        break
+                if not cover:
+                    pp = pi.get("page_pic")
+                    if isinstance(pp, dict):
+                        cover = str(pp.get("url") or "")
+                    elif isinstance(pp, str):
+                        cover = pp
+                variants = []
+                for key in ("stream_url_hd", "stream_url", "mp4_hd_url", "mp4_sd_url"):
+                    v = str(mi.get(key) or "")
+                    if v.startswith("http") and v not in variants:
+                        variants.append(v)
+                seen.add(post_url)
+                items.append({
+                    "page_url": post_url, "direct_url": "", "variants": variants,
+                    "title": title or str(mi.get("name") or ""),
+                    "cover": cover, "uploader": uploader, "site": "weibo.com",
+                    "duration": mi.get("duration"), "kind_hint": "video",
+                })
+            else:
+                pics = post.get("pic_infos") if isinstance(post.get("pic_infos"), dict) else {}
+                for pic in pics.values():
+                    if not isinstance(pic, dict):
+                        continue
+                    def purl(name):
+                        node = pic.get(name)
+                        return str(node.get("url") or "") if isinstance(node, dict) else ""
+                    direct = purl("largest") or purl("original") or purl("large") or purl("mw2000")
+                    cover = purl("bmiddle") or purl("thumbnail") or direct
+                    if not direct or direct in seen:
+                        continue
+                    seen.add(direct)
+                    items.append({
+                        "page_url": post_url, "direct_url": direct, "variants": [],
+                        "title": title, "cover": cover, "uploader": uploader,
+                        "site": "weibo.com", "kind_hint": "image",
+                    })
+                    if len(items) >= target:
+                        break
+            if len(items) >= target:
+                break
+
+        if on_note and page_no % 2 == 0 and len(items) < target:
+            on_note(f"微博已读取 {len(items)} 个，继续翻页…")
+        if len(items) >= target:
+            break
+
+    return {
+        "ok": bool(items), "items": items[:target], "login_required": False,
+        "error": "" if items else ("微博作品流中没有找到视频" if want_video else "微博作品流中没有找到图片"),
+    }
+
+
+def _bili_enrich(items: list[dict], cookie_file: str, on_note=None) -> list[dict]:
+    """Fill metadata for flat Bilibili space rows without N serial extracts."""
+    if not items:
+        return items
+    cookies = _netscape_cookie_dict(cookie_file)
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 Chrome/154.0.0.0 Safari/537.36"),
+        "Referer": "https://www.bilibili.com/",
+        "Origin": "https://www.bilibili.com",
+    }
+
+    def work(idx_item):
+        idx, it = idx_item
+        page = str(it.get("page_url") or "")
+        m = re.search(r"/video/(BV[0-9A-Za-z]+)", page, re.I)
+        if not m:
+            return idx, None
+        try:
+            r = requests.get(
+                "https://api.bilibili.com/x/web-interface/view",
+                params={"bvid": m.group(1)}, headers=headers, cookies=cookies,
+                timeout=12,
+            )
+            data = (r.json().get("data") or {}) if r.ok else {}
+            if not isinstance(data, dict) or not data:
+                return idx, None
+            owner = data.get("owner") if isinstance(data.get("owner"), dict) else {}
+            return idx, {
+                "title": str(data.get("title") or "")[:150],
+                "cover": str(data.get("pic") or ""),
+                "duration": data.get("duration"),
+                "uploader": str(owner.get("name") or ""),
+                "page_url": f"https://www.bilibili.com/video/{data.get('bvid') or m.group(1)}",
+            }
+        except Exception:
+            return idx, None
+
+    if on_note:
+        on_note(f"已列出 {len(items)} 个 B站作品，正在并发补标题和缩略图…")
+    workers = min(16, max(1, len(items)))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(work, pair) for pair in enumerate(items)]
+        for f in as_completed(futures):
+            idx, meta = f.result()
+            if meta:
+                items[idx].update({k: v for k, v in meta.items() if v not in ("", None)})
+    return items
+
+
 def ytdlp_items(url: str, *, limit: int = 30, on_note=None) -> dict:
     try:
         import yt_dlp
@@ -864,9 +1093,9 @@ def ytdlp_items(url: str, *, limit: int = 30, on_note=None) -> dict:
     cookie = platform_login.cookie_file_for_platform(platform) if platform else ""
     opts = {
         "quiet": True, "no_warnings": True, "skip_download": True,
-        # Bilibili's flat space-playlist rows only contain BV URLs. Full metadata
-        # provides the real title/cover/duration and uses the saved Bilibili cookie.
-        "extract_flat": False if platform == "bili" else "in_playlist",
+        # Keep playlist enumeration flat. Deep-resolving many Bilibili videos
+        # serially makes the UI appear frozen; metadata is enriched concurrently.
+        "extract_flat": "in_playlist",
         "playlistend": max(1, int(limit)),
         "ignoreerrors": True, "noplaylist": False,
     }
@@ -903,6 +1132,8 @@ def ytdlp_items(url: str, *, limit: int = 30, on_note=None) -> dict:
         items.append(got)
         if len(items) >= int(limit):
             break
+    if platform == "bili" and items:
+        items = _bili_enrich(items, cookie, on_note=on_note)
     return {"ok": bool(items), "items": items, "login_required": False,
             "error": "" if items else "yt-dlp 没有返回主页作品条目"}
 
@@ -932,95 +1163,287 @@ def _same_site_candidate(base_url: str, candidate: str) -> bool:
     return len(segs) >= 2 or len(segs[-1]) >= 8
 
 
-def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
-    """Read author video cards from the user's real logged-in browser.
+def _douyin_card(href: str, title: str = "", cover: str = "") -> dict | None:
+    href = str(href or "").split("?", 1)[0]
+    m = re.match(r"^https?://(?:www\.)?douyin\.com/video/(\d+)", href, re.I)
+    if not m:
+        return None
+    return {
+        "page_url": f"https://www.douyin.com/video/{m.group(1)}",
+        "direct_url": "", "variants": [],
+        "title": re.sub(r"\s+", " ", str(title or "")).strip()[:150],
+        "cover": str(cover or ""),
+        "uploader": "", "site": "douyin.com", "kind_hint": "video",
+    }
 
-    Douyin author pages are not supported by yt-dlp/gallery-dl as playlists.
-    The normal Playwright renderer also gets an anti-bot shell on some accounts,
-    while the connected BrowserSkill window sees the user's real authenticated DOM.
-    We only collect canonical /video/<id> links + card covers here; each video is
-    still resolved/downloaded later by yt-dlp using the saved Douyin login state.
-    """
+
+def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
+    """Bundled Douyin author crawler using Playwright and the saved platform profile."""
+    try:
+        from playwright.sync_api import sync_playwright
+        from .renderer import _LAUNCH_ARGS, _find_browser_channel
+        from .config import DEFAULT_UA
+    except Exception as e:
+        return {"ok": False, "items": [], "login_required": False,
+                "error": f"内置浏览器不可用：{e}"}
+
+    target = max(1, min(int(limit or 30), 2000))
+    st = platform_login.status("dy")
+    profile_dir = str(st.get("profile_dir") or "")
+    if not profile_dir:
+        return {"ok": False, "items": [], "login_required": True,
+                "error": "抖音尚未建立独立登录 profile，请先到平台登录中心登录一次。"}
+
+    found: dict[str, dict] = {}
+    verification_required = False
+    try:
+        with sync_playwright() as p:
+            ch = _find_browser_channel()
+            kw = dict(
+                user_data_dir=profile_dir, headless=False,
+                viewport={"width": 1400, "height": 900},
+                locale="zh-CN", user_agent=DEFAULT_UA,
+                args=list(_LAUNCH_ARGS) + ["--disable-blink-features=AutomationControlled"],
+            )
+            try:
+                ctx = (p.chromium.launch_persistent_context(channel=ch, **kw) if ch
+                       else p.chromium.launch_persistent_context(**kw))
+            except Exception as e:
+                return {"ok": False, "items": [], "login_required": False,
+                        "error": f"抖音登录 profile 正在被占用或无法打开：{e}"}
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+            def add_aweme(obj):
+                if not isinstance(obj, dict):
+                    return
+                aid = str(obj.get("aweme_id") or obj.get("item_id") or "")
+                if aid.isdigit():
+                    video = obj.get("video") if isinstance(obj.get("video"), dict) else {}
+                    cover = video.get("cover") if isinstance(video.get("cover"), dict) else {}
+                    urls = cover.get("url_list") if isinstance(cover.get("url_list"), list) else []
+                    author = obj.get("author") if isinstance(obj.get("author"), dict) else {}
+                    card = _douyin_card(
+                        f"https://www.douyin.com/video/{aid}",
+                        obj.get("desc") or "",
+                        str(urls[0]) if urls else "",
+                    )
+                    if card:
+                        card["uploader"] = str(author.get("nickname") or "")
+                        found.setdefault(card["page_url"], card)
+                for v in obj.values():
+                    if isinstance(v, dict):
+                        add_aweme(v)
+                    elif isinstance(v, list):
+                        for z in v:
+                            if isinstance(z, dict):
+                                add_aweme(z)
+
+            def on_response(resp):
+                low = resp.url.lower()
+                if "/aweme/v1/web/" not in low or not any(x in low for x in ("post", "aweme", "feed")):
+                    return
+                try:
+                    data = resp.json()
+                except Exception:
+                    return
+                add_aweme(data)
+
+            page.on("response", on_response)
+            if on_note:
+                on_note(f"正在用内置浏览器读取抖音主页，并持续下拉直到达到 {target} 个作品…")
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                pass
+            page.wait_for_timeout(3500)
+
+            stale = 0
+            last_total = -1
+            max_rounds = min(220, max(16, (target // 8 + 1) * 8))
+            for rnd in range(max_rounds):
+                try:
+                    rows = page.eval_on_selector_all(
+                        'a[href*="/video/"]',
+                        """els => els.map(a => ({
+                            href: a.href,
+                            title: (a.innerText || a.getAttribute('aria-label') || '').trim(),
+                            img: (a.querySelector('img') && a.querySelector('img').src) || ''
+                        }))""",
+                    )
+                except Exception:
+                    rows = []
+                for row in rows or []:
+                    card = _douyin_card(
+                        (row or {}).get("href"), (row or {}).get("title"), (row or {}).get("img")
+                    )
+                    if card:
+                        found.setdefault(card["page_url"], card)
+                if len(found) >= target:
+                    break
+
+                if rnd in (1, 4) and not found:
+                    try:
+                        txt = (page.title() + " " + page.locator("body").inner_text(timeout=3000)).lower()
+                    except Exception:
+                        txt = ""
+                    if any(x in txt for x in ("验证码", "安全验证", "验证后继续", "captcha",
+                                              "verify you are human", "滑块验证")):
+                        verification_required = True
+                        break
+
+                before = len(found)
+                try:
+                    last = page.locator('a[href*="/video/"]').last
+                    if last.count():
+                        last.scroll_into_view_if_needed(timeout=3000)
+                except Exception:
+                    pass
+                try:
+                    page.evaluate("""() => {
+                      const xs = Array.from(document.querySelectorAll('*')).filter(e => {
+                        const s = getComputedStyle(e);
+                        return e.scrollHeight > e.clientHeight + 200 &&
+                               e.clientHeight > 300 &&
+                               (s.overflowY === 'auto' || s.overflowY === 'scroll');
+                      }).sort((a,b) => (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight));
+                      const e = document.querySelector('.route-scroll-container') || xs[0];
+                      if (e) {
+                        const step = Math.max(700, Math.floor(e.clientHeight * 0.85));
+                        e.scrollTop = Math.min(e.scrollHeight, e.scrollTop + step);
+                        e.dispatchEvent(new Event('scroll', {bubbles:true}));
+                      }
+                    }""")
+                except Exception:
+                    pass
+                try:
+                    page.mouse.move(900, 760)
+                    page.mouse.wheel(0, 1800)
+                except Exception:
+                    pass
+                page.wait_for_timeout(900)
+
+                if on_note and (rnd + 1) % 5 == 0:
+                    on_note(f"抖音已读取 {len(found)} 个作品，继续下拉加载更多…")
+                total = len(found)
+                if total == before and total == last_total:
+                    stale += 1
+                else:
+                    stale = 0
+                last_total = total
+
+                # 验证码可能不是首屏出现，而是滚动若干页后才弹出。连续多轮
+                # 没有新增时再检查一次页面，不要把“被验证码拦住”误判成到底了。
+                if stale >= 3 and total < target:
+                    try:
+                        txt = (page.title() + " " + page.locator("body").inner_text(timeout=3000)).lower()
+                    except Exception:
+                        txt = ""
+                    if any(x in txt for x in ("验证码", "安全验证", "验证后继续", "captcha",
+                                              "verify you are human", "滑块验证")):
+                        verification_required = True
+                        break
+                if stale >= 10:
+                    break
+            try:
+                ctx.close()
+            except Exception:
+                pass
+    except Exception as e:
+        return {"ok": False, "items": list(found.values())[:target],
+                "login_required": False, "verification_required": False,
+                "error": f"{type(e).__name__}: {e}"}
+
+    items = list(found.values())[:target]
+    return {
+        "ok": bool(items), "items": items, "login_required": False,
+        "verification_required": verification_required,
+        "error": "" if items else (
+            "抖音触发安全验证，需要验证码辅助。"
+            if verification_required else
+            "内置浏览器已打开抖音主页，但没有读到作品卡片。"
+        ),
+    }
+
+
+def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
+    """Optional CAPTCHA escalation only; ordinary crawling never depends on bsk."""
     try:
         from . import browser_skill
     except Exception as e:
         return {"ok": False, "items": [], "login_required": False, "error": str(e)}
     if not browser_skill.available():
         return {"ok": False, "items": [], "login_required": False,
-                "error": "BrowserSkill 未安装或不可用"}
+                "error": "检测到验证码，但本机未安装/连接 BrowserSkill。"}
 
     sid = ""
+    found: dict[str, dict] = {}
     try:
         if on_note:
-            on_note("正在用 BrowserSkill 真实浏览器读取抖音博主作品卡片…")
-        opened = browser_skill.start_page(url, name="MediaDownloader 抖音博主抓取")
+            on_note("检测到验证码，切换 BrowserSkill 真实浏览器进行验证辅助…")
+        opened = browser_skill.start_page(url, name="MediaDownloader 验证辅助")
         sid = str(opened.get("session_id") or "")
         if not sid:
             raise RuntimeError("BrowserSkill 未返回 session_id")
-        time.sleep(3.5)
-        found: dict[str, dict] = {}
-        rounds = max(3, min(18, (max(1, int(limit)) + 5) // 6))
+        time.sleep(2.5)
+        state = browser_skill.evaluate(
+            sid,
+            """(()=>({
+              videos:Array.from(document.links).filter(a=>a.href&&a.href.includes('/video/')).length,
+              text:(document.body&&document.body.innerText||'').slice(0,5000).toLowerCase()
+            }))()""",
+            timeout=20,
+        ) or {}
+        state_text = str((state or {}).get("text") or "")
+        has_verify = any(x in state_text for x in (
+            "验证码", "安全验证", "验证后继续", "captcha",
+            "verify you are human", "滑块验证",
+        ))
+        if has_verify:
+            clicked = browser_skill.click_simple_verification(sid)
+            if not clicked:
+                browser_skill.request_human_help(
+                    sid,
+                    "请在这个 Agent Window 中完成验证码/滑块/安全验证。完成后 BrowserSkill 会继续读取作品。",
+                    timeout=180,
+                )
+        elif on_note:
+            on_note("BrowserSkill 当前已是正常作品页，无需人工验证码，继续下拉读取…")
         expr = """Array.from(document.links)
           .filter(a => a.href && a.href.includes('/video/'))
-          .map(a => ({
-            href: a.href,
-            title: (a.innerText || a.getAttribute('aria-label') || '').trim().slice(0, 180),
-            img: (a.querySelector('img') && a.querySelector('img').src) || ''
-          }))"""
-        for _ in range(rounds):
+          .map(a => ({href:a.href,title:(a.innerText||'').trim(),
+                      img:(a.querySelector('img')&&a.querySelector('img').src)||''}))"""
+        target = max(1, min(int(limit or 30), 2000))
+        stale = 0
+        for _ in range(min(160, max(16, (target // 8 + 1) * 8))):
             rows = browser_skill.evaluate(sid, expr, timeout=30) or []
-            if isinstance(rows, list):
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    href = str(row.get("href") or "").split("?", 1)[0]
-                    if not re.match(r"^https?://(?:www\.)?douyin\.com/video/\d+", href, re.I):
-                        continue
-                    found.setdefault(href, {
-                        "page_url": href,
-                        "direct_url": "",
-                        "variants": [],
-                        "title": re.sub(r"\s+", " ", str(row.get("title") or "")).strip()[:150],
-                        "cover": str(row.get("img") or ""),
-                        "uploader": "",
-                        "site": "douyin.com",
-                        "kind_hint": "video",
-                    })
-                    if len(found) >= int(limit):
-                        break
-            if len(found) >= int(limit):
+            before = len(found)
+            for row in rows if isinstance(rows, list) else []:
+                card = _douyin_card((row or {}).get("href"), (row or {}).get("title"),
+                                     (row or {}).get("img"))
+                if card:
+                    found.setdefault(card["page_url"], card)
+            if len(found) >= target:
                 break
             browser_skill.evaluate(
                 sid,
-                "window.scrollBy(0, Math.max(1200, window.innerHeight * 2)); true",
+                """(()=>{const xs=[...document.querySelectorAll('*')].filter(e=>{
+                  const s=getComputedStyle(e); return e.scrollHeight>e.clientHeight+200 &&
+                  e.clientHeight>300 && (s.overflowY==='auto'||s.overflowY==='scroll')});
+                  const e=document.querySelector('.route-scroll-container')||xs[0];
+                  if(e){e.scrollTop=Math.min(e.scrollHeight,e.scrollTop+Math.max(700,e.clientHeight*.85));
+                  e.dispatchEvent(new Event('scroll',{bubbles:true})); return true}
+                  window.scrollBy(0,Math.max(1000,innerHeight)); return false})()""",
                 timeout=15,
             )
-            time.sleep(1.2)
-
-        items = list(found.values())[:max(1, int(limit))]
-        if items:
-            return {"ok": True, "items": items, "login_required": False, "error": ""}
-        # One simple verify/continue gate may be safely cleared once.
-        clicked = browser_skill.click_simple_verification(sid)
-        if clicked:
-            time.sleep(2)
-            rows = browser_skill.evaluate(sid, expr, timeout=30) or []
-            for row in rows if isinstance(rows, list) else []:
-                href = str((row or {}).get("href") or "").split("?", 1)[0]
-                if re.match(r"^https?://(?:www\.)?douyin\.com/video/\d+", href, re.I):
-                    found.setdefault(href, {
-                        "page_url": href, "direct_url": "", "variants": [],
-                        "title": re.sub(r"\s+", " ", str((row or {}).get("title") or "")).strip()[:150],
-                        "cover": str((row or {}).get("img") or ""),
-                        "uploader": "", "site": "douyin.com", "kind_hint": "video",
-                    })
-            items = list(found.values())[:max(1, int(limit))]
-        return {
-            "ok": bool(items), "items": items, "login_required": False,
-            "error": "" if items else "BrowserSkill 已打开抖音主页，但没有读到 /video/ 作品卡片",
-        }
+            time.sleep(1)
+            stale = stale + 1 if len(found) == before else 0
+            if stale >= 10:
+                break
+        items = list(found.values())[:target]
+        return {"ok": bool(items), "items": items, "login_required": False,
+                "error": "" if items else "BrowserSkill 验证完成后仍未读到抖音作品。"}
     except Exception as e:
-        return {"ok": False, "items": [], "login_required": False,
+        return {"ok": False, "items": list(found.values()), "login_required": False,
                 "error": f"{type(e).__name__}: {e}"}
     finally:
         if sid:
@@ -1116,11 +1539,26 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
     else:
         res = {"ok": False, "items": [], "login_required": False, "error": ""}
 
-    if platform == "dy" and not res.get("ok"):
-        res = browser_skill_author_items(url, limit=limit, on_note=on_note)
-        attempts.append(("BrowserSkill", res))
+    if platform == "wb" and not res.get("ok"):
+        res = weibo_author_items(url, limit=limit, want_video=want_video, on_note=on_note)
+        attempts.append(("微博作品流", res))
 
-    if not res.get("ok") and platform in {"ig", "pin", "bili", "wb", "tiktok"}:
+    if platform == "dy" and not res.get("ok"):
+        res = douyin_author_items(url, limit=limit, on_note=on_note)
+        attempts.append(("内置Playwright", res))
+        if res.get("verification_required") and len(res.get("items") or []) < max(1, int(limit or 30)):
+            bsk_res = browser_skill_author_items(url, limit=limit, on_note=on_note)
+            attempts.append(("BrowserSkill验证码辅助", bsk_res))
+            if bsk_res.get("ok") or len(bsk_res.get("items") or []) > len(res.get("items") or []):
+                res = bsk_res
+
+    # B站空间页优先走 yt-dlp 的平铺列表 + 并发元数据补全。
+    # gallery-dl 在这里没有收益，反而会让批量入口先卡一轮。
+    if platform == "bili" and not res.get("ok"):
+        res = ytdlp_items(url, limit=limit, on_note=on_note)
+        attempts.append(("yt-dlp", res))
+
+    if not res.get("ok") and platform in {"ig", "pin", "wb", "tiktok"}:
         gallery_limit = limit
         # Weibo feed interleaves image and video posts. In image mode scan beyond
         # the requested count, then keep only images so a run of video posts cannot
@@ -1148,7 +1586,11 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
 
     if res.get("ok"):
         used = next((n for n, r in reversed(attempts) if r is res), "内置来源")
-        return res.get("items") or [], f"已用{used}展开{name}主页。"
+        items = res.get("items") or []
+        suffix = ""
+        if platform == "dy" and res.get("verification_required") and len(items) < max(1, int(limit or 30)):
+            suffix = f" 已抓到 {len(items)}/{max(1, int(limit or 30))} 个，继续下拉时遇到验证码；BrowserSkill 验证辅助未完成。"
+        return items, f"已用{used}展开{name}主页。{suffix}"
 
     why = str(res.get("error") or "没有返回作品")
     if res.get("login_required"):

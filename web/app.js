@@ -322,11 +322,11 @@ function buildImageCard(it, idx) {
   img.decoding = 'async';
   img.alt = it.title || '';
   // 优先用搜索接口的缩略图（快），失败时回退到后端代理原图
-  img.src = it.thumbnail ? proxyUrl(it.thumbnail) : proxyUrl(it.url, it.referer);
+  img.src = it.thumbnail ? proxyUrl(it.thumbnail, it.referer || it.origin_page || '') : proxyUrl(it.url, it.referer || it.origin_page || '');
   img.onerror = function () {
     if (!this.dataset.fallback) {
       this.dataset.fallback = '1';
-      this.src = proxyUrl(it.url, it.referer);
+      this.src = proxyUrl(it.url, it.referer || it.origin_page || '');
     } else {
       const ph = document.createElement('div');
       ph.className = 'ph';

@@ -982,6 +982,21 @@ def api_proxy(url: str = Query(..., max_length=2000), referer: str = Query(defau
     if referer:
         headers["Referer"] = referer
 
+    # 预览代理与真实下载必须使用同一平台登录态。微博/Sina 图床在匿名
+    # 预览时可能 403，但同一图片通过带 Cookie 的下载器却能正常下载。
+    proxy_session = requests.Session()
+    proxy_platform = platform_login.platform_for_url(referer or "") or platform_login.platform_for_url(url)
+    if proxy_platform:
+        ck_file = platform_login.cookie_file_for_platform(proxy_platform) or ""
+        if ck_file:
+            try:
+                from http.cookiejar import MozillaCookieJar
+                jar = MozillaCookieJar(str(ck_file))
+                jar.load(ignore_discard=True, ignore_expires=True)
+                proxy_session.cookies.update(jar)
+            except Exception:
+                pass
+
     # 瞬时错误必须重试，且超时不能太紧。
     # 实测（avjoy.me 封面）：同一个文件串行请求 3/3 成功、1~2 秒返回，
     # 但**并发 9 张时有 2 张 ReadTimeout** —— 上游 CDN 在并发下会偶发卡住。
@@ -995,8 +1010,8 @@ def api_proxy(url: str = Query(..., max_length=2000), referer: str = Query(defau
     last_err = ""
     for attempt in range(1, 4):
         try:
-            r = requests.get(url, headers=headers, timeout=20, stream=True,
-                             allow_redirects=True)
+            r = proxy_session.get(url, headers=headers, timeout=20, stream=True,
+                                    allow_redirects=True)
             if r.status_code == 403 and referer:
                 try:
                     src = urlparse(referer)
@@ -1007,8 +1022,8 @@ def api_proxy(url: str = Query(..., max_length=2000), referer: str = Query(defau
                     r.close()
                     h2 = dict(headers)
                     h2["Referer"] = root_ref
-                    r = requests.get(url, headers=h2, timeout=20, stream=True,
-                                     allow_redirects=True)
+                    r = proxy_session.get(url, headers=h2, timeout=20, stream=True,
+                                            allow_redirects=True)
             break
         except TRANSIENT as e:
             last_err = type(e).__name__

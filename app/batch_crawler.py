@@ -1239,12 +1239,15 @@ def _expand_profile_image_source(
         if not direct:
             continue
         page = str(r.get("page_url") or list_url).strip()
+        preview = str(r.get("cover") or direct).strip()
+        if platform == "wb" and "sinaimg.cn/" in preview:
+            preview = preview.replace("/large/", "/mw1024/").replace("/original/", "/mw1024/")
         items.append(MediaItem(
             url=direct,
             kind="image",
             source=f"builtin-profile-image:{platform}",
             title=str(r.get("title") or ""),
-            thumbnail=direct,
+            thumbnail=preview,
             referer=page,
             origin_page=page,
             width=r.get("width"),
