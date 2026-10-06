@@ -2,7 +2,7 @@
 ; MediaDownloader 安装器定义（阶段 1F，Installer RC）
 ;
 ; 原则：
-; - 输入源只有 ..\dist\MediaDownloader\*（RC7 onedir 本身就是完整应用目录），
+; - 输入源只有 ..\dist\MediaDownloader\*（RC8 onedir 本身就是完整应用目录），
 ;   Inno 只负责安装，不弥补 RC 缺文件。
 ; - 运行数据（config/logs/cookies/profile/downloads/history）全部在
 ;   %LOCALAPPDATA%\MediaDownloader 与 %USERPROFILE%\Downloads\MediaDownloader，
@@ -44,7 +44,7 @@ ArchitecturesAllowed=x64compatible
 CloseApplications=yes
 ; 输出
 OutputDir=output
-OutputBaseFilename=MediaDownloader-Setup-2.0.0-RC7
+OutputBaseFilename=MediaDownloader-Setup-2.0.0-RC8
 SetupIconFile=..\app_icon.ico
 ; 压缩：稳定性优先，禁 UPX / 裁剪资源
 Compression=lzma2
@@ -59,7 +59,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; \
     GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-; 唯一输入源：RC7 onedir 整体复制（含 _internal\ + THIRD_PARTY_NOTICES.txt
+; 唯一输入源：RC8 onedir 整体复制（含 _internal\ + THIRD_PARTY_NOTICES.txt
 ; + licenses\ + FFMPEG_DISTRIBUTION_NOTES.md）。禁止指向项目根 *。
 Source: "..\dist\MediaDownloader\*"; DestDir: "{app}"; \
     Flags: recursesubdirs createallsubdirs ignoreversion
