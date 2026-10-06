@@ -1098,6 +1098,51 @@ def _expand_video_listing(
     }, ""
 
 
+
+def _expand_xhs_image_source(list_url: str, *, limit: int = 30, on_note=None) -> tuple[dict, str]:
+    """XHS author image source: accept only note-card body images."""
+    from . import profile_sources
+
+    rows, note = profile_sources.list_author_items(
+        list_url, limit=limit, want_video=False, on_note=on_note)
+    items: list[MediaItem] = []
+    for r in rows:
+        direct = str(r.get("direct_url") or "").strip()
+        if not direct:
+            continue
+        page = str(r.get("page_url") or list_url).strip()
+        items.append(MediaItem(
+            url=direct, kind="image", source="xhs:note-image",
+            title=str(r.get("title") or ""), thumbnail=direct,
+            referer=page, origin_page=page,
+            width=r.get("width"), height=r.get("height"), is_thumb=False,
+            extra={"site": "xiaohongshu.com", "uploader": r.get("uploader") or "",
+                   "note_image_index": r.get("note_image_index") or 0},
+        ))
+    items = dedupe(items)[:max(1, min(int(limit or 30), 2000))]
+    warnings = []
+    if items:
+        warnings.append(f"\u5c0f\u7ea2\u4e66\u56fe\u7247\u5df2\u4f7f\u7528\u4f5c\u54c1\u8be6\u60c5\u63a5\u53e3\uff0c\u5f97\u5230 {len(items)} \u5f20\u7b14\u8bb0\u6b63\u6587\u56fe\u7247\u3002")
+        warnings.append("\u5df2\u7981\u7528\u666e\u901a\u7f51\u9875\u626b\u56fe\u56de\u9000\uff0c\u4e0d\u518d\u6df7\u5165\u5934\u50cf\u3001\u7ad9\u70b9 UI \u548c\u63a8\u8350\u6d41\u56fe\u7247\u3002")
+    else:
+        warnings.append(note or "\u6ca1\u6709\u627e\u5230\u5c0f\u7ea2\u4e66\u56fe\u6587\u7b14\u8bb0\u6b63\u6587\u56fe\u7247\u3002")
+        warnings.append("\u5df2\u505c\u6b62\u666e\u901a\u7f51\u9875\u626b\u56fe\u56de\u9000\uff0c\u907f\u514d\u8fd4\u56de\u4e0e\u4f5c\u8005\u7b14\u8bb0\u65e0\u5173\u7684\u9875\u9762\u56fe\u7247\u3002")
+    return {
+        "items": [m.to_dict() for m in items],
+        "summary": summarize(items),
+        "pages": [{"page": 1, "url": list_url, "method": "builtin-xhs-note-images",
+                   "html_bytes": 0, "media": len(items), "links": 0,
+                   "elapsed": 0.0, "visible_text": 0}],
+        "detail_pages": {"total": 0, "ok": 0, "failed": 0, "urls": []},
+        "stats": {"list_pages": 1, "detail_pages": 0, "http_ok": 0,
+                  "render_used": 0, "variants_collapsed": 0, "elapsed": 0.0},
+        "warnings": warnings,
+        "list_url": list_url,
+        "renderer": renderer_status(),
+        "via": "builtin-platform:xhs-images",
+    }, note
+
+
 def _expand_via_platform_source(
     list_url: str,
     *,
@@ -1315,6 +1360,22 @@ def crawl_list(
     # 是前端调接口拿 JSON 再渲染的 —— 走网页抓取只能得到站点自身的 JS 资源，
     # 于是无论怎么下钻都是 0 条。判据只有「要视频 + 页面地址 + 通用工具说它是列表」，
     # 完全不含站点专用规则。命中就直接返回，不再走后面的网页抓取（省时且结果更全）。
+    # ---------- 0A. XHS author image pipeline ----------
+    # Generic page scanning mixes avatars/UI/recommendations into profile image results.
+    _kinds = set(want_kinds or ())
+    _path_low = (urlparse(list_url).path or "").lower()
+    if expand_listing and _kinds and _kinds <= {"image"} and "/user/profile/" in _path_low:
+        from . import profile_sources as _ps_img
+        if _ps_img.platform_for_url(list_url) == "xhs":
+            _emit("list", 0, 1, "\u6b63\u5728\u8bfb\u53d6\u5c0f\u7ea2\u4e66\u4f5c\u8005\u4f5c\u54c1\u5217\u8868\u548c\u56fe\u6587\u7b14\u8bb0\u6b63\u6587\u56fe\u7247\u2026")
+            xhs_exp, _xhs_note = _expand_xhs_image_source(
+                list_url, limit=max(1, min(int(max_items or 30) or 30, 2000)),
+                on_note=lambda msg: _emit("detail", 0, 0, msg),
+            )
+            xhs_exp["stats"]["elapsed"] = round(time.time() - t0, 2)
+            _emit("merge", 0, 0, f"\u5df2\u63d0\u53d6 {len(xhs_exp.get('items') or [])} \u5f20\u6b63\u6587\u56fe\u7247")
+            return xhs_exp
+
     if expand_listing and want_kinds and "video" in want_kinds:
         _emit("list", 0, 1, "正在判断这是不是一个视频列表 / 博主页…")
         # 已知必须靠签名接口 / 登录态拿作品列表的平台，专用来源必须放在前面。

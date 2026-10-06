@@ -443,6 +443,207 @@ def xhs_author_items(url: str, *, limit: int = 30, timeout: int = 90,
     return {"ok": True, "items": items[:limit], "error": "", "login_required": False}
 
 
+def xhs_detail_images(url: str, *, timeout: int = 60) -> dict:
+    """用签名详情接口读取一篇小红书图文笔记里的真实图片。
+
+    只返回 note_card.image_list，明确排除头像、站点 UI、推荐流图片等页面装饰资源。
+    视频笔记返回 ok=True + items=[] + is_video=True，调用方可直接跳过。
+    """
+    try:
+        from xhshow import Xhshow
+        from urllib.parse import parse_qs
+    except ImportError:
+        return {"ok": False, "items": [], "error": "内置 xhshow 不可用"}
+
+    try:
+        pu = urlparse(url)
+        segs = [x for x in (pu.path or "").split("/") if x]
+        note_id = segs[-1] if segs else ""
+        qs = parse_qs(pu.query or "")
+        xsec_token = (qs.get("xsec_token") or [""])[0]
+        xsec_source = (qs.get("xsec_source") or ["pc_user"])[0] or "pc_user"
+    except Exception as e:
+        return {"ok": False, "items": [], "error": f"小红书地址解析失败：{e}"}
+    if not note_id or not xsec_token:
+        return {"ok": False, "items": [],
+                "error": "小红书笔记链接缺少 xsec_token；请重新抓取作者主页以取得完整链接。"}
+
+    ck, _ = _load_cookie_dict("xiaohongshu")
+    if not ck.get("web_session"):
+        return {"ok": False, "items": [],
+                "error": "小红书需要登录态。请到「平台登录中心」登录一次小红书。"}
+
+    endpoint = "https://edith.xiaohongshu.com/api/sns/web/v1/feed"
+    payload = {
+        "source_note_id": note_id,
+        "image_formats": ["jpg", "webp", "avif"],
+        "extra": {"need_body_topic": 1},
+        "xsec_source": xsec_source,
+        "xsec_token": xsec_token,
+    }
+    try:
+        headers = Xhshow().sign_headers_post(
+            uri=endpoint, cookies=ck, payload=payload, x_rap=True)
+        headers.update({
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0 Safari/537.36",
+            "accept": "application/json, text/plain, */*",
+            "origin": "https://www.xiaohongshu.com",
+            "referer": url,
+        })
+        resp = None
+        last_exc = None
+        for trust in (True, False):
+            try:
+                with requests.Session() as sess:
+                    sess.trust_env = trust
+                    resp = sess.post(endpoint, json=payload, cookies=ck, headers=headers,
+                                     timeout=min(int(timeout), 30))
+                break
+            except requests.exceptions.RequestException as e:
+                last_exc = e
+        if resp is None:
+            raise last_exc or RuntimeError("请求失败")
+        data = resp.json()
+    except Exception as e:
+        return {"ok": False, "items": [],
+                "error": f"小红书详情接口失败：{type(e).__name__}: {e}"}
+
+    if not data.get("success"):
+        code = data.get("code")
+        msg = (data.get("msg") or "")[:100]
+        err = f"小红书详情接口报错（code={code}）：{msg}"
+        if code == -101 or platform_login.looks_like_auth_error(err):
+            platform_login.mark_invalid("xhs", err)
+        return {"ok": False, "items": [], "error": err}
+
+    entries = (data.get("data") or {}).get("items") or []
+    card = (entries[0].get("note_card")
+            if entries and isinstance(entries[0], dict) else None) or {}
+    if card.get("type") == "video":
+        return {"ok": True, "items": [], "is_video": True, "error": ""}
+
+    title = (card.get("title") or card.get("desc") or "").strip()[:150]
+    user = card.get("user") if isinstance(card.get("user"), dict) else {}
+    uploader = (user.get("nickname") or user.get("nick_name") or "").strip()
+    out, seen = [], set()
+    images = card.get("image_list") or []
+    for idx, im in enumerate(images if isinstance(images, list) else []):
+        if not isinstance(im, dict):
+            continue
+        # WB_DFT/url_default 是正文图片的默认高质量档；没有时才退 WB_PRV。
+        direct = str(im.get("url_default") or "").strip()
+        if not direct:
+            infos = im.get("info_list") or []
+            for scene in ("WB_DFT", "WB_PRV"):
+                hit = next((x for x in infos
+                            if isinstance(x, dict)
+                            and x.get("image_scene") == scene
+                            and str(x.get("url") or "").startswith("http")), None)
+                if hit:
+                    direct = str(hit.get("url") or "").strip()
+                    break
+        direct = direct or str(im.get("url_pre") or im.get("url") or "").strip()
+        if not direct.startswith("http") or direct in seen:
+            continue
+        seen.add(direct)
+        out.append({
+            "page_url": url,
+            "direct_url": direct,
+            "variants": [],
+            "title": title,
+            "cover": direct,
+            "uploader": uploader,
+            "site": "xiaohongshu.com",
+            "kind_hint": "image",
+            "width": im.get("width"),
+            "height": im.get("height"),
+            "index": idx + 1,
+        })
+    if not out:
+        return {"ok": False, "items": [], "error": "图文笔记详情接口成功，但没有找到正文图片。"}
+    return {"ok": True, "items": out, "is_video": False, "error": ""}
+
+
+
+def xhs_author_image_items(url: str, *, limit: int = 30, on_note=None) -> dict:
+    """Read only body images from XHS author notes via signed detail API."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    max_media = max(1, min(int(limit or 30), 2000))
+    # Scan beyond the requested media count so video notes do not starve image results.
+    # Keep a hard ceiling to avoid excessive detail requests on very large profiles.
+    note_scan = min(max(max_media * 2, 30), 120)
+    author = xhs_author_items(url, limit=note_scan, on_note=on_note)
+    if not author.get("ok"):
+        return {"ok": False, "items": [],
+                "login_required": bool(author.get("login_required")),
+                "error": str(author.get("error") or "XHS author list failed")}
+
+    notes = list(author.get("items") or [])
+    if on_note:
+        on_note(f"\u5df2\u53d6\u5f97 {len(notes)} \u7bc7\u4f5c\u54c1\uff0c\u6b63\u5728\u9010\u7bc7\u8bfb\u53d6\u56fe\u6587\u7b14\u8bb0\u6b63\u6587\u56fe\u7247\u2026")
+    out: list[dict] = []
+    failed = 0
+    videos = 0
+    checked = 0
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for off in range(0, len(notes), 6):
+            batch = notes[off:off + 6]
+            work = []
+            for row in batch:
+                page = str(row.get("page_url") or "").strip()
+                if page:
+                    work.append((row, pool.submit(xhs_detail_images, page)))
+            for row, fut in work:
+                checked += 1
+                try:
+                    detail = fut.result()
+                except Exception:
+                    failed += 1
+                    continue
+                if not detail.get("ok"):
+                    failed += 1
+                    continue
+                if detail.get("is_video"):
+                    videos += 1
+                    continue
+                for img in detail.get("items") or []:
+                    direct = str(img.get("direct_url") or "").strip()
+                    if not direct:
+                        continue
+                    title = str(img.get("title") or row.get("title") or "").strip()
+                    idx = int(img.get("index") or 0)
+                    out.append({
+                        "page_url": str(img.get("page_url") or row.get("page_url") or ""),
+                        "direct_url": direct,
+                        "variants": img.get("variants") or [],
+                        "title": (f"{title} #{idx}" if title and idx else title),
+                        "cover": direct,
+                        "uploader": img.get("uploader") or row.get("uploader") or "",
+                        "site": "xiaohongshu.com",
+                        "kind_hint": "image",
+                        "width": img.get("width"),
+                        "height": img.get("height"),
+                        "note_image_index": idx,
+                    })
+                    if len(out) >= max_media:
+                        break
+                if len(out) >= max_media:
+                    break
+            if on_note:
+                on_note(f"\u5df2\u68c0\u67e5 {checked}/{len(notes)} \u7bc7\uff0c\u6b63\u6587\u56fe\u7247 {len(out)} \u5f20")
+            if len(out) >= max_media:
+                break
+
+    note = (f"\u5df2\u4ece\u5c0f\u7ea2\u4e66\u7b14\u8bb0\u8be6\u60c5\u63a5\u53e3\u63d0\u53d6 {len(out)} \u5f20\u6b63\u6587\u56fe\u7247\uff1b"
+            f"\u68c0\u67e5 {checked} \u7bc7\uff0c\u8df3\u8fc7\u89c6\u9891\u7b14\u8bb0 {videos} \u7bc7\uff0c\u8be6\u60c5\u5931\u8d25 {failed} \u7bc7\u3002")
+    if note_scan >= 120 and len(out) < max_media:
+        note += " \u4e3a\u63a7\u5236\u5e73\u53f0\u8bf7\u6c42\u91cf\uff0c\u672c\u8f6e\u6700\u591a\u626b\u63cf 120 \u7bc7\u4f5c\u54c1\u3002"
+    return {"ok": bool(out), "items": out[:max_media], "login_required": False,
+            "error": "" if out else "\u6ca1\u6709\u627e\u5230\u56fe\u6587\u7b14\u8bb0\u6b63\u6587\u56fe\u7247\u3002", "note": note}
+
+
 def _xhs_signed_detail_item(url: str, *, timeout: int = 60) -> dict:
     """用 xhshow + 该平台独立登录 cookie 直接解析一条小红书笔记。"""
     try:
@@ -758,8 +959,22 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
     attempts = []
 
     if platform == "xhs":
-        res = xhs_author_items(url, limit=limit, on_note=on_note)
+        res = (xhs_author_items(url, limit=limit, on_note=on_note)
+               if want_video else
+               xhs_author_image_items(url, limit=limit, on_note=on_note))
         attempts.append(("xhshow", res))
+        # Image mode must not fall back to generic page scanning: that reintroduces
+        # avatars, site UI assets and recommendation-feed images.
+        if not want_video and not res.get("ok"):
+            why = str(res.get("error") or "\u6ca1\u6709\u8fd4\u56de\u56fe\u6587\u7b14\u8bb0\u6b63\u6587\u56fe\u7247")
+            if res.get("login_required"):
+                st = platform_login.status(platform)
+                if st.get("logged_in"):
+                    platform_login.mark_invalid(platform, why)
+                    why = f"{name} \u767b\u5f55\u6001\u5df2\u5931\u6548\uff0c\u8bf7\u5230\u300c\u5e73\u53f0\u767b\u5f55\u4e2d\u5fc3\u300d\u91cd\u65b0\u767b\u5f55\u3002 {why}"
+                else:
+                    why = f"{name} \u5f53\u524d\u9700\u8981\u767b\u5f55\uff0c\u8bf7\u5230\u300c\u5e73\u53f0\u767b\u5f55\u4e2d\u5fc3\u300d\u767b\u5f55\u4e00\u6b21\u3002 {why}"
+            return [], why
     else:
         res = {"ok": False, "items": [], "login_required": False, "error": ""}
 

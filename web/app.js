@@ -826,6 +826,10 @@ function buildCrawlCard(it, idx) {
 
   const check = document.createElement('div');
   check.className = 'card-check';
+  // 重绘卡片时从选择集合恢复勾选视觉，避免“已选中但框里没勾”。
+  const initiallySelected = st.sel.has(idx);
+  card.classList.toggle('selected', initiallySelected);
+  check.textContent = initiallySelected ? '✓' : '';
   card.appendChild(check);
 
   const thumb = document.createElement('div');
@@ -980,7 +984,11 @@ function updateCrawlSelCount() {
 }
 
 function applyCrawlSelectionUI() {
-  document.querySelectorAll('#crawlGrid .card').forEach(c => {
+  // createCrawler 同时服务图片/视频两套实例，结果网格 ID 分别是
+  // imgCrawlGrid / vidCrawlGrid。旧代码写死 #crawlGrid，导致“全选”只改了
+  // st.sel 和数字，实际卡片完全没收到 selected/✓ 视觉状态。
+  const grid = $(E('crawlGrid'));
+  if (grid) grid.querySelectorAll('.card').forEach(c => {
     const i = parseInt(c.dataset.idx, 10);
     const on = st.sel.has(i);
     c.classList.toggle('selected', on);
