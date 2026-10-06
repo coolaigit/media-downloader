@@ -1062,9 +1062,12 @@ def _bili_enrich(items: list[dict], cookie_file: str, on_note=None) -> list[dict
             if not isinstance(data, dict) or not data:
                 return idx, None
             owner = data.get("owner") if isinstance(data.get("owner"), dict) else {}
+            cover = str(data.get("pic") or "")
+            if cover.startswith("http://"):
+                cover = "https://" + cover[len("http://"):]
             return idx, {
                 "title": str(data.get("title") or "")[:150],
-                "cover": str(data.get("pic") or ""),
+                "cover": cover,
                 "duration": data.get("duration"),
                 "uploader": str(owner.get("name") or ""),
                 "page_url": f"https://www.bilibili.com/video/{data.get('bvid') or m.group(1)}",

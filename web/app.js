@@ -95,6 +95,23 @@ async function api(path, options = {}) {
   return data;
 }
 
+async function openExternalUrl(url, event = null) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  if (!/^https?:\/\//i.test(String(url || ''))) {
+    toast('外部地址无效', 'err');
+    return;
+  }
+  try {
+    await api('/api/open-url', { method: 'POST', body: { url } });
+  } catch (e) {
+    const w = window.open(url, '_blank', 'noopener');
+    if (!w) toast('无法打开外部页面：' + e.message, 'err');
+  }
+}
+
 function setBusy(btn, busy, textBusy) {
   if (!btn) return;
   if (busy) {
@@ -848,7 +865,11 @@ function buildCrawlCard(it, idx) {
 
   const thumb = document.createElement('div');
   thumb.className = 'thumb';
-  const cover = it.thumbnail || '';
+  let cover = it.thumbnail || '';
+  if (/^http:\/\/[^/]*hdslb\.com\//i.test(cover)) {
+    cover = cover.replace(/^http:/i, 'https:');
+  }
+  const coverReferer = it.origin_page || it.referer || '';
   if (isVideo && !cover) {
     // 只有在拿不到封面时才退回类型占位。
     // 以前无条件占位，导致「仅视频」模式下整屏都是空白框，看不出是哪个片子。
@@ -862,8 +883,18 @@ function buildCrawlCard(it, idx) {
     img.referrerPolicy = 'no-referrer';
     img.decoding = 'async';
     img.alt = it.title || '';
-    img.src = proxyUrl(cover || it.url, it.referer);
+    img.src = proxyUrl(cover || it.url, coverReferer);
     img.onerror = function () {
+      if (!this.dataset.noRefRetry && cover) {
+        this.dataset.noRefRetry = '1';
+        this.src = proxyUrl(cover, '');
+        return;
+      }
+      if (!this.dataset.directRetry && /^https?:\/\//i.test(cover || '')) {
+        this.dataset.directRetry = '1';
+        this.src = cover;
+        return;
+      }
       const ph = document.createElement('div');
       ph.className = 'ph';
       ph.textContent = '预览不可用';
@@ -957,14 +988,14 @@ function buildCrawlCard(it, idx) {
   const a1 = document.createElement('a');
   a1.href = it.url; a1.target = '_blank'; a1.rel = 'noopener';
   a1.textContent = '打开';
-  a1.onclick = (e) => e.stopPropagation();
+  a1.onclick = (e) => openExternalUrl(it.url, e);
   links.appendChild(a1);
   const sourcePage = it.origin_page || it.referer || (isPage ? it.url : '');
   if (sourcePage) {
     const a2 = document.createElement('a');
     a2.href = sourcePage; a2.target = '_blank'; a2.rel = 'noopener';
     a2.textContent = '来源页';
-    a2.onclick = (e) => e.stopPropagation();
+    a2.onclick = (e) => openExternalUrl(sourcePage, e);
     links.appendChild(a2);
   }
   // 视频页条目（is_page）：给「解析清晰度」入口 —— 跳到「单个视频链接」下载口。

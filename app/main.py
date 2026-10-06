@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+import webbrowser
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -39,6 +40,18 @@ browser_profile.set_provider(lambda: {
 })
 
 app = FastAPI(title="媒体下载工具", version="1.0.0")
+
+
+@app.middleware("http")
+async def _disable_frontend_cache(request, call_next):
+    """桌面壳升级后禁止继续复用旧 HTML/JS/CSS。"""
+    response = await call_next(request)
+    if request.url.path in {"/", "/index.html", "/app.js", "/style.css"}:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 
 # 首次使用向导版本。只有用户完成了“当前版本”的向导才算完成。
 # 旧版只有 onboarding_complete=true、没有 version，因此升级到 2.0 后会重新展示一次。
@@ -951,6 +964,35 @@ def api_set_settings(req: SettingsReq):
         except OSError:
             restart_required = True
     return {"ok": True, "settings": data, "restart_required": restart_required}
+
+
+@app.post("/api/open-url")
+def api_open_url(payload: dict = Body(...)):
+    """用系统默认浏览器打开 http(s) 外部页面。
+
+    pywebview/WebView2 对 target=_blank 的处理不稳定，桌面版统一经后端调用
+    系统默认浏览器，避免“打开/来源页”点击无反应。
+    """
+    url = str(payload.get("url") or "").strip()
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        parsed = None
+    if not parsed or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(400, "仅允许打开 http(s) 外部地址")
+    if len(url) > 2000:
+        raise HTTPException(400, "地址过长")
+    try:
+        if os.name == "nt":
+            os.startfile(url)  # type: ignore[attr-defined]
+            opened = True
+        else:
+            opened = bool(webbrowser.open_new_tab(url))
+    except Exception:
+        opened = bool(webbrowser.open_new_tab(url))
+    if not opened:
+        raise HTTPException(500, "系统默认浏览器未能打开该地址")
+    return {"ok": True}
 
 
 # ---------- 文件访问与代理 ----------
