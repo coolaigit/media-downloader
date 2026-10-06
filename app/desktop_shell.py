@@ -158,8 +158,14 @@ def _handle_window_close(window, state: dict) -> bool | None:
         state["hidden_to_tray"] = True
         return False
     except Exception:
-        _log("minimize-to-tray failed; falling back to exit:\n" + traceback.format_exc())
-        return None
+        # 用户明确选择“关闭到托盘”时，托盘组件异常也不能擅自改成“直接退出”。
+        # 记录错误并取消本次关闭；窗口继续保留，避免任务/服务被意外终止。
+        _log("minimize-to-tray failed; close cancelled:\n" + traceback.format_exc())
+        try:
+            window.show()
+        except Exception:
+            pass
+        return False
 
 
 def _open_native(url: str, own_server: bool, holder: dict) -> int:
