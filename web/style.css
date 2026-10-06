@@ -807,3 +807,5 @@ select:focus, input[type="text"]:focus, input[type="number"]:focus {
 @media (max-width: 760px) {
   .base-theme-grid { grid-template-columns: 1fr; }
 }
+
+.card.probe-return { outline: 3px solid currentColor; outline-offset: 2px; }

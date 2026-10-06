@@ -459,7 +459,8 @@ def _record_history(res: "DownloadResult", url: str, title: str = "") -> None:
         from . import history
 
         history.record(url, None, title=title or Path(res.path or "").name,
-                       kind="video", path=res.path or "", size=int(res.size or 0))
+                       kind="video", path=res.path or "", size=int(res.size or 0),
+                       source_url=referer or url)
     except Exception:
         pass
 

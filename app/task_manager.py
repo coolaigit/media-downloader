@@ -430,6 +430,38 @@ class TaskManager:
                     t.failed += 1
                 if result.note:
                     t.alt_used += 1
+                if result.ok and result.path:
+                    try:
+                        from . import history
+                        src = t.urls[index] if 0 <= index < len(t.urls) else {}
+                        ext = Path(result.path).suffix.lower()
+                        media_kind = "video" if ext in {
+                            ".mp4", ".webm", ".mkv", ".mov", ".avi", ".flv",
+                            ".m4v", ".mpg", ".mpeg", ".3gp", ".ts",
+                        } else "image"
+                        source_page = str(
+                            src.get("origin_page")
+                            or src.get("referer")
+                            or src.get("url")
+                            or result.url
+                            or ""
+                        )
+                        thumb = str(src.get("thumbnail") or "")
+                        if media_kind == "image" and not thumb:
+                            thumb = str(src.get("url") or result.url or "")
+                        history.record(
+                            str(src.get("url") or result.url or ""),
+                            None,
+                            title=str(src.get("title") or Path(result.path).name),
+                            kind=media_kind,
+                            path=result.path,
+                            size=int(result.size or 0),
+                            source_url=source_page,
+                            thumbnail=thumb,
+                        )
+                    except Exception:
+                        pass
+
                 t.items.append({
                     "index": index,
                     "url": result.url,

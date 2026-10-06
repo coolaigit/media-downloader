@@ -13,6 +13,7 @@ let libFiles = [];
 let libFilterType = '';
 let currentVideo = null;     // 当前解析出的视频信息
 let selectedFormatId = '';   // 「用此格式」精确选择的格式 ID（空 = 按清晰度档位）
+let crawlProbeOrigin = null; // 从批量抓取卡片进入单条解析时，记住原卡片位置
 let statusInfo = null;
 let dockCollapsed = true;
 let taskTimer = null;
@@ -383,7 +384,8 @@ function buildImageCard(it, idx) {
   const links = document.createElement('div');
   links.className = 'card-links';
   const a1 = document.createElement('a');
-  a1.href = it.url; a1.target = '_blank'; a1.rel = 'noopener';
+  a1.href = (!isVideo && it.url) ? proxyUrl(it.url, it.referer || it.origin_page || '') : it.url;
+  a1.target = '_blank'; a1.rel = 'noopener';
   a1.textContent = '原图';
   a1.onclick = (e) => e.stopPropagation();
   links.appendChild(a1);
@@ -578,6 +580,22 @@ function crawlSiteName() {
   catch (e) { return 'site'; }
 }
 
+function clearCrawlResults(hideProgress = true) {
+  stopCrawlPoll();
+  st.jobId = '';
+  st.items = [];
+  st.sel = new Set();
+  const grid = $(E('crawlGrid'));
+  if (grid) grid.innerHTML = '';
+  $(E('crawlToolbar')).hidden = true;
+  $(E('crawlWarn')).hidden = true;
+  $(E('crawlDetailBox')).hidden = true;
+  if (hideProgress) $(E('crawlProgress')).hidden = true;
+  $(E('crawlCount')).textContent = '';
+  $(E('crawlNote')).textContent = '';
+  updateCrawlSelCount();
+}
+
 async function doCrawl() {
   const opt = crawlOptions();
   if (!opt.url) { toast('请先粘贴列表页链接', 'err'); return; }
@@ -586,12 +604,8 @@ async function doCrawl() {
     return;
   }
 
-  st.items = [];
-  st.sel = new Set();
-  $(E('crawlGrid')).innerHTML = '';
-  $(E('crawlToolbar')).hidden = true;
-  $(E('crawlWarn')).hidden = true;
-  $(E('crawlDetailBox')).hidden = true;
+  // 新任务默认清掉上一轮结果，避免几百张旧卡片继续堆在页面里。
+  clearCrawlResults(true);
   msg(E('crawlMsg'), '正在提交抓取任务…', 'info');
 
   setBusy($(E('btnCrawl')), true, '抓取中…');
@@ -945,9 +959,10 @@ function buildCrawlCard(it, idx) {
   a1.textContent = '打开';
   a1.onclick = (e) => e.stopPropagation();
   links.appendChild(a1);
-  if (it.origin_page) {
+  const sourcePage = it.origin_page || it.referer || (isPage ? it.url : '');
+  if (sourcePage) {
     const a2 = document.createElement('a');
-    a2.href = it.origin_page; a2.target = '_blank'; a2.rel = 'noopener';
+    a2.href = sourcePage; a2.target = '_blank'; a2.rel = 'noopener';
     a2.textContent = '来源页';
     a2.onclick = (e) => e.stopPropagation();
     links.appendChild(a2);
@@ -963,7 +978,12 @@ function buildCrawlCard(it, idx) {
     bp.className = 'btn tiny';
     bp.textContent = '解析清晰度';
     bp.title = '跳到「单个视频链接」下载口，查看可选清晰度，挑好再下载';
-    bp.onclick = (e) => { e.stopPropagation(); gotoVideoProbe(it.url); doProbe(); };
+    bp.onclick = (e) => {
+      e.stopPropagation();
+      crawlProbeOrigin = { prefix: P, idx, url: it.url };
+      gotoVideoProbe(it.url);
+      doProbe();
+    };
     links.appendChild(bp);
   }
   body.appendChild(links);
@@ -1050,6 +1070,8 @@ async function downloadCrawlSelected() {
               url: i.url,
               referer: i.referer || '',
               title: i.title || '',
+              origin_page: i.origin_page || '',
+              thumbnail: i.thumbnail || '',
               // 同一媒体的其它档位地址：首选地址下不了时后端会自动换用。
               alternates: i.variants || [],
             })),
@@ -1099,6 +1121,7 @@ async function downloadCrawlSelected() {
     updateModeUI: updateCrawlModeUI,
     rebuildQualityOptions: rebuildQualityOptions,
     download: downloadCrawlSelected,
+    clear: clearCrawlResults,
     selAll: () => { st.sel = new Set(st.items.map((_, i) => i)); applyCrawlSelectionUI(); },
     selInv: () => {
       const next = new Set();
@@ -1274,11 +1297,13 @@ function renderVideoInfo(res) {
   const backBar = $('backToPlaylistBar');
   if (backBar) {
     const hasList = playlistEntries.length > 0;
-    backBar.hidden = !hasList;
-    if (hasList) {
-      const hint = $('backToPlaylistHint');
-      if (hint) hint.textContent =
-        `列表里还有 ${playlistEntries.length} 个视频，可返回继续挑选`;
+    const hasCrawl = !!crawlProbeOrigin;
+    backBar.hidden = !(hasList || hasCrawl);
+    const hint = $('backToPlaylistHint');
+    if (hint) {
+      hint.textContent = hasCrawl
+        ? '可返回刚才的批量抓取结果，并自动定位到这条视频'
+        : `列表里还有 ${playlistEntries.length} 个视频，可返回继续挑选`;
     }
   }
 }
@@ -1742,47 +1767,117 @@ function renderLibrary() {
     return true;
   });
   if (!items.length) { renderEmpty('libGrid', '还没有下载任何文件'); return; }
+
   items.forEach(f => {
     const card = document.createElement('div');
     card.className = 'card';
+
     const thumb = document.createElement('div');
     thumb.className = 'thumb';
+
+    const addVideoFallback = () => {
+      const v = document.createElement('video');
+      v.src = API + f.href;
+      v.preload = 'metadata';
+      v.muted = true;
+      v.style.width = '100%';
+      v.style.height = '100%';
+      v.style.objectFit = 'cover';
+      v.onerror = function () {
+        const ph = document.createElement('div');
+        ph.className = 'ph';
+        ph.textContent = '视频';
+        this.replaceWith(ph);
+      };
+      thumb.appendChild(v);
+    };
+
     if (!f.is_video) {
       const img = document.createElement('img');
       img.loading = 'lazy';
       img.src = API + f.href;
       img.onerror = function () {
-        const ph = document.createElement('div'); ph.className = 'ph';
-        ph.textContent = '预览不可用'; this.replaceWith(ph);
+        const ph = document.createElement('div');
+        ph.className = 'ph';
+        ph.textContent = '预览不可用';
+        this.replaceWith(ph);
+      };
+      thumb.appendChild(img);
+    } else if (f.thumbnail) {
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.referrerPolicy = 'no-referrer';
+      img.src = proxyUrl(f.thumbnail, f.source_url || '');
+      img.onerror = function () {
+        this.remove();
+        addVideoFallback();
       };
       thumb.appendChild(img);
     } else {
-      const v = document.createElement('video');
-      v.src = API + f.href; v.preload = 'metadata'; v.muted = true;
-      v.style.width = '100%'; v.style.height = '100%'; v.style.objectFit = 'cover';
-      v.onerror = function () {
-        const ph = document.createElement('div'); ph.className = 'ph';
-        ph.textContent = '视频'; this.replaceWith(ph);
-      };
-      thumb.appendChild(v);
+      addVideoFallback();
     }
     card.appendChild(thumb);
 
     const body = document.createElement('div');
     body.className = 'card-body';
     const t = document.createElement('div');
-    t.className = 'card-title'; t.textContent = f.name; t.title = f.rel;
+    t.className = 'card-title';
+    t.textContent = f.title || f.name;
+    t.title = f.rel;
     body.appendChild(t);
+
     const m = document.createElement('div');
     m.className = 'card-meta';
     m.innerHTML = `<span class="badge ${f.is_video ? 'video' : ''}">${f.is_video ? '视频' : '图片'}</span>
       <span class="badge">${esc(humanSize(f.size))}</span>
       ${f.dir ? `<span class="badge" title="${esc(f.dir)}">${esc(f.dir)}</span>` : ''}`;
     body.appendChild(m);
+
     const links = document.createElement('div');
     links.className = 'card-links';
-    links.innerHTML = `<a href="${esc(API + f.href)}" target="_blank" rel="noopener">打开</a>
-      <a href="${esc(API + f.href)}" download>保存</a>`;
+
+    const reveal = document.createElement('button');
+    reveal.type = 'button';
+    reveal.className = 'btn tiny';
+    reveal.textContent = '打开文件';
+    reveal.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await api('/api/downloads/reveal', { method: 'POST', body: { rel: f.rel } });
+      } catch (err) { toast('打开失败：' + err.message, 'err'); }
+    };
+    links.appendChild(reveal);
+
+    const openDir = document.createElement('button');
+    openDir.type = 'button';
+    openDir.className = 'btn tiny ghost';
+    openDir.textContent = '目录';
+    openDir.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await api('/api/downloads/open', { method: 'POST', body: { sub: f.dir || '' } });
+      } catch (err) { toast('打开目录失败：' + err.message, 'err'); }
+    };
+    links.appendChild(openDir);
+
+    const preview = document.createElement('a');
+    preview.href = API + f.href;
+    preview.target = '_blank';
+    preview.rel = 'noopener';
+    preview.textContent = '预览';
+    preview.onclick = (e) => e.stopPropagation();
+    links.appendChild(preview);
+
+    if (/^https?:\/\//i.test(f.source_url || '')) {
+      const source = document.createElement('a');
+      source.href = f.source_url;
+      source.target = '_blank';
+      source.rel = 'noopener';
+      source.textContent = '来源页';
+      source.onclick = (e) => e.stopPropagation();
+      links.appendChild(source);
+    }
+
     body.appendChild(links);
     card.appendChild(body);
     grid.appendChild(card);
@@ -1871,7 +1966,7 @@ async function pollTasks() {
           if (act === 'cancel') { await api(`/api/tasks/${t.id}/cancel`, { method: 'POST' }); toast('已请求取消', 'info'); }
           else if (act === 'remove') { await api(`/api/tasks/${t.id}`, { method: 'DELETE' }); pollTasks(); }
           else if (act === 'open') {
-            await api('/api/downloads/open', { method: 'POST', body: { sub: '' } });
+            await api('/api/downloads/open', { method: 'POST', body: { path: t.output_dir || '' } });
             toast('已打开下载目录', 'ok');
           }
         } catch (e) { toast('操作失败：' + e.message, 'err'); }
@@ -2214,6 +2309,8 @@ function bindEvents() {
     $(E('btnCrawlSelInv')).onclick = c.selInv;
     $(E('btnCrawlSelNone')).onclick = c.selNone;
     $(E('btnCrawlDownload')).onclick = c.download;
+    const clearBtn = $(E('btnCrawlClear'));
+    if (clearBtn) clearBtn.onclick = () => c.clear(true);
   });
 
 
@@ -2228,6 +2325,20 @@ function bindEvents() {
   if (backBtn) {
     backBtn.onclick = () => {
       $('videoInfo').hidden = true;
+      if (crawlProbeOrigin) {
+        const origin = crawlProbeOrigin;
+        const crawler = crawlers[origin.prefix];
+        const grid = crawler ? $(crawler.E('crawlGrid')) : null;
+        const card = grid ? grid.querySelector(`[data-idx="${origin.idx}"]`) : null;
+        if (card) {
+          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          card.classList.add('probe-return');
+          setTimeout(() => card.classList.remove('probe-return'), 1800);
+        }
+        crawlProbeOrigin = null;
+        msg('videoMsg', '已返回批量抓取结果，并定位到刚才解析的视频。', 'info');
+        return;
+      }
       $('playlistBox').hidden = false;
       $('videoInput').value = '';
       msg('videoMsg', '已返回批量列表，可继续勾选其它视频。', 'info');

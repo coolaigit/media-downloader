@@ -194,7 +194,8 @@ def reset_cache() -> None:
 
 
 def record(url: str = "", info: dict | None = None, *, title: str = "",
-           kind: str = "video", path: str = "", size: int = 0) -> list[str]:
+           kind: str = "video", path: str = "", size: int = 0,
+           source_url: str = "", thumbnail: str = "") -> list[str]:
     """记下「这个视频下过了」。返回写进去的身份键。
 
     `path` 只是**备注**（界面上显示「下到哪儿了」），**不参与身份判定** ——
@@ -209,6 +210,8 @@ def record(url: str = "", info: dict | None = None, *, title: str = "",
         "title": (title or str((info or {}).get("title") or ""))[:200],
         "kind": kind,
         "url": turl[:600],
+        "source_url": (source_url or turl)[:1200],
+        "thumbnail": (thumbnail or str((info or {}).get("thumbnail") or ""))[:1200],
         "path": str(path or "")[:600],
         "size": int(size or 0),
         "keys": keys,

@@ -1038,17 +1038,32 @@ def api_proxy(url: str = Query(..., max_length=2000), referer: str = Query(defau
 
 @app.get("/api/downloads/tree")
 def api_downloads_tree():
-    """列出下载目录结构（仅媒体文件），供前端查看已下载内容。"""
+    """列出下载目录中的媒体，并附带可用的来源页/缩略图元数据。"""
     root = DOWNLOADS_DIR.resolve()
     out: list[dict] = []
+
+    # 下载历史的 path 只是展示元数据，不参与“是否下载过”的身份判断。
+    # 这里反向用它给已下载文件补来源页和远端封面。
+    meta_by_path: dict[str, dict] = {}
+    try:
+        from . import history
+        for row in history.recent(5000):
+            hp = str((row or {}).get("path") or "").strip()
+            if not hp:
+                continue
+            try:
+                meta_by_path[str(Path(hp).resolve()).lower()] = row
+            except OSError:
+                continue
+    except Exception:
+        meta_by_path = {}
+
     try:
         for p in sorted(root.rglob("*")):
             if not p.is_file() or p.name.startswith("."):
                 continue
             if p.suffix.lower() not in ALLOWED_MEDIA_EXTS:
                 continue
-            # 下载中/中断的临时文件不展示：流下载写成 xxx.part.mp4，
-            # 它的后缀是合法媒体后缀，只看后缀会把它当成完整文件列出来。
             if ".part." in p.name or p.name.endswith(".part"):
                 continue
             try:
@@ -1056,39 +1071,69 @@ def api_downloads_tree():
             except ValueError:
                 continue
             st = p.stat()
+            meta = meta_by_path.get(str(p.resolve()).lower(), {})
             out.append({
                 "name": p.name,
+                "title": str(meta.get("title") or ""),
                 "rel": rel,
                 "href": f"/files/{rel}",
                 "size": st.st_size,
                 "mtime": st.st_mtime,
                 "dir": str(p.parent.relative_to(root).as_posix()) if p.parent != root else "",
                 "is_video": p.suffix.lower() in VID_EXTS,
+                "source_url": str(meta.get("source_url") or meta.get("url") or ""),
+                "thumbnail": str(meta.get("thumbnail") or ""),
             })
     except OSError:
         pass
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return {"root": str(root), "count": len(out), "files": out[:1000]}
 
-
 @app.post("/api/downloads/open")
 def api_open_downloads(payload: dict = Body(default={})):
-    """在系统文件管理器中打开下载目录（或指定子目录）。"""
+    """在 Explorer 中打开下载根目录、子目录，或任务给出的绝对输出目录。"""
+    root = DOWNLOADS_DIR.resolve()
+    raw_path = str(payload.get("path") or "").strip()
     sub = str(payload.get("sub") or "").strip()
-    target = DOWNLOADS_DIR
-    if sub:
-        cand = (DOWNLOADS_DIR / sub).resolve()
-        if cand != DOWNLOADS_DIR.resolve() and DOWNLOADS_DIR.resolve() not in cand.parents:
+
+    if raw_path:
+        cand = Path(raw_path).resolve()
+        if cand != root and root not in cand.parents:
+            raise HTTPException(403, "禁止打开下载目录之外的位置")
+        target = cand if cand.is_dir() else cand.parent
+    elif sub:
+        cand = (root / sub).resolve()
+        if cand != root and root not in cand.parents:
             raise HTTPException(403, "禁止打开下载目录之外的位置")
         target = cand
+    else:
+        target = root
+
     if not target.exists():
         raise HTTPException(404, "目录不存在")
     try:
-        subprocess.Popen(["explorer", str(target)], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        subprocess.Popen(["explorer", str(target)],
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return {"ok": True, "path": str(target)}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"打开失败: {type(e).__name__}")
 
+
+@app.post("/api/downloads/reveal")
+def api_reveal_download(payload: dict = Body(default={})):
+    """在 Explorer 中定位一个已下载文件。路径仍受 _safe_media_path 约束。"""
+    rel = str(payload.get("rel") or "").strip()
+    if not rel:
+        raise HTTPException(400, "缺少文件路径")
+    target = _safe_media_path(rel)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(404, "文件不存在")
+    try:
+        subprocess.Popen(["explorer", f"/select,{target}"],
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return {"ok": True, "path": str(target)}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"定位失败: {type(e).__name__}")
 
 @app.get("/api/health")
 def api_health():
