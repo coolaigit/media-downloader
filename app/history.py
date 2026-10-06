@@ -309,6 +309,8 @@ def recent(limit: int = 50) -> list[dict]:
             "title": m.get("title") or "",
             "kind": m.get("kind") or "video",
             "url": m.get("url") or "",
+            "source_url": m.get("source_url") or m.get("url") or "",
+            "thumbnail": m.get("thumbnail") or "",
             "path": m.get("path") or "",
             "size": m.get("size") or 0,
             "ts": m.get("ts") or 0,
