@@ -3,8 +3,8 @@
 # CompanyName/版权暂留空 —— Publisher 由用户最终确认后再补（1E.2 决议）。
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 0, 0, 0),
-    prodvers=(2, 0, 0, 0),
+    filevers=(2, 5, 0, 0),
+    prodvers=(2, 5, 0, 0),
     mask=0x3F,
     flags=0x0,
     OS=0x40004,
@@ -17,8 +17,8 @@ VSVersionInfo(
       StringTable('080404B0', [
         StringStruct('FileDescription', 'MediaDownloader'),
         StringStruct('ProductName', 'MediaDownloader'),
-        StringStruct('FileVersion', '2.0.0.0'),
-        StringStruct('ProductVersion', '2.0.0'),
+        StringStruct('FileVersion', '2.5.0.0'),
+        StringStruct('ProductVersion', '2.5.0'),
         StringStruct('OriginalFilename', 'MediaDownloader.exe'),
         StringStruct('InternalName', 'MediaDownloader'),
         StringStruct('CompanyName', ''),
