@@ -981,6 +981,7 @@ function buildCrawlCard(it, idx) {
     bp.onclick = (e) => {
       e.stopPropagation();
       crawlProbeOrigin = { prefix: P, idx, url: it.url };
+      placeVideoProbeAboveBatch();
       gotoVideoProbe(it.url);
       doProbe();
     };
@@ -1160,6 +1161,24 @@ const crawlers = { img: crawlerImg, vid: crawlerVid };
  * 本机实测：那时 videoInput 的 getBoundingClientRect 全是 0（隐藏元素特征），
  * 页面也完全没滚动。
  */
+function placeVideoProbeAboveBatch() {
+  const toolbar = $('vidCrawlToolbar');
+  const msgEl = $('videoMsg');
+  const infoEl = $('videoInfo');
+  if (!toolbar || !toolbar.parentNode || !msgEl || !infoEl) return;
+  toolbar.parentNode.insertBefore(msgEl, toolbar);
+  toolbar.parentNode.insertBefore(infoEl, toolbar);
+}
+
+function restoreVideoProbeHome() {
+  const home = $('videoInfoHome');
+  const msgEl = $('videoMsg');
+  const infoEl = $('videoInfo');
+  if (!home || !home.parentNode || !msgEl || !infoEl) return;
+  home.parentNode.insertBefore(msgEl, home.nextSibling);
+  home.parentNode.insertBefore(infoEl, msgEl.nextSibling);
+}
+
 function gotoVideoProbe(url) {
   const linkBtn = document.querySelector('#videoModeSwitch .mode-btn[data-mode="link"]');
   // 已经是「粘贴链接抓取」时不重复点（避免多余重排）
@@ -2336,6 +2355,7 @@ function bindEvents() {
           setTimeout(() => card.classList.remove('probe-return'), 1800);
         }
         crawlProbeOrigin = null;
+        restoreVideoProbeHome();
         msg('videoMsg', '已返回批量抓取结果，并定位到刚才解析的视频。', 'info');
         return;
       }
