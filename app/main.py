@@ -1052,7 +1052,9 @@ def api_downloads_tree():
             if not hp:
                 continue
             try:
-                meta_by_path[str(Path(hp).resolve()).lower()] = row
+                # recent() is newest-first. Keep the first row for a path so an
+                # older duplicate record cannot erase a newer source/thumbnail.
+                meta_by_path.setdefault(str(Path(hp).resolve()).lower(), row)
             except OSError:
                 continue
     except Exception:
