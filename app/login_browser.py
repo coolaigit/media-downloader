@@ -82,14 +82,26 @@ def _export_netscape(cookies: list, dst: "Path") -> int:
         lines.append("\t".join([prefix + dom, subdom,
                                 c.get("path") or "/", secure, str(exp), name, val]))
         n += 1
+    # 原子替换：大批量下载时其它线程可能同时读取 cookies.txt。
+    # 直接 write_text 会暴露“写到一半”的文件，yt-dlp 会报
+    # "does not look like a Netscape format cookies file"。
+    tmp = dst.with_name(
+        f"{dst.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
     try:
-        dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(tmp, dst)
     except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         return 0
     return n
 
 
-def export_from_profile(profile_dir: str, headless: bool = True) -> dict:
+def export_from_profile(profile_dir: str, headless: bool = True, warm_url: str = "") -> dict:
     """不开新窗口，直接从一个已存在的 profile 里导出 cookies.txt。
 
     用途：登录窗口是用旧逻辑打开的、或者用户手动关了窗口但没走导出分支 ——
@@ -116,6 +128,15 @@ def export_from_profile(profile_dir: str, headless: bool = True) -> dict:
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "path": "", "count": 0, "domains": {},
                     "error": f"打开 profile 失败（可能窗口还开着）：{e}"}
+        if warm_url:
+            try:
+                pages = ctx.pages
+                page = pages[0] if pages else ctx.new_page()
+                page.goto(warm_url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(1200)
+            except Exception:
+                # 刷新 Cookie 是主目标；页面导航失败时仍导出 profile 现有 Cookie。
+                pass
         try:
             cks = ctx.cookies()
         except Exception as e:  # noqa: BLE001

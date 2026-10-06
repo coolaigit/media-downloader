@@ -887,15 +887,21 @@ def api_download_videos(req: DownloadVideosReq):
     # Batch downloads must follow the same per-platform login isolation as a
     # single download. Previously only Instagram did this, so Bilibili batches
     # silently lost SESSDATA/DedeUserID and hit anti-bot/412.
+    batch_concurrency = req.concurrency
     if len(batch_platforms) == 1:
+        only_platform = next(iter(batch_platforms))
         batch_ck_file, batch_ck_browser = _cookie_args_for_url(items[0]["url"], st)
+        # 抖音几百条长队列对连续解析非常敏感。超过 100 条时最多 2 路，
+        # 配合任务层 Cookie 快照/节流，避免数百条后集中触发 fresh-cookie/412。
+        if only_platform == "dy" and len(items) >= 100:
+            batch_concurrency = min(batch_concurrency, 2)
     tids = manager.submit_videos(
         items,
         output_subdir=req.subdir or st.get("downloads_subdir_videos", "videos"),
         quality=req.quality,
         container=req.container,
         include_playlist=req.include_playlist,
-        concurrency=req.concurrency,
+        concurrency=batch_concurrency,
         cookies_file=batch_ck_file or "",
         cookies_from_browser=batch_ck_browser or "",
     )

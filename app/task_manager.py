@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import DOWNLOADS_DIR
+from .config import DATA_ROOT, DOWNLOADS_DIR
 from .downloader import DownloadResult, batch_download_images, download_file
 from .stream_downloader import download_stream
 from .video_downloader import DownloadCancelled, download_video, request_cancel
@@ -75,6 +75,124 @@ class _AdjustableGate:
 
 
 _VIDEO_GATE = _AdjustableGate(3)
+
+# 平台登录态刷新必须串行；同一时刻只允许一个线程操作浏览器 profile /
+# cookies.txt，避免大批量任务形成“惊群”并再次把 Cookie 文件写坏。
+_PLATFORM_REFRESH_GUARD = threading.Lock()
+_PLATFORM_REFRESH_LOCKS: dict[str, threading.Lock] = {}
+_PLATFORM_REFRESH_TS: dict[str, float] = {}
+_PLATFORM_PACE_GUARD = threading.Lock()
+_PLATFORM_LAST_START: dict[str, float] = {}
+
+
+def _platform_lock(platform: str) -> threading.Lock:
+    with _PLATFORM_REFRESH_GUARD:
+        lock = _PLATFORM_REFRESH_LOCKS.get(platform)
+        if lock is None:
+            lock = threading.Lock()
+            _PLATFORM_REFRESH_LOCKS[platform] = lock
+        return lock
+
+
+def _cookie_auth_error(message: str) -> bool:
+    low = str(message or "").lower()
+    return (
+        "fresh cookies" in low
+        or "http error 412" in low
+        or "http 412" in low
+        or "netscape format cookies file" in low
+        or "cookies are needed" in low
+    )
+
+
+def _snapshot_cookie_file(source: str, task_id: str) -> str:
+    """给单个 yt-dlp 任务复制一份只属于它的 CookieJar。
+
+    yt-dlp 会把 CookieJar 回写到 cookiefile。多个下载任务若共用同一个文件，
+    会发生并发覆盖/半写读取，表现为 Netscape 格式损坏或短期 Cookie 丢失。
+    """
+    src = Path(str(source or "")).expanduser()
+    if not src.is_file():
+        return ""
+    dst_dir = DATA_ROOT / "tmp" / "cookie_snapshots"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / f"{task_id}-{uuid.uuid4().hex[:8]}.txt"
+    for attempt in range(5):
+        try:
+            data = src.read_bytes()
+            head = data[:256].decode("utf-8", errors="ignore")
+            if "Netscape HTTP Cookie File" not in head:
+                if attempt < 4:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                return ""
+            dst.write_bytes(data)
+            return str(dst)
+        except OSError:
+            if attempt < 4:
+                time.sleep(0.05 * (attempt + 1))
+    return ""
+
+
+def _cleanup_cookie_snapshot(path: str) -> None:
+    if not path:
+        return
+    try:
+        p = Path(path)
+        # 只删我们自己的临时快照，绝不能误删用户/平台主 Cookie 文件。
+        if p.parent == (DATA_ROOT / "tmp" / "cookie_snapshots"):
+            p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _pace_platform(url: str) -> None:
+    """抖音长批次轻量节流，减少连续几百次解析触发 412/风控。"""
+    try:
+        from . import platform_login
+        platform = platform_login.platform_for_url(url)
+    except Exception:
+        platform = ""
+    if platform != "dy":
+        return
+    minimum_gap = 0.7
+    with _PLATFORM_PACE_GUARD:
+        now = time.monotonic()
+        last = _PLATFORM_LAST_START.get(platform, 0.0)
+        wait = minimum_gap - (now - last)
+        if wait > 0:
+            time.sleep(wait)
+        _PLATFORM_LAST_START[platform] = time.monotonic()
+
+
+def _refresh_platform_cookie(url: str) -> tuple[bool, str]:
+    """遇到 fresh-cookie/412 时只集中刷新一次平台登录态。"""
+    try:
+        from . import platform_login
+        platform = platform_login.platform_for_url(url)
+    except Exception as e:
+        return False, str(e)
+    if not platform:
+        return False, "未识别平台"
+
+    lock = _platform_lock(platform)
+    with lock:
+        # 同一波失败的其它 worker 不重复开浏览器；15 秒内复用前一个刷新结果。
+        last = _PLATFORM_REFRESH_TS.get(platform, 0.0)
+        if time.monotonic() - last < 15.0:
+            return True, "复用刚刚刷新的登录态"
+        st = platform_login.refresh_from_profile(platform)
+        ok = (
+            bool(st.get("refresh_ok"))
+            and bool(st.get("cookie_file"))
+            and bool(st.get("logged_in"))
+        )
+        if ok:
+            _PLATFORM_REFRESH_TS[platform] = time.monotonic()
+            return True, "已自动刷新平台登录态"
+        if st.get("refresh_ok") and not st.get("logged_in"):
+            return False, "刷新到了设备 Cookie，但账号认证 Cookie 不可用，需要在平台登录中心重新登录"
+        return False, str(st.get("refresh_error") or "平台登录态刷新失败")
 
 
 @dataclass
@@ -568,26 +686,65 @@ class TaskManager:
 
         try:
             o = t.options
-            res = download_video(
-                t.video_url,
-                Path(t.output_dir),
-                task_id=task_id,
-                quality=o.get("quality", "best"),
-                container=o.get("container", ""),
-                prefer_audio_only=bool(o.get("prefer_audio_only")),
-                write_subtitles=bool(o.get("write_subtitles")),
-                subtitle_langs=o.get("subtitle_langs", "zh.*,en"),
-                include_playlist=bool(o.get("include_playlist")),
-                cookies_file=o.get("cookies_file") or None,
-                cookies_from_browser=o.get("cookies_from_browser") or None,
-                rate_limit=o.get("rate_limit", ""),
-                format_id=o.get("format_id", ""),
-                on_progress=on_progress,
-            )
+            source_cookie = str(o.get("cookies_file") or "")
+            retry_note = ""
+
+            def _download_once():
+                snap = _snapshot_cookie_file(source_cookie, task_id) if source_cookie else ""
+                try:
+                    return download_video(
+                        t.video_url,
+                        Path(t.output_dir),
+                        task_id=task_id,
+                        quality=o.get("quality", "best"),
+                        container=o.get("container", ""),
+                        prefer_audio_only=bool(o.get("prefer_audio_only")),
+                        write_subtitles=bool(o.get("write_subtitles")),
+                        subtitle_langs=o.get("subtitle_langs", "zh.*,en"),
+                        include_playlist=bool(o.get("include_playlist")),
+                        # 有平台 Cookie 时只把“任务私有快照”交给 yt-dlp。
+                        # 主 cookies_from_profile.txt 永远不让并发 yt-dlp 直接回写。
+                        cookies_file=snap or None,
+                        cookies_from_browser=(None if source_cookie else
+                                              (o.get("cookies_from_browser") or None)),
+                        rate_limit=o.get("rate_limit", ""),
+                        format_id=o.get("format_id", ""),
+                        on_progress=on_progress,
+                    )
+                finally:
+                    _cleanup_cookie_snapshot(snap)
+
+            _pace_platform(t.video_url)
+
+            # 主 Cookie 文件若刚好处于旧版本留下的损坏状态，先刷新一次再跑。
+            pre = _snapshot_cookie_file(source_cookie, task_id + "-precheck") if source_cookie else ""
+            if source_cookie and not pre:
+                ok_refresh, why = _refresh_platform_cookie(t.video_url)
+                if not ok_refresh:
+                    retry_note = f"Cookie 文件不可用，自动刷新失败：{why}"
+            _cleanup_cookie_snapshot(pre)
+
+            res = _download_once()
+
+            # 抖音长批次常在数百条后要求 fresh cookies / 返回 412。
+            # 此时集中刷新一次 profile，再用新快照重试当前任务；不要让后面几百条
+            # 继续拿同一份过期 Cookie 逐条失败。
+            if not res.get("ok") and _cookie_auth_error(str(res.get("error") or "")):
+                ok_refresh, why = _refresh_platform_cookie(t.video_url)
+                if ok_refresh:
+                    time.sleep(1.2)
+                    _pace_platform(t.video_url)
+                    retry = _download_once()
+                    retry_note = why + "，当前任务已自动重试一次"
+                    res = retry
+                else:
+                    retry_note = f"检测到平台登录态/风控异常；自动刷新失败：{why}"
+
             with self._lock:
                 t.files = [{"name": f["name"], "path": f["path"], "size": f["size"]} for f in res.get("files", [])]
                 # 兜底说明（如「已自动改用 mweb 客户端，清晰度受限」）必须往上传，不许静默降级
-                t.note = str(res.get("note") or "")
+                base_note = str(res.get("note") or "")
+                t.note = "；".join(x for x in (base_note, retry_note) if x)
                 t.done = len(t.files)
                 t.total = max(t.total, t.done)
                 t.percent = 100.0 if res.get("ok") else t.percent

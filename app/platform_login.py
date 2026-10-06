@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -121,10 +122,47 @@ def _cookie_rows(path: Path) -> list[dict]:
             exp = 0
         rows.append({
             "domain": dom.lstrip(".").lower(), "path": cpath or "/",
+            "include_subdomains": str(_inc).upper() == "TRUE" or dom.startswith("."),
             "secure": str(secure).upper() == "TRUE", "expires": exp,
             "name": name, "value": value,
         })
     return rows
+
+
+def _write_cookie_rows_atomic(path: Path, rows: list[dict]) -> int:
+    """以 Netscape 格式原子写回 Cookie 行。"""
+    lines = ["# Netscape HTTP Cookie File", "# MediaDownloader merged refresh", ""]
+    n = 0
+    for r in rows or []:
+        dom = str(r.get("domain") or "").strip().lstrip(".").lower()
+        name = str(r.get("name") or "")
+        if not dom or not name:
+            continue
+        cpath = str(r.get("path") or "/")
+        secure = "TRUE" if r.get("secure") else "FALSE"
+        try:
+            exp = int(r.get("expires") or 0)
+        except (TypeError, ValueError):
+            exp = 0
+        include_subdomains = bool(r.get("include_subdomains"))
+        out_dom = ("." + dom) if include_subdomains else dom
+        lines.append("\t".join([
+            out_dom, "TRUE" if include_subdomains else "FALSE",
+            cpath, secure, str(exp), name, str(r.get("value") or "")
+        ]))
+        n += 1
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return 0
+    return n
 
 
 def _relevant(platform: str, rows: list[dict]) -> list[dict]:
@@ -408,8 +446,36 @@ def refresh_from_profile(platform: str) -> dict:
     # Import locally to avoid a module cycle at import time.
     from .login_browser import export_from_profile
 
-    result = export_from_profile(str(prof), headless=True)
+    # 刷新前先把当前主 Cookie 读进内存。后台浏览器有时只能拿到新的匿名/
+    # 设备 Cookie，却拿不到 sessionid 等认证 Cookie；这种情况下不能让刷新
+    # 把原有登录态直接覆盖掉，而应当“新鲜设备 Cookie + 旧认证 Cookie”合并。
+    old_rows = _cookie_rows(cookie_file(platform))
+    old_auth = _auth_rows(platform, _relevant(platform, old_rows))
+
+    result = export_from_profile(
+        str(prof),
+        headless=True,
+        warm_url=str(PLATFORMS[platform].get("login_url") or ""),
+    )
     now = int(time.time())
+
+    new_rows = _cookie_rows(cookie_file(platform))
+    new_auth = _auth_rows(platform, _relevant(platform, new_rows), now)
+    if old_auth and not new_auth and new_rows:
+        merged: dict[tuple[str, str, str], dict] = {}
+        for row in old_rows:
+            key = (str(row.get("domain") or ""), str(row.get("path") or "/"),
+                   str(row.get("name") or ""))
+            merged[key] = row
+        for row in new_rows:
+            key = (str(row.get("domain") or ""), str(row.get("path") or "/"),
+                   str(row.get("name") or ""))
+            merged[key] = row
+        n_merged = _write_cookie_rows_atomic(cookie_file(platform), list(merged.values()))
+        if n_merged:
+            result["count"] = n_merged
+            result["path"] = str(cookie_file(platform))
+            result["preserved_auth"] = True
     root = platform_root(platform)
     root.mkdir(parents=True, exist_ok=True)
 
