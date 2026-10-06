@@ -401,7 +401,7 @@ function buildImageCard(it, idx) {
   const links = document.createElement('div');
   links.className = 'card-links';
   const a1 = document.createElement('a');
-  a1.href = (!isVideo && it.url) ? proxyUrl(it.url, it.referer || it.origin_page || '') : it.url;
+  a1.href = it.url ? proxyUrl(it.url, it.referer || it.origin_page || '') : '#';
   a1.target = '_blank'; a1.rel = 'noopener';
   a1.textContent = '原图';
   a1.onclick = (e) => e.stopPropagation();
@@ -410,7 +410,7 @@ function buildImageCard(it, idx) {
     const a2 = document.createElement('a');
     a2.href = it.source_page; a2.target = '_blank'; a2.rel = 'noopener';
     a2.textContent = '来源页';
-    a2.onclick = (e) => e.stopPropagation();
+    a2.onclick = (e) => openExternalUrl(it.source_page, e);
     links.appendChild(a2);
   }
   body.appendChild(links);
@@ -883,14 +883,23 @@ function buildCrawlCard(it, idx) {
     img.referrerPolicy = 'no-referrer';
     img.decoding = 'async';
     img.alt = it.title || '';
-    img.src = proxyUrl(cover || it.url, coverReferer);
+    const biliCover = /^https?:\/\/[^/]*(?:hdslb|bilivideo)\.com\//i.test(cover || '');
+    // B站 CDN 封面本身可直接作为 <img> 加载。30张同时绕本地 /proxy
+    // 会把同步代理线程拖慢，表现成“整批没有缩略图”；B站改成直连优先，
+    // 失败时再回退代理。微博等需要 Cookie 的图床仍保持代理优先。
+    img.src = biliCover ? cover : proxyUrl(cover || it.url, coverReferer);
     img.onerror = function () {
+      if (biliCover && !this.dataset.proxyRetry && cover) {
+        this.dataset.proxyRetry = '1';
+        this.src = proxyUrl(cover, coverReferer);
+        return;
+      }
       if (!this.dataset.noRefRetry && cover) {
         this.dataset.noRefRetry = '1';
         this.src = proxyUrl(cover, '');
         return;
       }
-      if (!this.dataset.directRetry && /^https?:\/\//i.test(cover || '')) {
+      if (!this.dataset.directRetry && !biliCover && /^https?:\/\//i.test(cover || '')) {
         this.dataset.directRetry = '1';
         this.src = cover;
         return;
@@ -1275,7 +1284,15 @@ function renderVideoInfo(res) {
 
   $('vThumb').src = res.thumbnail ? proxyUrl(res.thumbnail, res.webpage_url) : '';
   $('vThumb').onerror = function () { this.style.visibility = 'hidden'; };
-  $('vPageLink').href = res.webpage_url || '#';
+  const pageLink = $('vPageLink');
+  pageLink.href = res.webpage_url || '#';
+  pageLink.onclick = (e) => {
+    if (res.webpage_url) openExternalUrl(res.webpage_url, e);
+    else {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
 
   // 清晰度下拉。两处刻意调整：
   //  1) 用 optgroup 分组 —— 原生 select 展开时列表会覆盖在选择框上，
@@ -1924,7 +1941,7 @@ function renderLibrary() {
       source.target = '_blank';
       source.rel = 'noopener';
       source.textContent = '来源页';
-      source.onclick = (e) => e.stopPropagation();
+      source.onclick = (e) => openExternalUrl(f.source_url, e);
       links.appendChild(source);
     }
 

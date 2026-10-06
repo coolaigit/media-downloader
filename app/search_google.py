@@ -286,6 +286,9 @@ def search_google(
             settle_ms=settle_ms,
             scroll_rounds=scroll_rounds,
             capture_types=("json",),
+            # 关键词搜图属于后台搜索任务，绝不能因为高级设置里开了
+            # browser_headed 就弹出可见浏览器窗口。
+            force_headless=True,
         )
     except Exception as e:  # noqa: BLE001
         return [], f"Google 渲染异常: {type(e).__name__}"

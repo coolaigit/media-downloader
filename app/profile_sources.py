@@ -1052,32 +1052,44 @@ def _bili_enrich(items: list[dict], cookie_file: str, on_note=None) -> list[dict
         m = re.search(r"/video/(BV[0-9A-Za-z]+)", page, re.I)
         if not m:
             return idx, None
-        try:
-            r = requests.get(
-                "https://api.bilibili.com/x/web-interface/view",
-                params={"bvid": m.group(1)}, headers=headers, cookies=cookies,
-                timeout=12,
-            )
-            data = (r.json().get("data") or {}) if r.ok else {}
-            if not isinstance(data, dict) or not data:
-                return idx, None
-            owner = data.get("owner") if isinstance(data.get("owner"), dict) else {}
-            cover = str(data.get("pic") or "")
-            if cover.startswith("http://"):
-                cover = "https://" + cover[len("http://"):]
-            return idx, {
-                "title": str(data.get("title") or "")[:150],
-                "cover": cover,
-                "duration": data.get("duration"),
-                "uploader": str(owner.get("name") or ""),
-                "page_url": f"https://www.bilibili.com/video/{data.get('bvid') or m.group(1)}",
-            }
-        except Exception:
-            return idx, None
+        for attempt in range(3):
+            try:
+                r = requests.get(
+                    "https://api.bilibili.com/x/web-interface/view",
+                    params={"bvid": m.group(1)}, headers=headers, cookies=cookies,
+                    timeout=12,
+                )
+                payload = r.json() if r.ok else {}
+                data = (payload.get("data") or {}) if isinstance(payload, dict) else {}
+                code = payload.get("code") if isinstance(payload, dict) else None
+                if isinstance(data, dict) and data:
+                    owner = data.get("owner") if isinstance(data.get("owner"), dict) else {}
+                    cover = str(data.get("pic") or "")
+                    if cover.startswith("http://"):
+                        cover = "https://" + cover[len("http://"):]
+                    return idx, {
+                        "title": str(data.get("title") or "")[:150],
+                        "cover": cover,
+                        "duration": data.get("duration"),
+                        "uploader": str(owner.get("name") or ""),
+                        "page_url": f"https://www.bilibili.com/video/{data.get('bvid') or m.group(1)}",
+                    }
+                # 412 / 429 / 频控类空响应做短退避；不要一次30条全判无封面。
+                if attempt < 2 and (r.status_code in {412, 429} or code not in (0, None)):
+                    time.sleep(0.45 * (attempt + 1))
+                    continue
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.35 * (attempt + 1))
+                    continue
+            break
+        return idx, None
 
     if on_note:
         on_note(f"已列出 {len(items)} 个 B站作品，正在并发补标题和缩略图…")
-    workers = min(16, max(1, len(items)))
+    # B站 view API 对瞬时并发较敏感。16路在部分空间页会整批返回空/频控，
+    # 结果就表现成“30条都有标题但没有缩略图”。限制为4路更稳。
+    workers = min(4, max(1, len(items)))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [ex.submit(work, pair) for pair in enumerate(items)]
         for f in as_completed(futures):

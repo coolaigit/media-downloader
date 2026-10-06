@@ -154,8 +154,9 @@ async def _render_async(
     capture_types: tuple[str, ...],
     user_agent: str,
     cookies: list[dict] | None = None,
-    on_progress,
-    should_cancel,
+    force_headless: bool = False,
+    on_progress=None,
+    should_cancel=None,
 ) -> list[RenderResult]:
     from playwright.async_api import async_playwright
 
@@ -200,7 +201,8 @@ async def _render_async(
             try:
                 pctx = await p.chromium.launch_persistent_context(
                     user_data_dir=prof_dir,
-                    headless=False if platform_key else not browser_profile.headed(),
+                    headless=(True if force_headless else
+                              (False if platform_key else not browser_profile.headed())),
                     viewport={"width": 1600, "height": 1000},
                     locale="zh-CN",
                     user_agent=user_agent or DEFAULT_UA,
@@ -417,6 +419,7 @@ def render_many(
     scroll_rounds: int = 2,
     capture_types: tuple[str, ...] = ("json",),
     user_agent: str = _UA,
+    force_headless: bool = False,
     on_progress=None,
     should_cancel=None,
 ) -> list[RenderResult]:
@@ -439,6 +442,7 @@ def render_many(
             capture_types=capture_types,
             user_agent=user_agent or DEFAULT_UA,
             cookies=cookie_store.playwright_cookies() or None,
+            force_headless=force_headless,
             on_progress=on_progress,
             should_cancel=should_cancel,
         ))
@@ -457,6 +461,7 @@ def render_page(
     scroll_rounds: int = 6,
     capture_types: tuple[str, ...] = ("json",),
     user_agent: str = _UA,
+    force_headless: bool = False,
     on_page=None,   # 兼容旧签名，async 实现下不再支持
 ) -> RenderResult:
     """渲染单个页面。"""
@@ -468,6 +473,7 @@ def render_page(
         scroll_rounds=scroll_rounds,
         capture_types=capture_types,
         user_agent=user_agent,
+        force_headless=force_headless,
     )
     return out[0] if out else RenderResult(url=url, error="未返回结果")
 

@@ -988,17 +988,36 @@ def api_open_url(payload: dict = Body(...)):
         raise HTTPException(400, "仅允许打开 http(s) 外部地址")
     if len(url) > 2000:
         raise HTTPException(400, "地址过长")
-    try:
-        if os.name == "nt":
-            os.startfile(url)  # type: ignore[attr-defined]
-            opened = True
-        else:
+    opened = False
+    method = ""
+    if os.name == "nt":
+        # Windows 桌面版优先直接走 ShellExecute。它与资源管理器“打开网页”
+        # 使用同一套系统关联，比 WebView2 的 target=_blank / window.open 稳定。
+        try:
+            import ctypes
+            rc = int(ctypes.windll.shell32.ShellExecuteW(
+                None, "open", url, None, None, 1
+            ))
+            opened = rc > 32
+            method = "ShellExecuteW" if opened else ""
+        except Exception:
+            opened = False
+        if not opened:
+            try:
+                os.startfile(url)  # type: ignore[attr-defined]
+                opened = True
+                method = "os.startfile"
+            except Exception:
+                opened = False
+    if not opened:
+        try:
             opened = bool(webbrowser.open_new_tab(url))
-    except Exception:
-        opened = bool(webbrowser.open_new_tab(url))
+            method = "webbrowser" if opened else ""
+        except Exception:
+            opened = False
     if not opened:
         raise HTTPException(500, "系统默认浏览器未能打开该地址")
-    return {"ok": True}
+    return {"ok": True, "method": method}
 
 
 # ---------- 文件访问与代理 ----------
