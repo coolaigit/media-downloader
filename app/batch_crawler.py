@@ -203,6 +203,69 @@ def _detect_wall(html: str) -> str | None:
     return None
 
 
+def _recover_with_browser_skill(url: str, wall: str, on_note=None) -> FetchResult | None:
+    """Use the connected real browser only after the normal renderer hit a verification wall."""
+    try:
+        from . import browser_skill
+    except Exception:
+        return None
+    if not browser_skill.available():
+        return None
+
+    session_id = ""
+    t0 = time.time()
+    try:
+        if on_note:
+            on_note("普通浏览器渲染遇到验证，正在切换 BrowserSkill 实际浏览器会话…")
+        opened = browser_skill.start_page(url)
+        session_id = str(opened.get("session_id") or "")
+        if not session_id:
+            return None
+
+        html = browser_skill.get_html(session_id)
+        current_wall = _detect_wall(html) if html else wall
+
+        if current_wall:
+            clicked = browser_skill.click_simple_verification(session_id)
+            if clicked:
+                if on_note:
+                    on_note(f"BrowserSkill 已点击「{clicked}」，正在确认页面…")
+                html = browser_skill.get_html(session_id)
+                current_wall = _detect_wall(html) if html else current_wall
+
+        if current_wall:
+            if on_note:
+                on_note("BrowserSkill 已打开验证窗口；如出现滑块/验证码，请在窗口中完成后继续。")
+            browser_skill.request_human_help(
+                session_id,
+                "当前抓取被网站验证拦截。请在这个浏览器窗口完成验证码、滑块或登录确认；"
+                "页面恢复正常内容后，在 BrowserSkill 提示中确认完成。",
+                timeout_seconds=180,
+            )
+            html = browser_skill.get_html(session_id)
+            current_wall = _detect_wall(html) if html else current_wall
+
+        if not html or current_wall:
+            return None
+
+        return FetchResult(
+            url=url,
+            final_url=str(opened.get("url") or url),
+            html=html,
+            json_texts=[],
+            method="browser-skill",
+            ok=True,
+            error="",
+            elapsed=time.time() - t0,
+            visible_text_len=_visible_text_len(html),
+        )
+    except Exception:
+        return None
+    finally:
+        if session_id:
+            browser_skill.stop(session_id)
+
+
 def _page_self_report(html: str) -> tuple[str, str]:
     """返回 (页面标题, 正文片段)，用于「抓到 0 条」时如实说明页面自己怎么说。
 
@@ -362,8 +425,12 @@ def fetch_page(
     if html:
         res.visible_text_len = _visible_text_len(html)
 
+    # A challenge page may contain plenty of visible text and therefore look rendered.
+    # Force the browser layer when the page itself says it is a verification wall.
+    http_wall = _detect_wall(html) if html else None
     need_render = allow_render and (
         force_render
+        or bool(http_wall)
         or not res.ok
         or _needs_render(html,
                          lambda: _count_meaningful_media(html, res.final_url or url),
@@ -394,6 +461,15 @@ def fetch_page(
         res.elapsed = time.time() - t0
         res.visible_text_len = _visible_text_len(rr.html)
         res.json_texts = [c.body for c in rr.captured if c.body]
+
+        # BrowserSkill is a last resort. It borrows the user's connected real
+        # browser only after Playwright has positively hit a verification wall.
+        wall = _detect_wall(rr.html)
+        if wall:
+            recovered = _recover_with_browser_skill(url, wall)
+            if recovered is not None:
+                recovered.elapsed += time.time() - t0
+                return recovered
         return res
 
     # 渲染失败：若 HTTP 至少拿到了内容，仍返回 HTTP 结果
