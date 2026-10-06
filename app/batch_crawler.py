@@ -1219,6 +1219,70 @@ def _expand_xhs_image_source(list_url: str, *, limit: int = 30, on_note=None) ->
     }, note
 
 
+def _expand_profile_image_source(
+    list_url: str,
+    *,
+    limit: int = 30,
+    on_note=None,
+) -> tuple[dict, str]:
+    """Return only author-owned image entries from a mature platform source."""
+    from . import profile_sources
+
+    platform = profile_sources.platform_for_url(list_url)
+    rows, note = profile_sources.list_author_items(
+        list_url, limit=limit, want_video=False, on_note=on_note)
+    items: list[MediaItem] = []
+    for r in rows:
+        if (r.get("kind_hint") or "").strip() != "image":
+            continue
+        direct = str(r.get("direct_url") or "").strip()
+        if not direct:
+            continue
+        page = str(r.get("page_url") or list_url).strip()
+        items.append(MediaItem(
+            url=direct,
+            kind="image",
+            source=f"builtin-profile-image:{platform}",
+            title=str(r.get("title") or ""),
+            thumbnail=direct,
+            referer=page,
+            origin_page=page,
+            width=r.get("width"),
+            height=r.get("height"),
+            is_thumb=False,
+            extra={
+                "site": r.get("site") or "",
+                "uploader": r.get("uploader") or "",
+            },
+        ))
+    items = dedupe(items)[:max(1, min(int(limit or 30), 2000))]
+    warnings: list[str] = []
+    if items:
+        warnings.append(
+            f"博主图片已通过平台作品源读取，共得到 {len(items)} 张；"
+            "没有使用整页扫图，因此不会混入推荐流、头像和站点 UI 图片。")
+    else:
+        warnings.append(note or "平台作品源没有返回该博主的图片。")
+        warnings.append(
+            "已停止普通网页扫图回退，避免把推荐流、头像或全站图片误当成该博主作品。")
+    return {
+        "items": [m.to_dict() for m in items],
+        "summary": summarize(items),
+        "pages": [{
+            "page": 1, "url": list_url, "method": f"builtin-profile-image:{platform}",
+            "html_bytes": 0, "media": len(items), "links": 0,
+            "elapsed": 0.0, "visible_text": 0,
+        }],
+        "detail_pages": {"total": 0, "ok": 0, "failed": 0, "urls": []},
+        "stats": {"list_pages": 1, "detail_pages": 0, "http_ok": 0,
+                  "render_used": 0, "variants_collapsed": 0, "elapsed": 0.0},
+        "warnings": warnings,
+        "list_url": list_url,
+        "renderer": renderer_status(),
+        "via": f"builtin-platform:{platform}-images",
+    }, note
+
+
 def _expand_via_platform_source(
     list_url: str,
     *,
@@ -1436,13 +1500,14 @@ def crawl_list(
     # 是前端调接口拿 JSON 再渲染的 —— 走网页抓取只能得到站点自身的 JS 资源，
     # 于是无论怎么下钻都是 0 条。判据只有「要视频 + 页面地址 + 通用工具说它是列表」，
     # 完全不含站点专用规则。命中就直接返回，不再走后面的网页抓取（省时且结果更全）。
-    # ---------- 0A. XHS author image pipeline ----------
-    # Generic page scanning mixes avatars/UI/recommendations into profile image results.
+    # ---------- 0A. Author image pipelines ----------
+    # Generic page scanning mixes avatars/UI/recommendations into social-profile images.
     _kinds = set(want_kinds or ())
     _path_low = (urlparse(list_url).path or "").lower()
-    if expand_listing and _kinds and _kinds <= {"image"} and "/user/profile/" in _path_low:
+    if expand_listing and _kinds and _kinds <= {"image"}:
         from . import profile_sources as _ps_img
-        if _ps_img.platform_for_url(list_url) == "xhs":
+        _img_platform = _ps_img.platform_for_url(list_url)
+        if _img_platform == "xhs" and "/user/profile/" in _path_low:
             _emit("list", 0, 1, "\u6b63\u5728\u8bfb\u53d6\u5c0f\u7ea2\u4e66\u4f5c\u8005\u4f5c\u54c1\u5217\u8868\u548c\u56fe\u6587\u7b14\u8bb0\u6b63\u6587\u56fe\u7247\u2026")
             xhs_exp, _xhs_note = _expand_xhs_image_source(
                 list_url, limit=max(1, min(int(max_items or 30) or 30, 2000)),
@@ -1451,6 +1516,15 @@ def crawl_list(
             xhs_exp["stats"]["elapsed"] = round(time.time() - t0, 2)
             _emit("merge", 0, 0, f"\u5df2\u63d0\u53d6 {len(xhs_exp.get('items') or [])} \u5f20\u6b63\u6587\u56fe\u7247")
             return xhs_exp
+        if _img_platform == "wb":
+            _emit("list", 0, 1, "正在读取微博博主作品流中的图片…")
+            img_exp, _img_note = _expand_profile_image_source(
+                list_url, limit=max(1, min(int(max_items or 30) or 30, 2000)),
+                on_note=lambda msg: _emit("detail", 0, 0, msg),
+            )
+            img_exp["stats"]["elapsed"] = round(time.time() - t0, 2)
+            _emit("merge", 0, 0, f"已提取 {len(img_exp.get('items') or [])} 张博主图片")
+            return img_exp
 
     if expand_listing and want_kinds and "video" in want_kinds:
         _emit("list", 0, 1, "正在判断这是不是一个视频列表 / 博主页…")

@@ -179,9 +179,10 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
     if cookie_file:
         argv += ["--cookies", cookie_file]
     argv += list(argv_extra or [])
-    # gallery-dl 1.32.x 对 Instagram 用户根页只返回 kind=6 的队列跳转
-    # （<user>/ -> <user>/posts/），DataJob 不会替我们继续展开。只对纯用户主页
-    # 补 /posts/，reel/p/tv/stories 等单条链接保持原样。
+    # gallery-dl --dump-json does not recursively execute Queue/Dispatch messages.
+    # Instagram user roots and Weibo user roots both dispatch to a concrete child
+    # extractor first, so normalize only the collection root URL to a concrete
+    # gallery-dl listing endpoint. This is gallery-dl routing, not DOM scraping.
     run_url = url
     try:
         pu = urlparse(url)
@@ -189,6 +190,15 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
         segs = [x for x in (pu.path or "").split("/") if x]
         if (host == "instagram.com" or host.endswith(".instagram.com")) and len(segs) == 1:
             run_url = f"{pu.scheme or 'https'}://{pu.netloc}/{segs[0]}/posts/"
+        elif (host == "weibo.com" or host.endswith(".weibo.com")):
+            q = (pu.query or "").lower()
+            is_user_root = (
+                (len(segs) == 1 and segs[0] not in {"detail", "status"})
+                or (len(segs) == 2 and segs[0].lower() in {"u", "n", "p", "profile"})
+            )
+            if is_user_root and "tabtype=" not in q:
+                sep = "&" if pu.query else "?"
+                run_url = url + sep + "tabtype=feed"
     except Exception:
         run_url = url
     argv.append(run_url)
@@ -979,8 +989,21 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
         res = {"ok": False, "items": [], "login_required": False, "error": ""}
 
     if not res.get("ok") and platform in {"ig", "pin", "bili", "wb", "tiktok"}:
-        res = gallery_dl_items(url, limit=limit, video_only=want_video,
+        gallery_limit = limit
+        # Weibo feed interleaves image and video posts. In image mode scan beyond
+        # the requested count, then keep only images so a run of video posts cannot
+        # starve the image result set.
+        if platform == "wb" and not want_video:
+            gallery_limit = max(int(limit or 30) * 3, 60)
+        res = gallery_dl_items(url, limit=gallery_limit, video_only=want_video,
                                retries=1, retry_wait=10, on_note=on_note)
+        if res.get("ok") and platform == "wb" and not want_video:
+            only_images = [
+                it for it in (res.get("items") or [])
+                if (it.get("kind_hint") or "") == "image"
+            ][:max(1, int(limit or 30))]
+            res = {**res, "ok": bool(only_images), "items": only_images,
+                   "error": "" if only_images else "微博主页作品源返回了媒体，但当前批次没有图片。"}
         attempts.append(("gallery-dl", res))
 
     if not res.get("ok") and platform not in {"xhs", "ks"}:
