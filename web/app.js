@@ -1958,6 +1958,50 @@ async function openDownloads() {
   } catch (e) { toast('打开失败：' + e.message, 'err'); }
 }
 
+// ---------- 并发状态 ----------
+// 用户设的是「最大并发」，实际同时跑几个由后端按平台风控状态实时调节。
+// 必须显示出来：不显示的话，用户看到下载莫名变慢只会以为程序坏了，
+// 而实际上很可能是程序察觉到 412 主动降速在保护账号。
+let concTimer = null;
+
+function concTitle(g) {
+  const base = `用户最大并发 ${g.ceiling}，当前实际并发 ${g.capacity}`;
+  if (g.state !== 'throttled') return `${g.platform_label}·${g.kind_label}：${base}，正常`;
+  const why = g.reason_label ? `，原因：${g.reason_label}` : '';
+  const tail = g.reason === 'rate_limit' || g.reason === 'verify'
+    ? `。连续稳定后会自动恢复到 ${g.ceiling}` : '';
+  return `${g.platform_label}·${g.kind_label}：${base}，已被自动降速${why}${tail}`;
+}
+
+async function pollConcurrency() {
+  let res;
+  try { res = await api('/api/concurrency'); } catch (e) { return; }
+  const bar = $('concBar');
+  if (!bar) return;
+  // 只报「被降过速」和「正在跑」的闸门；一堆空闲闸门没必要占地方
+  const gates = (res.gates || []).filter(
+    g => g.state === 'throttled' || (g.running || 0) > 0);
+  if (!gates.length) {
+    bar.hidden = true;
+    bar.innerHTML = '';
+    bar.title = '';
+    return;
+  }
+  const chips = gates.slice(0, 2).map(g => g.state === 'throttled'
+    ? `<span class="conc-item warn" title="${esc(concTitle(g))}">${esc(g.platform_label)}·${esc(g.kind_label)} ${g.capacity}/${g.ceiling} ${esc(g.reason_label || '限速')}</span>`
+    : `<span class="conc-item" title="${esc(concTitle(g))}">${esc(g.platform_label)}·${esc(g.kind_label)} ${g.capacity}/${g.ceiling}${g.running ? `（跑 ${g.running}）` : ''}</span>`);
+  if (gates.length > 2) chips.push(`<span class="conc-item">+${gates.length - 2}</span>`);
+  bar.hidden = false;
+  bar.innerHTML = chips.join('');
+  bar.title = gates.slice(0, 6).map(concTitle).join('\n');
+}
+
+function startConcPolling() {
+  if (concTimer) return;
+  pollConcurrency();
+  concTimer = setInterval(pollConcurrency, 5000);
+}
+
 // ---------- 任务面板 ----------
 // 哪些任务的「失败明细」处于展开状态。必须放在渲染函数外面：
 // pollTasks 每 1.2 秒重建整个列表，状态存在 DOM 里会被下一次刷新抹掉。
@@ -2539,6 +2583,7 @@ function bindEvents() {
     if (e.target.tagName === 'BUTTON') return;
     $('btnToggleDock').click();
   };
+  startConcPolling();
 
   // 关键词搜视频结果的勾选操作栏。
   // 「全选 / 反选」只作用于**当前筛出来的**条目 —— 这样「筛出 5 分钟以内的 → 全选 → 下载」

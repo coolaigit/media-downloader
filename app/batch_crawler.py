@@ -28,6 +28,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 import requests
 
 from .config import HEADERS, TIMEOUT
+from .concurrency import (GOVERNOR, KIND_LIST_CRAWL, OK, classify_error)
 from .page_scanner import BOT_WALL_MARKERS, http_get_with_fallback
 from .extractor import (
     IMAGE_EXTS,
@@ -507,53 +508,72 @@ def fetch_many(
     try:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        # concurrency*2 只是**上限**（原来硬封顶 16），实际同时打几个由
+        # kind=list_crawl 的闸门按平台实时调节：撞 412/429 立刻降，稳定后自己升回来。
+        gate = GOVERNOR.gate_for_url(str(urls[0] or ""), KIND_LIST_CRAWL,
+                                     ceiling=max(1, min(concurrency * 2, 16)))
+
         def _http(i: int, u: str) -> tuple[int, FetchResult]:
             if should_cancel and should_cancel():
                 return i, FetchResult(url=u, error="已取消")
-            t0 = time.time()
-            r = FetchResult(url=u)
-            # 与 fetch_page 一致：瞬时错误重试，避免间歇性 SSL/DNS/超时
-            # 导致整个详情页被丢弃（详情页失败会连带丢失其下全部媒体）
-            for attempt in range(1, 4):
-                if should_cancel and should_cancel():
-                    break
-                try:
-                    resp, ferrs = http_get_with_fallback(u, timeout=timeout)
-                    if resp is None:
-                        r.error = "；".join(ferrs) or "请求失败"
+            # 名额满了就在这里等（列表抓取是最容易撞频控的一环：几十个详情页
+            # 同时打过去，平台一眼就看出是脚本）。等的时候也要能响应取消。
+            if not gate.acquire(cancelled=lambda: bool(should_cancel and should_cancel())):
+                return i, FetchResult(url=u, error="已取消")
+            signal = None
+            try:
+                t0 = time.time()
+                r = FetchResult(url=u)
+                # 与 fetch_page 一致：瞬时错误重试，避免间歇性 SSL/DNS/超时
+                # 导致整个详情页被丢弃（详情页失败会连带丢失其下全部媒体）
+                for attempt in range(1, 4):
+                    if should_cancel and should_cancel():
+                        break
+                    try:
+                        resp, ferrs = http_get_with_fallback(u, timeout=timeout)
+                        if resp is None:
+                            r.error = "；".join(ferrs) or "请求失败"
+                            if attempt < 3:
+                                time.sleep(0.6 * attempt)
+                                continue
+                            break
+                        r.final_url = resp.url or u
+                        ct = (resp.headers.get("Content-Type") or "").lower()
+                        if resp.status_code >= 400:
+                            r.error = f"HTTP {resp.status_code}"
+                            if resp.status_code >= 500 or resp.status_code == 429:
+                                time.sleep(0.6 * attempt)
+                                continue
+                            break
+                        elif "html" in ct or "xml" in ct or not ct:
+                            from .page_scanner import decode_html
+                            r.html = decode_html(resp, 8 * 1024 * 1024)
+                            r.ok = True
+                            r.method = "http"
+                            r.visible_text_len = _visible_text_len(r.html)
+                            r.error = ""
+                            break
+                        else:
+                            r.error = f"非网页内容（{ct.split(';')[0]}）"
+                            break
+                    except requests.exceptions.RequestException as e:
+                        r.error = type(e).__name__
                         if attempt < 3:
                             time.sleep(0.6 * attempt)
                             continue
                         break
-                    r.final_url = resp.url or u
-                    ct = (resp.headers.get("Content-Type") or "").lower()
-                    if resp.status_code >= 400:
-                        r.error = f"HTTP {resp.status_code}"
-                        if resp.status_code >= 500 or resp.status_code == 429:
-                            time.sleep(0.6 * attempt)
-                            continue
-                        break
-                    elif "html" in ct or "xml" in ct or not ct:
-                        from .page_scanner import decode_html
-                        r.html = decode_html(resp, 8 * 1024 * 1024)
-                        r.ok = True
-                        r.method = "http"
-                        r.visible_text_len = _visible_text_len(r.html)
-                        r.error = ""
-                        break
-                    else:
-                        r.error = f"非网页内容（{ct.split(';')[0]}）"
-                        break
-                except requests.exceptions.RequestException as e:
-                    r.error = type(e).__name__
-                    if attempt < 3:
-                        time.sleep(0.6 * attempt)
-                        continue
-                    break
-            r.elapsed = time.time() - t0
-            return i, r
+                r.elapsed = time.time() - t0
+                if r.ok:
+                    signal = OK
+                elif r.error:
+                    # 只有平台明确的频控（412/429/验证页）才降速；
+                    # 普通 404/超时/代理抖动不该把整站抓取速度压下去
+                    signal = classify_error(r.error)
+                return i, r
+            finally:
+                gate.release(signal)
 
-        with ThreadPoolExecutor(max_workers=max(1, min(concurrency * 2, 16))) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, min(gate.ceiling, len(urls)))) as pool:
             futs = [pool.submit(_http, i, u) for i, u in enumerate(urls)]
             done = 0
             for fut in as_completed(futs):

@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import DATA_ROOT, DOWNLOADS_DIR
+from .concurrency import (GOVERNOR, KIND_STREAM_DOWNLOAD, KIND_VIDEO_DOWNLOAD,
+                          OK, classify_error)
 from .downloader import DownloadResult, batch_download_images, download_file
 from .stream_downloader import download_stream
 from .video_downloader import DownloadCancelled, download_video, request_cancel
@@ -74,7 +76,11 @@ class _AdjustableGate:
             self._cv.notify_all()
 
 
-_VIDEO_GATE = _AdjustableGate(3)
+# 注意：V3.0 起视频下载不再用这里的全局闸门，改为
+# GOVERNOR.gate_for_url(url, KIND_VIDEO_DOWNLOAD) —— 按平台独立升降速。
+# _AdjustableGate 保留是因为 test_video_search_offline.py 直接用它做离线验证，
+# 而且它的「容量可调」语义仍是 concurrency.AdaptiveGate 的基础。
+
 
 # 平台登录态刷新必须串行；同一时刻只允许一个线程操作浏览器 profile /
 # cookies.txt，避免大批量任务形成“惊群”并再次把 Cookie 文件写坏。
@@ -287,7 +293,7 @@ class TaskManager:
         self._cancel_flags: dict[str, threading.Event] = {}
 
         # 视频批量下载以前是“每个条目立即起一个线程”。勾 300 条时会瞬间
-        # 创建 300 个线程，即使 _VIDEO_GATE 最终只允许 3~16 个 yt-dlp 真正开跑，
+        # 创建 300 个线程，即使并发闸门最终只允许少数几个 yt-dlp 真正开跑，
         # 仍会先把本机线程/内存资源堆高。改成固定 16 个 daemon worker +
         # 队列：提交多少都只是排队，不再按条目数量创建线程。
         self._video_queue: queue.Queue[str] = queue.Queue()
@@ -435,11 +441,15 @@ class TaskManager:
         return task.id
 
     def set_video_concurrency(self, n: int) -> int:
-        """设置「同时跑几个 yt-dlp」，返回生效后的值。"""
-        return _VIDEO_GATE.set_capacity(n)
+        """设置「同时跑几个 yt-dlp」，返回生效后的值。
+
+        V3.0 起这是**上限**：各平台在这个上限内自行升降速
+        （抖音被 412 时会自己降到 1，稳定后再爬回来），不是一刀切定死。
+        """
+        return GOVERNOR.set_ceiling_for_kind(KIND_VIDEO_DOWNLOAD, n)
 
     def video_concurrency(self) -> int:
-        return _VIDEO_GATE.capacity
+        return GOVERNOR.ceiling_for_kind(KIND_VIDEO_DOWNLOAD)
 
     def submit_videos(
         self,
@@ -455,7 +465,7 @@ class TaskManager:
         """批量提交视频页面地址（关键词搜视频 / 列表里勾选的那些）。
 
         items = [{url, title}]。每条各自成为一个任务，但**同时真正开跑的个数**
-        由 concurrency 限制（见 _AdjustableGate）——
+        由并发闸门限制（见 concurrency.AdaptiveGate）——
         用户勾 20 条时不会变成 20 个 yt-dlp 抢带宽。
         """
         self.set_video_concurrency(concurrency)
@@ -742,10 +752,12 @@ class TaskManager:
         if not t:
             return
 
-        # 先过闸门：名额满了就停在 queued 状态等，别让几十个 yt-dlp 同时抢带宽
+        # 先过闸门：名额满了就停在 queued 状态等，别让几十个 yt-dlp 同时抢带宽。
+        # V3.0 起闸门按平台独立 —— 抖音触发风控只降抖音，B站/YouTube 该跑多快还跑多快。
+        gate = GOVERNOR.gate_for_url(t.video_url, KIND_VIDEO_DOWNLOAD)
         with self._lock:
-            t.current = f"排队中…（同时最多 {_VIDEO_GATE.capacity} 个视频）"
-        got = _VIDEO_GATE.acquire(cancelled=lambda: self._cancelled(task_id))
+            t.current = f"排队中…（同时最多 {gate.capacity} 个视频）"
+        got = gate.acquire(cancelled=lambda: self._cancelled(task_id))
         if not got:
             with self._lock:
                 t.status = ST_CANCELLED
@@ -755,7 +767,17 @@ class TaskManager:
         try:
             self._run_video_inner(task_id)
         finally:
-            _VIDEO_GATE.release()
+            # 把这次的结果反馈给闸门：成功攒恢复计数，412/验证码立刻降速
+            gate.release(self._signal_of(t))
+
+    @staticmethod
+    def _signal_of(t: Task) -> str | None:
+        """任务终态 → 并发信号。取消/被移除返回 None（纯释放，不参与升降速判断）。"""
+        if t.status == ST_COMPLETED:
+            return OK
+        if t.status == ST_FAILED:
+            return classify_error(t.error)
+        return None
 
     def _run_video_inner(self, task_id: str):
         t = self.get(task_id)
@@ -893,6 +915,9 @@ class TaskManager:
         ev = self._cancel_flags.get(task_id)
         n = max(1, len(t.urls))
         counters = {"ok": 0, "fail": 0, "skip": 0, "done": 0}
+        # 流下载并发同样交给闸门：workers 只是上限，实际同时跑几个由平台反馈决定。
+        _first = str((t.urls[0] or {}).get("url") or "") if t.urls else ""
+        gate = GOVERNOR.gate_for_url(_first, KIND_STREAM_DOWNLOAD, ceiling=workers)
         import queue as _queue
 
         q: _queue.Queue = _queue.Queue()
@@ -916,57 +941,69 @@ class TaskManager:
                 url = str(it.get("url") or "")
                 if not url:
                     continue
-                name = url.split("?")[0].rsplit("/", 1)[-1] or url
-                with self._lock:
-                    t.current = name[:60]
-
-                def on_progress(info: dict):
-                    with self._lock:
-                        t.speed = max(t.speed or 0.0, float(info.get("speed") or 0))
-
+                # 名额满了就在这里等 —— 等的时候也要能响应取消
+                if not gate.acquire(cancelled=lambda: bool(ev and ev.is_set())):
+                    continue
+                signal = None
                 try:
-                    res = download_stream(
-                        url,
-                        Path(t.output_dir),
-                        referer=str(it.get("referer") or ""),
-                        title=str(it.get("title") or ""),
-                        skip_existing=bool(t.options.get("skip_existing", True)),
-                        on_progress=on_progress,
-                        cancel_event=ev,
-                        prefer_quality=str(it.get("prefer_quality")
-                                           or t.options.get("prefer_quality", "") or ""),
-                    )
-                except Exception as e:  # noqa: BLE001
-                    res = DownloadResult(False, error=f"{type(e).__name__}: {e}", url=url)
+                    name = url.split("?")[0].rsplit("/", 1)[-1] or url
+                    with self._lock:
+                        t.current = name[:60]
 
-                with self._lock:
-                    if res.ok and res.skipped:
-                        counters["skip"] += 1
-                    elif res.ok:
-                        counters["ok"] += 1
-                        t.files.append({
-                            "name": Path(res.path).name,
-                            "path": res.path,
+                    def on_progress(info: dict):
+                        with self._lock:
+                            t.speed = max(t.speed or 0.0, float(info.get("speed") or 0))
+
+                    try:
+                        res = download_stream(
+                            url,
+                            Path(t.output_dir),
+                            referer=str(it.get("referer") or ""),
+                            title=str(it.get("title") or ""),
+                            skip_existing=bool(t.options.get("skip_existing", True)),
+                            on_progress=on_progress,
+                            cancel_event=ev,
+                            prefer_quality=str(it.get("prefer_quality")
+                                               or t.options.get("prefer_quality", "") or ""),
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        res = DownloadResult(False, error=f"{type(e).__name__}: {e}", url=url)
+
+                    if res.ok:
+                        signal = OK
+                    elif str(res.error or "") != "已取消":
+                        signal = classify_error(res.error)
+
+                    with self._lock:
+                        if res.ok and res.skipped:
+                            counters["skip"] += 1
+                        elif res.ok:
+                            counters["ok"] += 1
+                            t.files.append({
+                                "name": Path(res.path).name,
+                                "path": res.path,
+                                "size": res.size,
+                            })
+                        elif res.error == "已取消":
+                            pass          # 取消导致的未完成不计入失败
+                        else:
+                            counters["fail"] += 1
+                        counters["done"] += 1
+                        t.items.append({
+                            "index": i,
+                            "url": url,
+                            "ok": res.ok,
+                            "skipped": res.skipped,
+                            "name": Path(res.path).name if res.path else "",
                             "size": res.size,
+                            "error": res.error,
                         })
-                    elif res.error == "已取消":
-                        pass          # 取消导致的未完成不计入失败
-                    else:
-                        counters["fail"] += 1
-                    counters["done"] += 1
-                    t.items.append({
-                        "index": i,
-                        "url": url,
-                        "ok": res.ok,
-                        "skipped": res.skipped,
-                        "name": Path(res.path).name if res.path else "",
-                        "size": res.size,
-                        "error": res.error,
-                    })
-                    _bump()
+                        _bump()
+                finally:
+                    gate.release(signal)
 
         threads = [threading.Thread(target=_worker, daemon=True)
-                   for _ in range(max(1, min(workers, len(t.urls) or 1)))]
+                   for _ in range(max(1, min(gate.ceiling, len(t.urls) or 1)))]
         for th in threads:
             th.start()
         for th in threads:

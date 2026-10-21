@@ -19,6 +19,8 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 from .config import RESOURCE_ROOT
+from .concurrency import (GOVERNOR, KIND_METADATA, NETWORK, OK, RATE_LIMIT,
+                          classify_error)
 from . import platform_login, subproc
 
 PLATFORM_NAMES = {k: v["name"] for k, v in platform_login.PLATFORMS.items()}
@@ -1052,44 +1054,61 @@ def _bili_enrich(items: list[dict], cookie_file: str, on_note=None) -> list[dict
         m = re.search(r"/video/(BV[0-9A-Za-z]+)", page, re.I)
         if not m:
             return idx, None
-        for attempt in range(3):
-            try:
-                r = requests.get(
-                    "https://api.bilibili.com/x/web-interface/view",
-                    params={"bvid": m.group(1)}, headers=headers, cookies=cookies,
-                    timeout=12,
-                )
-                payload = r.json() if r.ok else {}
-                data = (payload.get("data") or {}) if isinstance(payload, dict) else {}
-                code = payload.get("code") if isinstance(payload, dict) else None
-                if isinstance(data, dict) and data:
-                    owner = data.get("owner") if isinstance(data.get("owner"), dict) else {}
-                    cover = str(data.get("pic") or "")
-                    if cover.startswith("http://"):
-                        cover = "https://" + cover[len("http://"):]
-                    return idx, {
-                        "title": str(data.get("title") or "")[:150],
-                        "cover": cover,
-                        "duration": data.get("duration"),
-                        "uploader": str(owner.get("name") or ""),
-                        "page_url": f"https://www.bilibili.com/video/{data.get('bvid') or m.group(1)}",
-                    }
-                # 412 / 429 / 频控类空响应做短退避；不要一次30条全判无封面。
-                if attempt < 2 and (r.status_code in {412, 429} or code not in (0, None)):
-                    time.sleep(0.45 * (attempt + 1))
-                    continue
-            except Exception:
-                if attempt < 2:
-                    time.sleep(0.35 * (attempt + 1))
-                    continue
-            break
-        return idx, None
+        # 真正同时跑几个由闸门决定：B站 view API 对瞬时并发敏感，
+        # bili/metadata 闸门保守起步 4 路，稳定后自己升到用户设的上限。
+        # 线程池按上限开，多余的 worker 会停在这里等名额，不会去撞 API。
+        if not gate.acquire():
+            return idx, None
+        signal = NETWORK
+        result = None
+        try:
+            for attempt in range(3):
+                try:
+                    r = requests.get(
+                        "https://api.bilibili.com/x/web-interface/view",
+                        params={"bvid": m.group(1)}, headers=headers, cookies=cookies,
+                        timeout=12,
+                    )
+                    payload = r.json() if r.ok else {}
+                    data = (payload.get("data") or {}) if isinstance(payload, dict) else {}
+                    code = payload.get("code") if isinstance(payload, dict) else None
+                    if isinstance(data, dict) and data:
+                        owner = data.get("owner") if isinstance(data.get("owner"), dict) else {}
+                        cover = str(data.get("pic") or "")
+                        if cover.startswith("http://"):
+                            cover = "https://" + cover[len("http://"):]
+                        result = {
+                            "title": str(data.get("title") or "")[:150],
+                            "cover": cover,
+                            "duration": data.get("duration"),
+                            "uploader": str(owner.get("name") or ""),
+                            "page_url": f"https://www.bilibili.com/video/{data.get('bvid') or m.group(1)}",
+                        }
+                        signal = OK
+                        break
+                    # 412 / 429 / -412 是明确的频控；其它空响应只当普通失败，
+                    # 不能让一次偶发空包把并发永久压下去。
+                    if r.status_code in {412, 429} or code == -412:
+                        signal = RATE_LIMIT
+                    if attempt < 2 and (r.status_code in {412, 429} or code not in (0, None)):
+                        time.sleep(0.45 * (attempt + 1))
+                        continue
+                except Exception as e:  # noqa: BLE001
+                    signal = classify_error(str(e))
+                    if attempt < 2:
+                        time.sleep(0.35 * (attempt + 1))
+                        continue
+                break
+            return idx, result
+        finally:
+            gate.release(signal)
 
     if on_note:
         on_note(f"已列出 {len(items)} 个 B站作品，正在并发补标题和缩略图…")
-    # B站 view API 对瞬时并发较敏感。16路在部分空间页会整批返回空/频控，
-    # 结果就表现成“30条都有标题但没有缩略图”。限制为4路更稳。
-    workers = min(4, max(1, len(items)))
+    # V2.5 在这里硬限 4 路（16 路会整批返回空 → 「30 条都有标题但没缩略图」）。
+    # V3.0 保留这个保护，但改成「起步 4 路 + 稳定后自动升」，不再永久卡在 4。
+    gate = GOVERNOR.gate("bili", KIND_METADATA)
+    workers = max(1, min(gate.ceiling, len(items)))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [ex.submit(work, pair) for pair in enumerate(items)]
         for f in as_completed(futures):

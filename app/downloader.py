@@ -529,33 +529,58 @@ def batch_download_images(
                 pass
         return False
 
+    # 并发不再是「开 max_workers 个线程就同时跑 max_workers 个请求」：
+    # max_workers 是用户设的**上限**，真正同时跑几个由闸门按平台实时调节
+    # （平台返回 412/429 时自动减半，稳定后再爬回来）。
+    # 线程池仍按上限开，多余的 worker 会停在 acquire 上等名额 ——
+    # 不重建池、不打断在途请求，也不会有半截文件。
+    from .concurrency import GOVERNOR, KIND_IMAGE_DOWNLOAD, OK, classify_error
+    _first_url = str((items[0] or {}).get("url") or "") if items else ""
+    gate = GOVERNOR.gate_for_url(_first_url, KIND_IMAGE_DOWNLOAD, ceiling=max_workers)
+
     def _work(i: int, it: dict) -> tuple[int, DownloadResult]:
         # 提交后可能仍在队列中等待，开跑前再查一次取消，避免做无用功
         if _is_cancelled():
             return i, DownloadResult(False, error="已取消", url=it.get("url", ""))
 
-        def _cb(info):
-            if on_progress:
-                on_progress(i, info)
+        # 等名额期间被取消要能立刻退出，否则用户点了取消还得等几百张排完
+        if not gate.acquire(cancelled=_is_cancelled):
+            return i, DownloadResult(False, error="已取消", url=it.get("url", ""))
 
-        r = download_file(
-            it.get("url", ""),
-            output_dir,
-            referer=it.get("referer", ""),
-            title=it.get("title", ""),
-            filename=it.get("filename", ""),
-            skip_existing=skip_existing,
-            session=sess,
-            on_progress=_cb,
-            alternates=it.get("alternates") or None,
-            prefer_quality=it.get("prefer_quality") or prefer_quality,
-        )
-        return i, r
+        signal = None
+        try:
+            def _cb(info):
+                if on_progress:
+                    on_progress(i, info)
+
+            r = download_file(
+                it.get("url", ""),
+                output_dir,
+                referer=it.get("referer", ""),
+                title=it.get("title", ""),
+                filename=it.get("filename", ""),
+                skip_existing=skip_existing,
+                session=sess,
+                on_progress=_cb,
+                alternates=it.get("alternates") or None,
+                prefer_quality=it.get("prefer_quality") or prefer_quality,
+            )
+            if r.ok:
+                signal = OK
+            elif str(r.error or "") != "已取消":
+                signal = classify_error(r.error)
+            return i, r
+        except BaseException:  # noqa: BLE001  异常照常往上抛，但名额必须还
+            signal = "network"
+            raise
+        finally:
+            gate.release(signal)
 
     ok = fail = skipped = 0
     valid = [(i, it) for i, it in enumerate(items) if it.get("url")]
+    workers = max(1, min(gate.ceiling, len(valid) or 1))
     try:
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             futs = []
             for i, it in valid:
                 if _is_cancelled():

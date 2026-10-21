@@ -465,6 +465,14 @@ th { color: var(--txt-dim); font-weight: 500; position: sticky; top: 0; backgrou
 .task-sub { font-size: 11.5px; color: var(--txt-dim); margin-top: 4px; display: flex; gap: 10px; flex-wrap: wrap; }
 .task-err { color: var(--err); font-size: 12px; margin-top: 4px; word-break: break-all; }
 .task-files { font-size: 11.5px; color: var(--txt-dim); margin-top: 4px; }
+/* 并发状态条：收起任务面板时也要看得见（放在 head 里） */
+.conc-bar { display: flex; gap: 6px; align-items: center; overflow: hidden; max-width: 60%; }
+.conc-item {
+  font-size: 11.5px; color: var(--txt-dim); white-space: nowrap;
+  padding: 1px 7px; border-radius: 10px; background: var(--card-hi);
+  border: 1px solid var(--line);
+}
+.conc-item.warn { color: var(--warn); border-color: var(--warn-border); background: var(--warn-bg); }
 /* 失败明细：哪几条挂了、各自什么原因。默认收起，展开后可滚动。 */
 .task-fails { margin-top: 6px; }
 .fail-head { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }

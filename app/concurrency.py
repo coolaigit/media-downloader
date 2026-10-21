@@ -389,10 +389,21 @@ class ConcurrencyGovernor:
 
     def snapshot(self) -> dict:
         with self._lock:
-            items = [g.snapshot() for g in self._gates.values()]
+            pairs = list(self._gates.items())
+        items = []
+        for (plat, kind), g in pairs:
+            row = g.snapshot()
+            # 带上中文标签，前端不用自己维护「dy → 抖音」的映射表
+            row.update({
+                "platform": plat,
+                "kind": kind,
+                "platform_label": _platform_label(plat),
+                "kind_label": KIND_LABEL.get(kind, kind),
+            })
+            items.append(row)
         # 只把「正在用」或「被降过速」的排前面，UI 上不用翻一堆空闸门
         items.sort(key=lambda x: (0 if x["running"] or x["waiting"] else 1,
-                                  x["state"] != "healthy", x["name"]))
+                                  x["state"] != "throttled", x["name"]))
         return {
             "gates": items,
             "throttled": [x for x in items if x["state"] == "throttled"],
@@ -411,6 +422,18 @@ def _platform_of(url: str) -> str:
         return platform_login.platform_for_url(url) or "other"
     except Exception:  # noqa: BLE001
         return "other"
+
+
+def _platform_label(platform: str) -> str:
+    """平台中文名（给 UI 显示用）。取不到就退回内部代号，不编造名字。"""
+    if platform == "other":
+        return "其它站点"
+    try:
+        from . import platform_login
+        info = platform_login.PLATFORMS.get(platform) or {}
+        return str(info.get("name") or platform)
+    except Exception:  # noqa: BLE001
+        return platform
 
 
 GOVERNOR = ConcurrencyGovernor()

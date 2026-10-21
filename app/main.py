@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import DATA_ROOT, DOWNLOADS_DIR, HEADERS, ROOT, WEB_DIR, ffmpeg_version, find_ffmpeg, find_js_runtime
+from .concurrency import GOVERNOR
 from .image_search import FILTER_OPTIONS, search_images
 from .page_scanner import resolve_stream
 from .stream_downloader import stream_supported
@@ -889,12 +890,13 @@ def api_download_videos(req: DownloadVideosReq):
     # silently lost SESSDATA/DedeUserID and hit anti-bot/412.
     batch_concurrency = req.concurrency
     if len(batch_platforms) == 1:
-        only_platform = next(iter(batch_platforms))
         batch_ck_file, batch_ck_browser = _cookie_args_for_url(items[0]["url"], st)
-        # 抖音几百条长队列对连续解析非常敏感。超过 100 条时最多 2 路，
-        # 配合任务层 Cookie 快照/节流，避免数百条后集中触发 fresh-cookie/412。
-        if only_platform == "dy" and len(items) >= 100:
-            batch_concurrency = min(batch_concurrency, 2)
+        # 这里原本有一条 V2.5 的硬规则：抖音 ≥100 条时 max_workers 砍到 2。
+        # 它确实避免了数百条后集中触发 fresh-cookie/412，代价是**永远只有 2 路**，
+        # 400 条要跑很久，而且再也不会自己恢复。
+        # V3.0 改为交给并发治理器：抖音 video_download 闸门本来就保守起步（2 路），
+        # 真撞上 412 会立刻继续降，连续稳定成功后再逐级升回用户设的上限。
+        # 既保留了「别一上来就冲」的保护，又不会永久卡在 2 路。
     tids = manager.submit_videos(
         items,
         output_subdir=req.subdir or st.get("downloads_subdir_videos", "videos"),
@@ -908,6 +910,17 @@ def api_download_videos(req: DownloadVideosReq):
     return {"count": len(tids), "task_ids": tids,
             "concurrency": manager.video_concurrency(),
             "ffmpeg_available": ffmpeg_available()}
+
+
+@app.get("/api/concurrency")
+def api_concurrency():
+    """并发治理状态：每个「平台 × 任务类型」闸门的上限 / 当前 / 状态 / 原因。
+
+    前端拿它显示「用户最大并发 8，当前 2，平台限流，原因 HTTP 412，
+    连续稳定后自动恢复」—— 用户必须知道程序为什么主动降速，
+    否则看到下载变慢只会以为程序坏了。
+    """
+    return GOVERNOR.snapshot()
 
 
 @app.get("/api/tasks")
