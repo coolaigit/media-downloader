@@ -48,7 +48,7 @@ V2.5 Final → V3.0 工作副本 → 开发 → 自动测试 → 真实平台测
 | 验收 | 模拟 412 → 目标平台降低、其它平台不变；连续成功 → 逐级恢复；UI 数字与实测并发一致 |
 | 风险 | 降速过度变性能回归；线程池 worker 数不能动态改（需用「固定 worker + 可变名额」实现） |
 
-## Phase 3：内置 Playwright Chromium
+## Phase 3：内置 Playwright Chromium　✅ 源码 + frozen 已验证 2026-10-21（`337ffda`）
 
 | 项 | 内容 |
 |---|---|

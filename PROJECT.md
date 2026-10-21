@@ -59,7 +59,7 @@ web/
 
 **实测**（本地 412 服务）：8 → 4 → 2 → 1 自动降；风控解除后 8 次成功一轮，1 → 2 → 4 → 8 自动恢复。
 
-## 4. 下载失败明细现状（Phase 1.5 的改造对象）
+## 4. 下载失败明细（V3.0 Phase 1.5 已完成）
 
 - 后端**已记录**每项明细：图片链路 `task_manager.py:584`、流媒体链路 `task_manager.py:856`，
   字段 `{index, url, ok, skipped, name, size, error}`。
@@ -109,7 +109,38 @@ Bing / DuckDuckGo / Google + SafeSearch / 分辨率 / 大小 / 格式 / 颜色 /
 - 只有真需要人来时才显示：验证码、滑块、登录失效、BrowserSkill 请求协助、平台明确要求。
 - BrowserSkill 只是兜底，**不能成为普通抓取的必需链路**。
 
-## 7. 本机环境
+## 7. 浏览器内核（V3.0 Phase 3）
+
+**V2.5**：复用用户电脑上的 Chrome / Edge。用户只装 360 / QQ 浏览器，或者一个都没有时，
+所有需要 JS 渲染的站点直接不可用 —— 而且「我这能抓、他那不能抓」这种问题只有换台机器才复现。
+
+**V3.0**：安装包自带 Playwright 官方 Chromium。
+
+| 优先级 | 来源 | 判定 |
+|---|---|---|
+| 1 | `browsers/chromium-*/chrome-win64/chrome.exe` | `browser_runtime.pick()["kind"] == "bundled"` |
+| 2 | 系统 Chrome | `kind == "system"`，`channel="chrome"` |
+| 3 | 系统 Edge | `kind == "system"`，`channel="msedge"` |
+| 4 | 都没有 | `kind == "none"` + 一段能照做的中文提示 |
+
+**只带完整 Chromium，不带 `chromium_headless_shell`**（省 272 MB）。
+实测四种启动方式（headless / headed / 指定 exe / persistent context）全部可用，
+指定 `executable_path` 反而更快（1.4s vs 2.8s）。
+
+⚠️ **代价**：没有 headless shell 之后，`chromium.launch(headless=True)` 不带路径会直接报
+`Executable doesn't exist`。所以只要包内有 Chromium，**必须**传 `executable_path`——
+统一走 `browser_runtime.launch_kwargs()`，不要在调用点自己拼 channel。
+
+`browsers/` 不入库（`.gitignore`）。新机器/新 clone 要补下载：
+
+```bat
+set PLAYWRIGHT_BROWSERS_PATH=%CD%\browsers
+python -m playwright install chromium
+:: 装完删掉这三样可省 275MB，程序会用完整内核跑 headless
+rmdir /s /q browsers\chromium_headless_shell-*  browsers\ffmpeg-*  browsers\winldd-*
+```
+
+## 8. 本机环境
 
 | 项 | 值 |
 |---|---|
@@ -117,6 +148,6 @@ Bing / DuckDuckGo / Google + SafeSearch / 分辨率 / 大小 / 格式 / 颜色 /
 | 缺失可选依赖 | `pywebview`、`pystray` 未装在 Python314（只影响桌面壳模式，Web 模式可跑） |
 | Inno Setup | `C:\Program Files (x86)\Inno Setup 6\ISCC.exe` |
 | bsk（外部） | `C:\Users\admin\.local\bin\bsk.exe` v0.3.2, 15 MB |
-| Playwright 浏览器 | `ms-playwright` 里**只有 marker 文件，没有 Chromium** |
+| Playwright 浏览器 | **V3.0 起自带**：`browsers/chromium-1234/`（约 430 MB，Chromium 151）。系统 Chrome/Edge 只作兜底 |
 | 系统浏览器 | Chrome + Edge 都在（所以 V2.5 才能靠系统浏览器跑） |
 | 服务启动 | `C:\Python314\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8848` |
