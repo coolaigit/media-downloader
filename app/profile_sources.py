@@ -1257,6 +1257,25 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                         "error": f"抖音登录 profile 正在被占用或无法打开：{e}"}
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
+            def _put(card: dict) -> None:
+                """合并同一条作品的两种来源：网络 JSON（通常带封面）和 DOM（可能还没懒加载出封面）。
+
+                ⚠️ 这里**不能**用 setdefault 先到先得。
+                实测（limit=100）滚动时 DOM 往往先扫到卡片、但 img 还是空的，
+                一旦占了位，后面 JSON 里的封面就再也补不进来 —— 结果 81 条全没封面，
+                而 30 条的小批量因为时序不同反而 30/30。
+                规则：缺的用新来的补；已有没有封面的好数据不被空值覆盖。
+                """
+                key = card["page_url"]
+                old = found.get(key)
+                if old is None:
+                    found[key] = card
+                    return
+                if not old.get("thumbnail") and card.get("thumbnail"):
+                    old["thumbnail"] = card["thumbnail"]
+                if not old.get("title") and card.get("title"):
+                    old["title"] = card["title"]
+
             def add_aweme(obj):
                 if not isinstance(obj, dict):
                     return
@@ -1273,7 +1292,7 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                     )
                     if card:
                         card["uploader"] = str(author.get("nickname") or "")
-                        found.setdefault(card["page_url"], card)
+                        _put(card)
                 for v in obj.values():
                     if isinstance(v, dict):
                         add_aweme(v)
@@ -1308,11 +1327,41 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                 try:
                     rows = page.eval_on_selector_all(
                         'a[href*="/video/"]',
-                        """els => els.map(a => ({
-                            href: a.href,
-                            title: (a.innerText || a.getAttribute('aria-label') || '').trim(),
-                            img: (a.querySelector('img') && a.querySelector('img').src) || ''
-                        }))""",
+                        """els => els.map(a => {
+                            const im = a.querySelector('img') || a.querySelector('[style*="background-image"]');
+                            let src = '';
+                            if (im) {
+                                src = im.src || '';
+                                if (!/^https?:/i.test(src)) {
+                                    src = im.getAttribute('data-src') || im.getAttribute('data-original') || '';
+                                }
+                                if (!src) {
+                                    const ss = im.getAttribute('srcset') || im.getAttribute('data-srcset') || '';
+                                    if (ss) {
+                                        const first = ss.split(',')[0].trim();
+                                        const sp = first.indexOf(' ');
+                                        src = sp > 0 ? first.slice(0, sp) : first;
+                                    }
+                                }
+                                if (!src) {
+                                    // 纯字符串解析，不用正则：这段 JS 是嵌在 Python 三引号里的，
+                                    // 写正则要过两层转义，实测很容易变成 \\( 而静默匹配不上。
+                                    const st = im.getAttribute('style') || '';
+                                    const k = st.indexOf('url(');
+                                    if (k >= 0) {
+                                        let v = st.slice(k + 4).trim();
+                                        while (v && (v.charAt(0) === "'" || v.charAt(0) === '"')) v = v.slice(1);
+                                        while (v && (v.slice(-1) === ')' || v.slice(-1) === "'" || v.slice(-1) === '"')) v = v.slice(0, -1);
+                                        src = v.trim();
+                                    }
+                                }
+                            }
+                            return {
+                                href: a.href,
+                                title: (a.innerText || a.getAttribute('aria-label') || '').trim(),
+                                img: /^https?:/i.test(src) ? src : ''
+                            };
+                        })""",
                     )
                 except Exception:
                     rows = []
@@ -1321,7 +1370,7 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                         (row or {}).get("href"), (row or {}).get("title"), (row or {}).get("img")
                     )
                     if card:
-                        found.setdefault(card["page_url"], card)
+                        _put(card)
                 if len(found) >= target:
                     break
 
@@ -1465,8 +1514,35 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
             on_note("BrowserSkill 当前已是正常作品页，无需人工验证码，继续下拉读取…")
         expr = """Array.from(document.links)
           .filter(a => a.href && a.href.includes('/video/'))
-          .map(a => ({href:a.href,title:(a.innerText||'').trim(),
-                      img:(a.querySelector('img')&&a.querySelector('img').src)||''}))"""
+          .map(a => {
+            const im = a.querySelector('img') || a.querySelector('[style*="background-image"]');
+            let src = '';
+            if (im) {
+              src = im.src || '';
+              if (!/^https?:/i.test(src)) src = im.getAttribute('data-src') || im.getAttribute('data-original') || '';
+              if (!src) {
+                const ss = im.getAttribute('srcset') || im.getAttribute('data-srcset') || '';
+                if (ss) {
+                  const first = ss.split(',')[0].trim();
+                  const sp = first.indexOf(' ');
+                  src = sp > 0 ? first.slice(0, sp) : first;
+                }
+              }
+              if (!src) {
+                // 纯字符串解析（同 douyin_author_items 的理由：避免两层转义）
+                const st = im.getAttribute('style') || '';
+                const k = st.indexOf('url(');
+                if (k >= 0) {
+                  let v = st.slice(k + 4).trim();
+                  while (v && (v.charAt(0) === "'" || v.charAt(0) === '"')) v = v.slice(1);
+                  while (v && (v.slice(-1) === ')' || v.slice(-1) === "'" || v.slice(-1) === '"')) v = v.slice(0, -1);
+                  src = v.trim();
+                }
+              }
+            }
+            return {href:a.href, title:(a.innerText||'').trim(),
+                    img:/^https?:/i.test(src) ? src : ''};
+          })"""
         target = max(1, min(int(limit or 30), 2000))
         stale = 0
         for _ in range(min(160, max(16, (target // 8 + 1) * 8))):
@@ -1476,7 +1552,12 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
                 card = _douyin_card((row or {}).get("href"), (row or {}).get("title"),
                                      (row or {}).get("img"))
                 if card:
-                    found.setdefault(card["page_url"], card)
+                    # 同样是「缺封面就补」，不能用 setdefault 让空封面占位
+                    old = found.get(card["page_url"])
+                    if old is None:
+                        found[card["page_url"]] = card
+                    elif not old.get("thumbnail") and card.get("thumbnail"):
+                        old["thumbnail"] = card["thumbnail"]
             if len(found) >= target:
                 break
             browser_skill.evaluate(
