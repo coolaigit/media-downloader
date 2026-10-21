@@ -1,0 +1,1 @@
+var e=256*1024*1024,t=1024*1024*1024,n=`bsk/video`,r=`bsk/video-host`,i=`bsk/video-host-event`;function a(e){return typeof e==`string`&&/^vid_[a-f0-9]{32}$/.test(e)}export{n as a,e as i,i as n,a as o,r,t};

@@ -205,7 +205,12 @@ def _detect_wall(html: str) -> str | None:
 
 
 def _recover_with_browser_skill(url: str, wall: str, on_note=None) -> FetchResult | None:
-    """Use the connected real browser only after the normal renderer hit a verification wall."""
+    """普通渲染撞上验证墙之后，才升级到 BrowserSkill 的可见会话。
+
+    V3.0：bsk、浏览器扩展、内核全部随包（见 app/browser_skill.py），
+    所以用户机器上一个浏览器都没装、也从没装过扩展，这条路照样能走。
+    仍然只在「已经检测到验证墙」时才进来 —— 普通抓取不经过这里。
+    """
     try:
         from . import browser_skill
     except Exception:
@@ -217,8 +222,16 @@ def _recover_with_browser_skill(url: str, wall: str, on_note=None) -> FetchResul
     t0 = time.time()
     try:
         if on_note:
-            on_note("普通浏览器渲染遇到验证，正在切换 BrowserSkill 实际浏览器会话…")
-        opened = browser_skill.start_page(url)
+            on_note("普通浏览器渲染遇到验证，正在准备可见验证窗口…")
+        # daemon 没跑就拉起来；没有可用浏览器就用内置 Chromium + 内置扩展起一个
+        ready = browser_skill.ensure_ready(headless=False, timeout=40)
+        if not ready.get("ok"):
+            if on_note:
+                on_note(f"验证窗口准备失败：{ready.get('error') or '未知原因'}")
+            return None
+        if on_note:
+            on_note("验证窗口已就绪，正在打开页面…")
+        opened = browser_skill.start_page(url, browser_id=str(ready.get("instance_id") or ""))
         session_id = str(opened.get("session_id") or "")
         if not session_id:
             return None

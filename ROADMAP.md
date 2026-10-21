@@ -58,7 +58,7 @@ V2.5 Final → V3.0 工作副本 → 开发 → 自动测试 → 真实平台测
 | 验收 | 干净机（无 Chrome/Edge）装包后能完成一次需要渲染的抓取 |
 | 风险 | 包体积 +150MB 起；PyInstaller 路径解析；license 记录 |
 
-## Phase 4：BrowserSkill 内置
+## Phase 4：BrowserSkill 内置　✅ 源码 + frozen 已验证 2026-10-21
 
 | 项 | 内容 |
 |---|---|

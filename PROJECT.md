@@ -140,7 +140,35 @@ python -m playwright install chromium
 rmdir /s /q browsers\chromium_headless_shell-*  browsers\ffmpeg-*  browsers\winldd-*
 ```
 
-## 8. 本机环境
+## 8. BrowserSkill（V3.0 Phase 4）
+
+**定位**：只在「撞上验证码 / 滑块 / 安全验证」时升级，**绝不进普通抓取链路**。
+日常抓取走 HTTP 或内置 Chromium（headless），全程无窗口。
+
+**三件资产全部随包**：
+
+| 资产 | 位置 | 说明 |
+|---|---|---|
+| bsk 命令行 + daemon | `bin/bsk.exe` | v0.3.3，17 MB（同 ffmpeg 策略：不入库） |
+| 浏览器扩展 | `bsk-extension/` | MV3 v0.3.3，3.3 MB，**入库** |
+| 承载扩展的内核 | `browsers/chromium-*` | Phase 3 |
+
+**为什么能自包含**：扩展 manifest 里带 `key`，`--load-extension` 加载后扩展 ID 保持
+`hhcmgoofomhgciiibhipgmgkgnoenaoi` 不变，daemon 靠这个 ID + 协议 1.3 配对。
+实测 headless / 有头两种模式都能加载，启动到 daemon 可见约 1.8 秒。
+
+**升级链路**：
+`检测到墙 → ensure_ready(headless=False) → start_page(browser_id=…) → get_html →
+（必要时）click_simple_verification → request_human_help → 拿到正常页面 → 继续原任务`
+
+`ensure_browser()` 的取舍：daemon 里已有浏览器就直接用（用户自己的 Chrome），
+一个都没有才用内置 Chromium + 内置扩展起一个；收尾只 terminate 自己 Popen 的 pid。
+
+⚠️ **扩展带下划线开头的 chunk**（`chunks/_virtual_wxt-*.js`）曾被 `.gitignore` 的
+`_*` 规则吃掉，已在 `.gitignore` 里加了 `!bsk-extension/**/_*` 例外。删这个例外会导致
+打包出来的扩展缺文件。
+
+## 9. 本机环境
 
 | 项 | 值 |
 |---|---|

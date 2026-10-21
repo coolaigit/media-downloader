@@ -1,0 +1,48 @@
+{
+   "action": {
+      "default_icon": {
+         "128": "icon/logo.png",
+         "16": "icon/logo.png",
+         "32": "icon/logo.png",
+         "48": "icon/logo.png"
+      },
+      "default_popup": "popup.html",
+      "default_title": "browser-skill"
+   },
+   "background": {
+      "service_worker": "background.js"
+   },
+   "content_scripts": [ {
+      "all_frames": false,
+      "js": [ "content-scripts/content.js" ],
+      "matches": [ "\u003Call_urls>" ],
+      "run_at": "document_end"
+   }, {
+      "all_frames": false,
+      "js": [ "content-scripts/long-screenshot-page.js" ],
+      "matches": [ "http://*/*", "https://*/*" ],
+      "run_at": "document_end"
+   }, {
+      "all_frames": true,
+      "js": [ "content-scripts/record-frame.js" ],
+      "match_about_blank": true,
+      "match_origin_as_fallback": true,
+      "matches": [ "\u003Call_urls>" ],
+      "run_at": "document_start"
+   } ],
+   "description": "Let AI agents use your logged-in browser in a separate Agent Window—without interrupting your work. Powered by the bsk CLI.",
+   "host_permissions": [ "\u003Call_urls>" ],
+   "icons": {
+      "128": "icon/logo.png",
+      "16": "icon/logo.png",
+      "32": "icon/logo.png",
+      "48": "icon/logo.png"
+   },
+   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuY4gqU8oQxRf1HYX8I045JaeiczURcAHAkEomTWHBRV/cEFUAb4YMwNwDGhf8HKf7wZkjxmixtCDQCwpAncEFHvLSeM7IGOgmCvDxzqkjOFlwA1LEzhkuixAaKChrUNPoBLKbiCYKKiAv58cDTd6jDdFjuOcy42O4snZkw8zzN1WIbfGHN/ssnLjnthgJjUshrP/xD/SiE0EmsweWx1N+lospAmoexn3IvYBjIbGgv7enLO+uhKsPS6BcQqXNSKr7X6vfrffTsoRKPHdIDFl20FBQeJY8gIrfeouIUwbi4Hw6BTQuzEneKCX2FdMER3kuaa0u9LNqI0JrW/RVwtB4QIDAQAB",
+   "manifest_version": 3,
+   "minimum_chrome_version": "125",
+   "name": "BrowserSkill",
+   "permissions": [ "alarms", "activeTab", "debugger", "downloads", "idle", "notifications", "offscreen", "scripting", "tabs", "storage", "webNavigation", "windows" ],
+   "update_url": "https://clients2.google.com/service/update2/crx",
+   "version": "0.3.3"
+}

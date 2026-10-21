@@ -1419,8 +1419,17 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
     found: dict[str, dict] = {}
     try:
         if on_note:
-            on_note("检测到验证码，切换 BrowserSkill 真实浏览器进行验证辅助…")
-        opened = browser_skill.start_page(url, name="MediaDownloader 验证辅助")
+            on_note("检测到验证码，正在准备可见验证窗口…")
+        # V3.0：bsk / 扩展 / 内核都随包，没装过任何浏览器也能起验证窗口
+        ready = browser_skill.ensure_ready(headless=False, timeout=40)
+        if not ready.get("ok"):
+            return {"ok": False, "items": [], "login_required": False,
+                    "error": f"验证窗口准备失败：{ready.get('error') or '未知原因'}"}
+        if on_note:
+            on_note("验证窗口已就绪，正在打开主页…")
+        opened = browser_skill.start_page(
+            url, name="MediaDownloader 验证辅助",
+            browser_id=str(ready.get("instance_id") or ""))
         sid = str(opened.get("session_id") or "")
         if not sid:
             raise RuntimeError("BrowserSkill 未返回 session_id")
@@ -1441,10 +1450,12 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
         if has_verify:
             clicked = browser_skill.click_simple_verification(sid)
             if not clicked:
+                # 参数名必须是 timeout_seconds —— V2.5 这里写成 timeout=180，
+                # 每次都 TypeError 被外层吞掉，等于「请用户验证」从来没生效过。
                 browser_skill.request_human_help(
                     sid,
                     "请在这个 Agent Window 中完成验证码/滑块/安全验证。完成后 BrowserSkill 会继续读取作品。",
-                    timeout=180,
+                    timeout_seconds=180,
                 )
         elif on_note:
             on_note("BrowserSkill 当前已是正常作品页，无需人工验证码，继续下拉读取…")

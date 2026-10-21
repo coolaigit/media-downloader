@@ -206,6 +206,28 @@ async function loadStatus() {
       el.title = br.exe || br.bundled_dir || '';
     }
   }
+  // V3.0：验证码协助。只有「遇到验证码」才会用到，平时不影响普通抓取。
+  const bsk = statusInfo.browser_skill;
+  if (bsk) {
+    const el = $('sBrowserSkill');
+    if (el) {
+      let text = '可用';
+      let color = 'var(--ok)';
+      let tip = [];
+      if (!bsk.available) { text = '未包含（包不完整）'; color = 'var(--err)'; }
+      else if (!bsk.extension_ok) { text = '扩展缺失'; color = 'var(--err)'; }
+      else if (!bsk.daemon_running) { text = '待启动（首次遇到验证码时自动启动）'; color = 'var(--txt-dim)'; }
+      if (bsk.available) {
+        tip.push(`bsk: ${bsk.bsk_path}${bsk.bsk_bundled ? '（包内）' : '（系统）'}`);
+        tip.push(`扩展: ${bsk.extension_dir}`);
+        tip.push(`daemon: ${bsk.daemon_running ? '运行中 ' + bsk.daemon_version : '未运行'}`);
+        tip.push(`已连接浏览器: ${bsk.browser_count}`);
+      }
+      el.textContent = text;
+      el.style.color = color;
+      el.title = tip.join('\n');
+    }
+  }
   $('sYtdlp').textContent = statusInfo.ytdlp_version;
   $('sDownloads').textContent = statusInfo.downloads_dir
     + (statusInfo.downloads_dir_restart_pending ? '（已改配置，重启程序后生效）' : '');

@@ -32,6 +32,19 @@ datas = [
     (str(SPEC_DIR / "app_icon.ico"), "."),                       # 系统托盘复用应用图标
 ]
 
+# ---- V3.0：BrowserSkill（验证码时的人工协助）----
+# bsk.exe 管 daemon 和会话，bsk-extension 给内置 Chromium 用（--load-extension）。
+# 两样缺一个，验证码升级链路就断，所以缺了要在构建时吼出来而不是静默少打。
+if (SPEC_DIR / "bin" / "bsk.exe").is_file():
+    datas.append((str(SPEC_DIR / "bin" / "bsk.exe"), "bin"))
+else:
+    print("!! 警告：bin/bsk.exe 不存在 —— 打出来的包没有 BrowserSkill，验证码场景无法协助")
+
+if (SPEC_DIR / "bsk-extension" / "manifest.json").is_file():
+    datas.append((str(SPEC_DIR / "bsk-extension"), "bsk-extension"))
+else:
+    print("!! 警告：bsk-extension/ 不存在 —— 内置浏览器无法承载 BrowserSkill 扩展")
+
 # ---- V3.0：内置 Playwright Chromium（约 430 MB）----
 # 目的：用户电脑没有任何浏览器（只有 360/QQ 或什么都没有）也必须能做 JS 渲染和登录窗口。
 # 只带完整 chromium，不带 chromium_headless_shell —— headless 用 --headless 跑完整内核，

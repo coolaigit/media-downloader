@@ -24,3 +24,8 @@
 *.webp  binary
 *.mp4   binary
 *.exe   binary
+
+# V3.0：BrowserSkill 扩展是第三方构建产物，原样入库、不做行尾转换。
+# 理由：包内这份要和「验证过能加载的那份」字节一致；而上面的 *.js/*.css/*.json
+# 规则会把它改写成 LF。浏览器不敏感，但没必要引入这个变量。
+bsk-extension/** -text
