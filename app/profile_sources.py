@@ -21,7 +21,7 @@ import requests
 from .config import RESOURCE_ROOT
 from .concurrency import (GOVERNOR, KIND_METADATA, NETWORK, OK, RATE_LIMIT,
                           classify_error)
-from . import platform_login, subproc
+from . import browser_profile, platform_login, subproc
 
 PLATFORM_NAMES = {k: v["name"] for k, v in platform_login.PLATFORMS.items()}
 
@@ -1239,8 +1239,12 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
     try:
         with sync_playwright() as p:
             # 内核：包内 Chromium 优先 —— 用户电脑没有任何浏览器时抖音主页也要能读
+            # V3.0：默认后台（headless）。V2.5 这里硬写 headless=False，
+            # 每次抓抖音主页都会在你屏幕上弹一个窗口 —— 违反「正常抓取全部后台」。
+            # 是否可见改由设置项控制（browser_headed），需要人工验证时才算例外。
             kw = dict(
-                user_data_dir=profile_dir, headless=False,
+                user_data_dir=profile_dir,
+                headless=not bool(browser_profile.headed()),
                 viewport={"width": 1400, "height": 900},
                 locale="zh-CN", user_agent=DEFAULT_UA,
                 args=list(_LAUNCH_ARGS) + ["--disable-blink-features=AutomationControlled"],
