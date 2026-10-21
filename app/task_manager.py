@@ -229,7 +229,28 @@ class Task:
     # 视频选项
     options: dict = field(default_factory=dict)
 
+    def failed_items(self) -> list[dict]:
+        """本任务里失败的条目（排除用户取消）。
+
+        「用户取消」在 items 里也是 ok=False，但它不是失败 —— 把它算进失败列表，
+        点「重试失败」时会把用户主动放弃的条目又下回来，属于帮倒忙。
+        """
+        return [it for it in self.items
+                if (not it.get("ok")) and str(it.get("error") or "") != "已取消"]
+
     def public(self) -> dict:
+        # 失败项必须**全部**保留。
+        # 原来统一 items[-200:]：300 条任务里若前 100 条失败、后 200 条成功，
+        # 恰好把用户唯一要逐条处理的失败项截掉，等于没给。
+        fails: list[dict] = []
+        rest: list[dict] = []
+        for it in self.items:
+            if (not it.get("ok")) and str(it.get("error") or "") != "已取消":
+                fails.append(it)
+            else:
+                rest.append(it)
+        items = fails + rest[-200:]
+        items.sort(key=lambda x: x.get("index") if isinstance(x.get("index"), int) else 0)
         return {
             "id": self.id,
             "kind": self.kind,
@@ -249,7 +270,10 @@ class Task:
             "alt_used": self.alt_used,
             "note": self.note,
             "files": self.files,
-            "items": self.items[-200:],   # 只回传最近明细，避免响应过大
+            "items": items,               # 失败全留 + 其余最近 200 条
+            "items_total": len(self.items),
+            "failed_items": len(fails),
+            "video_url": self.video_url,
             "output_dir": self.output_dir,
         }
 
@@ -516,6 +540,83 @@ class TaskManager:
                     self._cancel_flags.pop(tid, None)
                     n += 1
         return n
+
+    def retry_failed(self, task_id: str) -> dict:
+        """把某个任务里失败的条目重新提交成一个**新任务**（只重试失败项）。
+
+        为什么新建任务、而不是把原任务的计数清零重跑：
+        - 原任务的 items / files 是那次执行的证据，抹掉就再也说不清当时挂了哪几条；
+        - 用户连点两次「重试」，新建任务天然幂等，不会互相覆盖计数；
+        - 原任务失败明细还在，重试再失败也能对照。
+        输出目录沿用原任务 —— 重试结果不能落到别的文件夹里去。
+        """
+        t = self.get(task_id)
+        if not t:
+            raise KeyError("任务不存在")
+        if t.status not in TERMINAL:
+            return {"ok": False, "count": 0,
+                    "message": "任务还在进行中，等它结束再重试"}
+
+        with self._lock:
+            kind = t.kind
+            base_options = dict(t.options or {})
+            out_dir = t.output_dir
+            orig_title = t.title or "下载任务"
+            url_pool = [dict(x) for x in t.urls]
+            video_url = t.video_url
+            fails = t.failed_items()
+
+        if kind == "video":
+            # 视频批量里每条视频各自是一个任务（total=1），失败信息在 t.error 上，
+            # items 是空的 —— 所以不能靠 fails 判断。
+            if not video_url:
+                return {"ok": False, "count": 0, "message": "这条视频没有可用地址"}
+            urls: list[dict] = []
+            count = 1
+        else:
+            urls = []
+            for it in fails:
+                idx = it.get("index")
+                src = None
+                if isinstance(idx, int) and 0 <= idx < len(url_pool):
+                    src = dict(url_pool[idx])
+                if not src or not str(src.get("url") or ""):
+                    u = str(it.get("url") or "")
+                    if u:
+                        src = {"url": u}
+                if src and str(src.get("url") or ""):
+                    urls.append(src)
+            count = len(urls)
+            if not count:
+                return {"ok": False, "count": 0, "message": "没有可重试的失败地址"}
+
+        new_task = Task(
+            id=_new_id(),
+            kind=kind,
+            title=f"{orig_title[:40]}（重试失败 {count} 条）",
+            urls=urls,
+            video_url=video_url,
+            total=count,
+            output_dir=out_dir,
+            options=base_options,
+        )
+        self._register(new_task)
+        self._cancel_flags[new_task.id] = threading.Event()
+        if kind == "image":
+            threading.Thread(target=self._run_images, args=(new_task.id,),
+                             daemon=True).start()
+        elif kind == "stream":
+            threading.Thread(target=self._run_streams, args=(new_task.id,),
+                             daemon=True).start()
+        elif kind == "video":
+            self._ensure_video_workers()
+            self._video_queue.put(new_task.id)
+        else:  # noqa: 兜底，未知类型不静默成功
+            self.remove(new_task.id)
+            return {"ok": False, "count": 0,
+                    "message": f"不支持重试的任务类型：{kind}"}
+        return {"ok": True, "count": count, "task_id": new_task.id,
+                "title": new_task.title}
 
     def _cancelled(self, task_id: str) -> bool:
         ev = self._cancel_flags.get(task_id)

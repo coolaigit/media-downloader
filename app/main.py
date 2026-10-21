@@ -932,6 +932,22 @@ def api_task_cancel(task_id: str):
     return {"ok": ok, "cancelled": ok}
 
 
+@app.post("/api/tasks/{task_id}/retry-failed")
+def api_task_retry_failed(task_id: str):
+    """只重试这个任务里失败的条目，返回新任务 id。
+
+    前端「重试失败 N 条」按钮走这里。不重试跳过项（文件已存在/历史上已下过），
+    也不重试用户主动取消的条目 —— 那是用户自己放弃的，不是失败。
+    """
+    try:
+        res = manager.retry_failed(task_id)
+    except KeyError:
+        raise HTTPException(404, "任务不存在")
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("message") or "没有可重试的失败条目")
+    return res
+
+
 @app.delete("/api/tasks/{task_id}")
 def api_task_remove(task_id: str):
     """移除任务记录（不删除已下载的文件）。"""

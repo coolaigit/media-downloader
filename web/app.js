@@ -1959,6 +1959,31 @@ async function openDownloads() {
 }
 
 // ---------- 任务面板 ----------
+// 哪些任务的「失败明细」处于展开状态。必须放在渲染函数外面：
+// pollTasks 每 1.2 秒重建整个列表，状态存在 DOM 里会被下一次刷新抹掉。
+const EXPANDED_FAILS = new Set();
+
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) { /* 落到下面的兜底 */ }
+  // WebView2 / 非安全上下文下 clipboard API 可能不可用，用隐藏 textarea 兜底
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  document.body.removeChild(ta);
+  if (!ok) throw new Error('浏览器拒绝了剪贴板写入');
+  return true;
+}
+
 function startTaskPolling() {
   if (taskTimer) return;
   pollTasks();
@@ -1997,6 +2022,13 @@ async function pollTasks() {
     const barCls = t.status === 'completed' ? 'done' : (t.status === 'failed' || t.status === 'cancelled' ? 'fail' : '');
     const pct = Math.round(t.percent || 0);
 
+    // 失败明细：图片/流媒体任务逐条记在 items 里；视频批量是「一条视频一个任务」，
+    // 失败信息在 t.error 上，items 为空。两种都要能列出来，否则用户只知道失败了几条。
+    const fails = (t.items || []).filter(it => !it.ok && String(it.error || '') !== '已取消');
+    const videoFailed = t.kind !== 'image' && t.kind !== 'stream' && t.status === 'failed';
+    const failCount = fails.length || (videoFailed ? 1 : 0);
+    const expanded = EXPANDED_FAILS.has(t.id);
+
     let sub = '';
     if (t.kind === 'image') {
       sub = `成功 ${t.done} · 跳过 ${t.skipped} · 失败 ${t.failed} · 共 ${t.total}`;
@@ -2009,6 +2041,32 @@ async function pollTasks() {
       // 兜底说明（如「已自动改用 mweb 客户端，清晰度受限」）必须显示出来，
       // 与「自动换档位」同一个原则：清晰度可能变了，不许静默。
       if (t.note) sub += ` · ${esc(t.note)}`;
+    }
+
+    // 失败明细区块：默认收起，点一下展开。轮询每 1.2 秒重建整个列表，
+    // 所以展开状态必须存在 EXPANDED_FAILS 里，否则刚点开就被下一次刷新收回去。
+    let failBlock = '';
+    if (failCount > 0) {
+      const rows = fails.length
+        ? fails.map(it => `
+            <div class="fail-row">
+              <div class="fail-url" title="${esc(it.url || '')}">${esc(it.url || '(无地址)')}</div>
+              <div class="fail-why">${esc(it.error || '未知原因')}</div>
+            </div>`).join('')
+        : `<div class="fail-row">
+             <div class="fail-url" title="${esc(t.video_url || '')}">${esc(t.video_url || '(无地址)')}</div>
+             <div class="fail-why">${esc(t.error || '未知原因')}</div>
+           </div>`;
+      failBlock = `
+        <div class="task-fails">
+          <div class="fail-head">
+            <button class="btn tiny ghost" data-act="toggle">${expanded ? '▾' : '▸'} ${failCount} 条失败明细</button>
+            <button class="btn tiny ghost" data-act="copy">复制失败地址</button>
+            ${t.status === 'running' || t.status === 'queued'
+              ? '' : `<button class="btn tiny" data-act="retry">重试失败 ${failCount} 条</button>`}
+          </div>
+          <div class="fail-list"${expanded ? '' : ' hidden'}>${rows}</div>
+        </div>`;
     }
 
     el.innerHTML = `
@@ -2024,6 +2082,7 @@ async function pollTasks() {
       <div class="task-bar"><i class="${barCls}" style="width:${pct}%"></i></div>
       <div class="task-sub">${sub}</div>
       ${t.error ? `<div class="task-err">${esc(t.error)}</div>` : ''}
+      ${failBlock}
       ${t.files && t.files.length ? `<div class="task-files">已保存 ${t.files.length} 个文件到 ${esc(t.output_dir || '')}</div>` : ''}`;
 
     el.querySelectorAll('button').forEach(b => {
@@ -2031,10 +2090,31 @@ async function pollTasks() {
         const act = b.dataset.act;
         try {
           if (act === 'cancel') { await api(`/api/tasks/${t.id}/cancel`, { method: 'POST' }); toast('已请求取消', 'info'); }
-          else if (act === 'remove') { await api(`/api/tasks/${t.id}`, { method: 'DELETE' }); pollTasks(); }
+          else if (act === 'remove') { EXPANDED_FAILS.delete(t.id); await api(`/api/tasks/${t.id}`, { method: 'DELETE' }); pollTasks(); }
           else if (act === 'open') {
             await api('/api/downloads/open', { method: 'POST', body: { path: t.output_dir || '' } });
             toast('已打开下载目录', 'ok');
+          }
+          else if (act === 'toggle') {
+            if (EXPANDED_FAILS.has(t.id)) EXPANDED_FAILS.delete(t.id);
+            else EXPANDED_FAILS.add(t.id);
+            const on = EXPANDED_FAILS.has(t.id);
+            const list = el.querySelector('.fail-list');
+            if (list) list.hidden = !on;
+            b.textContent = `${on ? '▾' : '▸'} ${failCount} 条失败明细`;
+          }
+          else if (act === 'copy') {
+            const urls = (fails.length ? fails.map(it => it.url) : [t.video_url]).filter(Boolean);
+            if (!urls.length) { toast('没有可复制的地址', 'warn'); return; }
+            await copyToClipboard(urls.join('\n'));
+            toast(`已复制 ${urls.length} 个失败地址`, 'ok');
+          }
+          else if (act === 'retry') {
+            const r = await api(`/api/tasks/${t.id}/retry-failed`, { method: 'POST' });
+            toast(`已重新提交 ${r.count} 条失败下载`, 'ok');
+            EXPANDED_FAILS.delete(t.id);
+            startTaskPolling();      // 重试产生新任务，轮询必须在跑
+            pollTasks();
           }
         } catch (e) { toast('操作失败：' + e.message, 'err'); }
       };
