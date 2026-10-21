@@ -27,7 +27,7 @@ from .page_scanner import resolve_stream
 from .stream_downloader import stream_supported
 from .task_manager import manager
 from .video_downloader import ffmpeg_available, probe_video, search_videos
-from . import browser_profile, cookie_store, crawl_manager, platform_login, profile_sources, store, subproc
+from . import browser_profile, browser_runtime, cookie_store, crawl_manager, platform_login, profile_sources, store, subproc
 
 # 「设置」里配的 cookies.txt 也要用于**网页抓取与浏览器渲染**，不只是 yt-dlp：
 # 需要登录的平台（Instagram 等）匿名访问只会返回登录墙，正文里没有任何内容 ——
@@ -368,6 +368,10 @@ def api_status():
         "cookies": cookie_store.status(),
         # 登录态浏览器配置：让用户知道「抖音/小红书主页」这条路是否已具备前提
         "browser_profile": browser_profile.info(),
+        # V3.0：浏览器内核来源。包内 Chromium / 系统 Chrome/Edge / 无可用内核。
+        # 设置页要能直接看出「我这台机器到底靠什么在渲染」——
+        # 否则换个电脑抓不到东西时，用户完全无从判断是缺内核还是站点改版。
+        "browser": browser_runtime.status(),
         # 2.0：每个平台自己的登录态。安装包不携带账号数据，首次使用按需登录。
         "platform_logins": platform_login.all_status(),
         "filter_options": FILTER_OPTIONS,

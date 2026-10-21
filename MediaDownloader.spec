@@ -31,9 +31,23 @@ datas = [
     (str(SPEC_DIR / "使用说明.md"), "."),                    # 跨电脑安装/登录态/故障说明
     (str(SPEC_DIR / "app_icon.ico"), "."),                       # 系统托盘复用应用图标
 ]
+
+# ---- V3.0：内置 Playwright Chromium（约 430 MB）----
+# 目的：用户电脑没有任何浏览器（只有 360/QQ 或什么都没有）也必须能做 JS 渲染和登录窗口。
+# 只带完整 chromium，不带 chromium_headless_shell —— headless 用 --headless 跑完整内核，
+# 省 272 MB。代价是运行时**必须**传 executable_path（见 app/browser_runtime.py）。
+if (SPEC_DIR / "browsers").is_dir():
+    # 只收 chromium-*/，跳过可能残留的 headless_shell / ffmpeg / winldd
+    for _b in sorted((SPEC_DIR / "browsers").iterdir()):
+        if _b.is_dir() and _b.name.startswith("chromium-"):
+            datas.append((str(_b), f"browsers/{_b.name}"))
+else:
+    print("!! 警告：browsers/ 不存在，打出来的包没有内置 Chromium（只能靠用户系统浏览器）")
+    print("!! 补下载：set PLAYWRIGHT_BROWSERS_PATH=%CD%\\browsers && python -m playwright install chromium")
 datas += collect_data_files("certifi")                   # CA 证书（requests/yt-dlp 用）
-datas += collect_data_files("playwright")                # playwright 驱动（node.exe 等 Python 运行时，
-                                                         #   不含浏览器 —— 浏览器复用用户系统 Chrome/Edge）
+datas += collect_data_files("playwright")                # playwright 驱动（node.exe 等）
+                                                         #   浏览器内核见上面的 browsers/ 段（V3.0 起自带，
+                                                         #   不再依赖用户系统 Chrome/Edge）
 datas += collect_data_files("yt_dlp_ejs")                # 1E.2：yt-dlp EJS 挑战脚本（.js 资源）
 datas += collect_data_files("webview")                      # 桌面壳运行时资源（如有）
 

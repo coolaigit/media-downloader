@@ -1220,7 +1220,8 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
     """Bundled Douyin author crawler using Playwright and the saved platform profile."""
     try:
         from playwright.sync_api import sync_playwright
-        from .renderer import _LAUNCH_ARGS, _find_browser_channel
+        from .renderer import _LAUNCH_ARGS
+        from . import browser_runtime
         from .config import DEFAULT_UA
     except Exception as e:
         return {"ok": False, "items": [], "login_required": False,
@@ -1237,16 +1238,16 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
     verification_required = False
     try:
         with sync_playwright() as p:
-            ch = _find_browser_channel()
+            # 内核：包内 Chromium 优先 —— 用户电脑没有任何浏览器时抖音主页也要能读
             kw = dict(
                 user_data_dir=profile_dir, headless=False,
                 viewport={"width": 1400, "height": 900},
                 locale="zh-CN", user_agent=DEFAULT_UA,
                 args=list(_LAUNCH_ARGS) + ["--disable-blink-features=AutomationControlled"],
+                **browser_runtime.launch_kwargs(),
             )
             try:
-                ctx = (p.chromium.launch_persistent_context(channel=ch, **kw) if ch
-                       else p.chromium.launch_persistent_context(**kw))
+                ctx = p.chromium.launch_persistent_context(**kw)
             except Exception as e:
                 return {"ok": False, "items": [], "login_required": False,
                         "error": f"抖音登录 profile 正在被占用或无法打开：{e}"}

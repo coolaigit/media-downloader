@@ -16,6 +16,14 @@ _wheel/
 bin/
 .playwright-mcp/
 
+# ---- V3.0 内置 Playwright Chromium（约 430 MB，构建时下载，绝不入库）----
+# 下载命令（源码目录下执行）：
+#   set PLAYWRIGHT_BROWSERS_PATH=%CD%\browsers
+#   python -m playwright install chromium
+# 装完删掉 chromium_headless_shell-* / ffmpeg-* / winldd-* 可省 275MB，
+# 程序会用完整内核跑 headless（必须传 executable_path，见 app/browser_runtime.py）
+browsers/
+
 # ---- 抓取样本数据（可重新抓取）----
 _probe_data/
 

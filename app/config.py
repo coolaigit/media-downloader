@@ -102,7 +102,20 @@ if PYLIBS_DIR.exists():
         # 放在末尾：优先用全局环境里已装好的版本
         sys.path.append(_pylibs)
 
-# 本机已安装的浏览器内核（playwright 可直接复用，无需下载 ~300MB 内核）
+# ---- V3.0：内置 Playwright Chromium ----
+# 安装包自带一份 Chromium（约 428 MB），用户电脑即使一个浏览器都没装，
+# 也能做 JS 渲染和登录窗口。路径解析见 app/browser_runtime.py。
+#
+# 只带完整版、不带 chromium_headless_shell（那玩意另外 272 MB）：
+# headless 时用 --headless 跑完整内核即可，实测渲染结果完全一致。
+# 代价是**必须显式传 executable_path** —— playwright 默认会去找 headless shell，
+# 找不到就报 "Executable doesn't exist"，这是只保留一份的必然后果。
+BROWSERS_DIR = BUNDLE_DIR / "browsers"
+if BROWSERS_DIR.is_dir():
+    # playwright 内部解析内核时也走这个目录（我们主要用 executable_path，这里双保险）
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(BROWSERS_DIR)
+
+# 本机已安装的浏览器内核（包内 Chromium 不可用时的兜底）
 BROWSER_CANDIDATES = {
     "chrome": [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",

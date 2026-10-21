@@ -194,6 +194,18 @@ async function loadStatus() {
   const js = statusInfo.js_runtime;
   $('sJsRuntime').textContent = js ? (js.name + ' 可用') : '未找到（YouTube 等部分视频可能解析失败）';
   $('sJsRuntime').style.color = js ? 'var(--ok)' : 'var(--warn, #d80)';
+  // V3.0：浏览器内核来源。内置 = 安装包自带、换电脑行为一致；
+  // 系统 = 复用你装的 Chrome/Edge（那台机器卸了浏览器就会失效）。
+  const br = statusInfo.browser;
+  if (br) {
+    const kindText = { bundled: '内置 Chromium', system: '系统浏览器', none: '不可用' }[br.kind] || br.kind;
+    const el = $('sBrowserKernel');
+    if (el) {
+      el.textContent = kindText + (br.kind === 'system' && br.label ? `（${br.label.replace('系统 ', '')}）` : '');
+      el.style.color = br.kind === 'none' ? 'var(--err)' : 'var(--ok)';
+      el.title = br.exe || br.bundled_dir || '';
+    }
+  }
   $('sYtdlp').textContent = statusInfo.ytdlp_version;
   $('sDownloads').textContent = statusInfo.downloads_dir
     + (statusInfo.downloads_dir_restart_pending ? '（已改配置，重启程序后生效）' : '');

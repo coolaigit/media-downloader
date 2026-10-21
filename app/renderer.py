@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import BROWSER_CANDIDATES, DEFAULT_UA
-from . import browser_profile, cookie_store, platform_login
+from . import browser_profile, browser_runtime, cookie_store, platform_login
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -70,7 +70,8 @@ class RenderResult:
     captured: list[CapturedResponse] = field(default_factory=list)
     ok: bool = False
     error: str = ""
-    engine: str = ""          # chrome / msedge / chromium
+    engine: str = ""          # 启动方式：persistent-profile / bundled / system / chromium
+    kernel: str = ""          # 内核来源：bundled（包内 Chromium）/ system（系统 Chrome/Edge）
     elapsed: float = 0.0
 
     @property
@@ -90,7 +91,13 @@ def _playwright_available() -> bool:
 
 
 def _find_browser_channel() -> str:
-    """探测本机已安装的浏览器内核，返回 playwright 的 channel 名；都没有则返回空。"""
+    """探测系统已安装的浏览器内核，返回 playwright 的 channel 名；都没有则返回空。
+
+    注意：这个函数现在**只反映系统浏览器**。包内自带的 Chromium 走
+    `browser_runtime.pick()` 的 executable_path 分支（channel 为空），
+    所以「channel 为空」不再等于「没有内核可用」。
+    新代码请直接用 browser_runtime.launch_kwargs()。
+    """
     for channel, paths in BROWSER_CANDIDATES.items():
         for p in paths:
             if os.path.exists(p):
@@ -99,31 +106,15 @@ def _find_browser_channel() -> str:
 
 
 def _bundled_chromium_exists() -> bool:
-    """检查 playwright 自带的 Chromium 是否已下载（不启动浏览器）。"""
-    try:
-        base = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-        if base:
-            root = base
-        else:
-            root = os.path.join(os.path.expanduser("~"), "AppData", "Local", "ms-playwright")
-        if not os.path.isdir(root):
-            return False
-        for name in os.listdir(root):
-            if name.lower().startswith("chromium"):
-                exe = os.path.join(root, name, "chrome-win", "chrome.exe")
-                if os.path.exists(exe):
-                    return True
-        return False
-    except Exception:
-        return False
+    """包内（或 PLAYWRIGHT_BROWSERS_PATH 指向的）Chromium 是否存在。"""
+    return browser_runtime.bundled_chromium() is not None
 
 
 def renderer_status() -> dict:
     """渲染能力状态（供 /api/status 与设置页展示）。"""
     has_pw = _playwright_available()
-    channel = _find_browser_channel()
-    bundled = _bundled_chromium_exists() if has_pw else False
-    available = has_pw and bool(channel or bundled)
+    target = browser_runtime.status()
+    available = has_pw and target["kind"] != "none"
 
     hint = ""
     if not has_pw:
@@ -131,13 +122,15 @@ def renderer_status() -> dict:
                 "安装到项目内、不写 C 盘：\n"
                 '  python -m pip install --target "<项目目录>\\_pylibs" playwright')
     elif not available:
-        hint = ("已装 playwright，但没有可用浏览器内核。可安装自带 Chromium：\n"
-                "  python -m playwright install chromium")
+        hint = browser_runtime.unavailable_message()
     return {
         "available": available,
         "playwright_installed": has_pw,
-        "system_browser": channel,
-        "bundled_chromium": bundled,
+        "system_browser": _find_browser_channel(),
+        "bundled_chromium": _bundled_chromium_exists(),
+        "browser_kind": target["kind"],          # bundled / system / none
+        "browser_label": target["label"],
+        "browser_exe": target["exe"],
         "hint": hint,
     }
 
@@ -161,7 +154,11 @@ async def _render_async(
     from playwright.async_api import async_playwright
 
     results: list[RenderResult] = [RenderResult(url=u) for u in urls]
-    channel = _find_browser_channel()
+    # 内核：包内 Chromium 优先（跨机器一致），没有才退系统 Chrome/Edge。
+    # 包内有 Chromium 时这里是 {"executable_path": ...} —— 必须带上，
+    # 因为我们没打 chromium_headless_shell，不传路径 headless 会直接报「找不到内核」。
+    target = browser_runtime.pick()
+    kernel_kw = browser_runtime.launch_kwargs(target)
     sem = asyncio.Semaphore(max(1, concurrency))
     done = {"n": 0}
     cancelled = {"v": False}
@@ -207,6 +204,7 @@ async def _render_async(
                     locale="zh-CN",
                     user_agent=user_agent or DEFAULT_UA,
                     args=list(_LAUNCH_ARGS) + ["--disable-blink-features=AutomationControlled"],
+                    **kernel_kw,
                 )
                 engine = "persistent-profile"
                 # 同一个 profile 目录不能并发（浏览器会抢锁），登录态模式下串行更稳
@@ -226,21 +224,21 @@ async def _render_async(
             except Exception:
                 # 登录态模式失败不能把整条抓取废掉：退回一次性上下文继续跑
                 pctx = None
-        # 优先用本机已装浏览器：启动快（0.6s）且无需下载约 300MB 内核
-        if pctx is None and channel:
+        # 内核优先级：包内 Chromium（跨机器一致）→ 系统 Chrome/Edge → 裸试一次
+        if pctx is None and kernel_kw:
             try:
-                browser = await p.chromium.launch(channel=channel, headless=True,
-                                                  args=_LAUNCH_ARGS)
-                engine = channel
+                browser = await p.chromium.launch(headless=True, args=_LAUNCH_ARGS,
+                                                  **kernel_kw)
+                engine = target["kind"]
             except Exception:
                 browser = None
         if browser is None and pctx is None:
+            # 源码模式下只装了 playwright 自带内核时走这条（不传路径，交给 registry）
             try:
                 browser = await p.chromium.launch(headless=True, args=_LAUNCH_ARGS)
                 engine = "chromium"
-            except Exception as e:
-                msg = ("没有可用的浏览器内核（%s）。请执行："
-                       "python -m playwright install chromium" % type(e).__name__)
+            except Exception:
+                msg = browser_runtime.unavailable_message()
                 for r in results:
                     r.error = msg
                 return results
@@ -260,6 +258,7 @@ async def _render_async(
                     return
                 r = results[idx]
                 r.engine = engine
+                r.kernel = target["kind"]
                 t0 = time.time()
                 ctx = None
                 page = None

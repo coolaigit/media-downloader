@@ -110,7 +110,8 @@ def export_from_profile(profile_dir: str, headless: bool = True, warm_url: str =
     """
     from playwright.sync_api import sync_playwright
 
-    from .renderer import _LAUNCH_ARGS, _find_browser_channel
+    from .renderer import _LAUNCH_ARGS
+    from . import browser_runtime
     from .config import DEFAULT_UA
 
     if not Path(profile_dir).is_dir():
@@ -118,13 +119,13 @@ def export_from_profile(profile_dir: str, headless: bool = True, warm_url: str =
                 "error": f"profile 目录不存在：{profile_dir}"}
     out = _cookie_path(profile_dir)
     with sync_playwright() as p:
-        ch = _find_browser_channel()
+        # 内核：包内 Chromium 优先（干净机上也能导出登录态），没有才退系统浏览器
         kw = dict(user_data_dir=str(profile_dir), headless=headless,
                   locale="zh-CN", user_agent=DEFAULT_UA,
-                  args=list(_LAUNCH_ARGS))
+                  args=list(_LAUNCH_ARGS),
+                  **browser_runtime.launch_kwargs())
         try:
-            ctx = (p.chromium.launch_persistent_context(channel=ch, **kw) if ch
-                   else p.chromium.launch_persistent_context(**kw))
+            ctx = p.chromium.launch_persistent_context(**kw)
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "path": "", "count": 0, "domains": {},
                     "error": f"打开 profile 失败（可能窗口还开着）：{e}"}
@@ -158,11 +159,12 @@ def export_from_profile(profile_dir: str, headless: bool = True, warm_url: str =
 def run(url: str, profile_dir: str, seconds: int = 900, headless: bool = False) -> int:
     from playwright.sync_api import sync_playwright
 
-    from .renderer import _LAUNCH_ARGS, _find_browser_channel
+    from .renderer import _LAUNCH_ARGS
+    from . import browser_runtime
     from .config import DEFAULT_UA
 
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
-    channel = _find_browser_channel()
+    kernel_kw = browser_runtime.launch_kwargs()
     with sync_playwright() as p:
         kwargs = dict(
             user_data_dir=profile_dir,
@@ -173,9 +175,9 @@ def run(url: str, profile_dir: str, seconds: int = 900, headless: bool = False) 
             args=list(_LAUNCH_ARGS) + ["--disable-blink-features=AutomationControlled"],
         )
         ctx = None
-        if channel:
+        if kernel_kw:
             try:
-                ctx = p.chromium.launch_persistent_context(channel=channel, **kwargs)
+                ctx = p.chromium.launch_persistent_context(**kwargs, **kernel_kw)
             except Exception:
                 ctx = None
         if ctx is None:
