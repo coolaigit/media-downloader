@@ -349,7 +349,13 @@ class ConcurrencyGovernor:
         # 记下默认值，之后新建的闸门（换了平台）也按这个上限建。
         self._default_ceiling = dict(_DEFAULT_CEILING)
 
-    def gate(self, platform: str, kind: str, *, ceiling: int | None = None) -> AdaptiveGate:
+    def gate(self, platform: str, kind: str, *, ceiling: int | None = None,
+             start_at: int | None = None) -> AdaptiveGate:
+        """取闸门（不存在则创建）。
+
+        start_at 只在**新建**时生效：已存在的闸门继续用它当前的实际容量，
+        否则每次调用都把容量按回起点，「稳定后逐级恢复」就永远走不到。
+        """
         key = (str(platform or "other"), str(kind or "other"))
         with self._lock:
             g = self._gates.get(key)
@@ -358,10 +364,12 @@ class ConcurrencyGovernor:
                     g.set_ceiling(ceiling)
                 return g
             cap = int(ceiling or self._default_ceiling.get(key[1], 4))
+            if start_at is None:
+                start_at = _START_AT.get(key)
             g = AdaptiveGate(
                 name=f"{key[0]}/{key[1]}",
                 ceiling=cap,
-                start_at=_START_AT.get(key),
+                start_at=start_at,
                 recover_after=_RECOVER_AFTER.get(key[1], _DEFAULT_RECOVER_AFTER),
             )
             self._gates[key] = g

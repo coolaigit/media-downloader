@@ -35,18 +35,29 @@ web/
   style.css        30 KB    811 行
 ```
 
-## 3. 并发控制现状（Phase 2 的改造对象）
+## 3. 并发控制（V3.0 Phase 2 已完成）
 
-| 位置 | 现状 | 问题 |
+**V2.5（已废弃）**：六处全是静态参数，降下去回不来，且不区分平台/类型。
+
+**V3.0 现状**：全部收敛到 `app/concurrency.py` 的 `GOVERNOR`，
+按 `(平台 × 任务类型)` 各立一个自适应闸门；用户设置的数字一律降级为**上限**。
+
+| 调用点 | V2.5 | V3.0 |
 |---|---|---|
-| `task_manager.py:77` `_VIDEO_GATE` | 全局 3 路可调 | 不分平台，抖音降速会连累 B站 |
-| `main.py:896` | 抖音 ≥100 条 → `min(concurrency, 2)` | 硬编码，永远 2 路，无法恢复 |
-| `profile_sources.py:1092` | B站元数据/缩略图 `min(4, …)` | 硬编码，影响视频下载吗？不会，但也不会上调 |
-| `downloader.py batch_download_images` | `max_workers=concurrency` | 固定，风控后不降 |
-| `task_manager.py:784` | 流媒体 1–8 路 | 固定 |
-| `batch_crawler.py` | `detail_concurrency=4` | 固定 |
+| 视频下载 `task_manager._run_video` | 全局 `_VIDEO_GATE` 3 路 | 按平台闸门（`video_download`） |
+| 抖音 ≥100 条 `main.py` | 硬砍 `min(2)` | 删除；抖音闸门本来起步 2 路，撞 412 继续降、稳定后升回上限 |
+| B站元数据/缩略图 `profile_sources._bili_enrich` | 硬限 4 路 | 起步 4 路（有 Cookie）/ 1 路（匿名），稳定后升到上限 6 |
+| 图片下载 `downloader.batch_download_images` | `max_workers=N` 固定 | `N` 为上限，实际名额由闸门控制 |
+| 流下载 `task_manager._run_streams` | 1–8 固定 | 同上，按平台闸门（`stream_download`） |
+| 列表抓取 `batch_crawler.fetch_many` | `concurrency*2` 封顶 16 | 为上限，详情页下钻先拿名额 |
 
-**结论：V2.5 的并发是「静态参数」，没有反馈回路。这就是 V3.0 要换掉的东西。**
+**机制**：降速立即（412/429/验证码减半，连续就一路降到底）；恢复谨慎（冷却期 20s + 连续 N 次成功才翻倍）；
+普通 404/代理抖动**不降速**；降速不杀掉在途请求；取消能打断排队。
+
+**可观测**：`GET /api/concurrency` + 任务面板头部状态条
+（`平台·类型 2/8 平台限流`，hover 给出「用户最大并发 / 当前实际 / 原因 / 连续稳定后自动恢复」）。
+
+**实测**（本地 412 服务）：8 → 4 → 2 → 1 自动降；风控解除后 8 次成功一轮，1 → 2 → 4 → 8 自动恢复。
 
 ## 4. 下载失败明细现状（Phase 1.5 的改造对象）
 

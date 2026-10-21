@@ -1106,8 +1106,13 @@ def _bili_enrich(items: list[dict], cookie_file: str, on_note=None) -> list[dict
     if on_note:
         on_note(f"已列出 {len(items)} 个 B站作品，正在并发补标题和缩略图…")
     # V2.5 在这里硬限 4 路（16 路会整批返回空 → 「30 条都有标题但没缩略图」）。
-    # V3.0 保留这个保护，但改成「起步 4 路 + 稳定后自动升」，不再永久卡在 4。
-    gate = GOVERNOR.gate("bili", KIND_METADATA)
+    # V3.0 保留这个保护，但改成「保守起步 + 稳定后自动升」，不再永久卡在 4。
+    #
+    # 为什么要看 cookies：实测（2026-10-21）**匿名**打 view API，并发 3 就返回 412，
+    # 连单条串行都能被拦 —— 匿名根本没有「安全并发」这回事。
+    # V2.5 的「30/30 缩略图」是**带 Cookie** 时验证出来的，不能拿同样的数字去要求匿名访问。
+    # 所以：有 Cookie 起步 4 路，没 Cookie 从 1 路起，稳定后照样升到上限。
+    gate = GOVERNOR.gate("bili", KIND_METADATA, start_at=(4 if cookies else 1))
     workers = max(1, min(gate.ceiling, len(items)))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [ex.submit(work, pair) for pair in enumerate(items)]
