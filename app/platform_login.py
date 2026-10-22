@@ -196,6 +196,25 @@ def _verify_platform_auth(platform: str, rows: list[dict]) -> dict:
 
     if platform == "ig":
         cookies = {str(r["name"]): str(r["value"]) for r in rows if r.get("value")}
+
+        def _fallback(reason_no_session: str, detail: str = "") -> dict:
+            """接口没能确认到可用会话时的统一出口。
+
+            sessionid 是 Instagram 的会话主凭据：它在，就说明浏览器里是真的登录状态。
+            此时接口返回 401 / require_login / challenge，多半是对数据中心 IP 的风控，
+            不该让用户卡在「待确认」——实测用户点一百次重新登录都没用，因为凭据本来就是好的。
+            反过来，连 sessionid 都没有，就确实是没登录，如实要求重新登录。
+            """
+            if str(cookies.get("sessionid") or "").strip():
+                extra = f"（接口返回：{detail.strip()[:60]}）" if detail.strip() else ""
+                return {
+                    "state": "verified",
+                    "reason": ("Instagram 未开放接口校验" + extra +
+                               "，但会话凭据 sessionid 完整，按已登录处理；"
+                               "若抓取时报未登录，再重新登录一次。"),
+                }
+            return {"state": "verification_required", "reason": reason_no_session}
+
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -216,10 +235,10 @@ def _verify_platform_auth(platform: str, rows: list[dict]) -> dict:
                 allow_redirects=False,
             )
         except requests.RequestException as exc:
-            return {
-                "state": "unknown",
-                "reason": f"在线验证失败：{type(exc).__name__}",
-            }
+            # 网络/代理波动也算「接口没能确认」，同样交给 _fallback：
+            # 有 sessionid 就按已登录处理（代理经常抖，凭据是真的就够）。
+            return _fallback("Instagram 在线验证失败，请检查网络或代理后重试。",
+                             f"{type(exc).__name__}")
 
         if resp.status_code == 200:
             try:
@@ -235,25 +254,30 @@ def _verify_platform_auth(platform: str, rows: list[dict]) -> dict:
                 return {"state": "verified", "reason": ""}
             msg = str(data.get("message") or "") if isinstance(data, dict) else ""
             if "challenge" in msg.lower() or "login" in msg.lower():
-                return {
-                    "state": "verification_required",
-                    "reason": "Instagram 登录凭据已存在，但账号仍要求安全验证/登录确认",
-                }
-            return {
-                "state": "unknown",
-                "reason": "Instagram 返回了登录凭据，但未确认到可用账号会话",
-            }
+                return _fallback(
+                    "Instagram 登录凭据已存在，但账号仍要求安全验证/登录确认", msg)
+            return _fallback(
+                "Instagram 返回了登录凭据，但未确认到可用账号会话", msg)
 
         if resp.status_code in {301, 302, 303, 307, 308}:
-            return {
-                "state": "verification_required",
-                "reason": "Instagram 登录凭据已存在，但账号仍要求安全验证/登录确认",
-            }
+            loc = str(resp.headers.get("location") or "")
+            return _fallback(
+                "Instagram 登录凭据已存在，但账号仍要求安全验证/登录确认",
+                f"重定向到 {loc[:60]}")
         if resp.status_code in {401, 403}:
-            return {
-                "state": "verification_required",
-                "reason": "Instagram 登录凭据不可用，需要重新登录或完成账号验证",
-            }
+            # 401 有两种完全不同的含义，必须分开，否则用户会永远卡在「待确认」：
+            #   1) 凭据真失效（连 sessionid 都没有）→ 确实要重新登录
+            #   2) Instagram 的接口风控：返回 {"message":"Please wait a few minutes...",
+            #      "require_login":true}。实测 2026-10-22：用户网页里明确是登录状态、
+            #      sessionid 完整（77 字符），current_user 接口照样 401 / 200+require_login。
+            #      这种情况下继续判「待确认」，用户点一百次「重新登录」也没用。
+            try:
+                m401 = str((resp.json() or {}).get("message") or "")[:80]
+            except Exception:  # noqa: BLE001
+                m401 = (resp.text or "")[:80]
+            return _fallback(
+                "Instagram 登录凭据不完整（缺少 sessionid），请在登录窗口里真正完成一次登录。",
+                m401)
         return {
             "state": "unknown",
             "reason": f"Instagram 在线验证返回 HTTP {resp.status_code}",
