@@ -1,10 +1,11 @@
 # UTF-8
 # PyInstaller VersionResource：MediaDownloader.exe 的 Windows 文件属性
+# V3.0：版本号升到 3.0.0，产品名带版本后缀（窗口标题/文件属性都能和 V2.5 区分）。
 # CompanyName/版权暂留空 —— Publisher 由用户最终确认后再补（1E.2 决议）。
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 5, 0, 0),
-    prodvers=(2, 5, 0, 0),
+    filevers=(3, 0, 0, 0),
+    prodvers=(3, 0, 0, 0),
     mask=0x3F,
     flags=0x0,
     OS=0x40004,
@@ -15,10 +16,10 @@ VSVersionInfo(
   kids=[
     StringFileInfo([
       StringTable('080404B0', [
-        StringStruct('FileDescription', 'MediaDownloader'),
-        StringStruct('ProductName', 'MediaDownloader'),
-        StringStruct('FileVersion', '2.5.0.0'),
-        StringStruct('ProductVersion', '2.5.0'),
+        StringStruct('FileDescription', 'MediaDownloader 3.0'),
+        StringStruct('ProductName', 'MediaDownloader 3.0'),
+        StringStruct('FileVersion', '3.0.0.0'),
+        StringStruct('ProductVersion', '3.0.0'),
         StringStruct('OriginalFilename', 'MediaDownloader.exe'),
         StringStruct('InternalName', 'MediaDownloader'),
         StringStruct('CompanyName', ''),

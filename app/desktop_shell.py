@@ -16,7 +16,7 @@ from pathlib import Path
 from .config import BUNDLE_DIR, DATA_ROOT, RESOURCE_ROOT
 from .ports import probe_running, resolve_port
 
-TITLE = "MediaDownloader"
+TITLE = "MediaDownloader 3.0"   # 与 V2.5 的 "MediaDownloader" 区分，避免用户分不清打开的是哪个
 WIDTH = 1280
 HEIGHT = 860
 MIN_SIZE = (980, 680)

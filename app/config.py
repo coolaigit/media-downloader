@@ -7,7 +7,17 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+# ---------- 产品标识 ----------
+# V3.0 用独立的数据目录，绝不和 V2.5 共用。
+# 原因（2026-10-22 事故）：两版 config 结构会各自演进，共用同一个 config.json
+# 必然互相覆盖；再加上端口认领问题，用户会看到「装好的客户端被改了」的假象。
+APP_TITLE = "MediaDownloader 3.0"       # 窗口标题 / 任务栏 / 开始菜单（与 V2.5 明确区分）
+APP_VERSION = "3.0.0"
+DATA_DIR_NAME = "MediaDownloader3"      # 本版数据目录名
+LEGACY_DATA_DIR_NAME = "MediaDownloader"  # V2.5 的数据目录名（只读，用于首次迁移）
 
 # ---------- 运行环境判定与三大根目录（1A 路径体系） ----------
 #
@@ -47,11 +57,73 @@ PYLIBS_DIR = BUNDLE_DIR / "_pylibs"
 def _default_data_root() -> Path:
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        return Path(base) / "MediaDownloader"
-    return Path.home() / ".mediadownloader"
+        return Path(base) / DATA_DIR_NAME
+    return Path.home() / ".mediadownloader3"
 
 
 DATA_ROOT = Path(os.environ.get("MEDIA_DOWNLOADER_DATA_DIR") or _default_data_root())
+
+
+def _migrate_from_v25() -> None:
+    """V3.0 首次启动：把 V2.5 的数据**复制**一份过来（复制，不是共用）。
+
+    为什么不用同一个目录：两版 config 结构会各自演进，共用必然互相覆盖
+    （2026-10-22 真实事故）。复制之后两套彻底独立，可以同时安装、同时运行。
+
+    规则：
+    - 显式指定了 MEDIA_DOWNLOADER_DATA_DIR（测试/部署）→ 不迁移
+    - 已经有迁移标记 → 不重复迁移
+    - 目标目录里已有对应内容 → 不覆盖（用户自己放过东西）
+    - 只迁移配置 / 台账 / 平台登录态，不迁移 logs、tmp 这类临时物
+    """
+    if os.environ.get("MEDIA_DOWNLOADER_DATA_DIR"):
+        return
+    if os.name != "nt":
+        return
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    legacy = Path(base) / LEGACY_DATA_DIR_NAME
+    if not legacy.is_dir():
+        return
+    marker = DATA_ROOT / ".migrated_from_v25"
+    if marker.exists():
+        return
+    try:
+        DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+
+    log: list[str] = []
+    started = time.time()
+    for name in ("config.json", "data", "platform_profiles", "site_profiles"):
+        src = legacy / name
+        dst = DATA_ROOT / name
+        if not src.exists():
+            continue
+        try:
+            if src.is_file():
+                if not dst.exists():
+                    shutil.copy2(src, dst)
+                    log.append(f"复制 {name}")
+            else:
+                if dst.exists() and any(dst.iterdir()):
+                    log.append(f"跳过 {name}（目标已有内容）")
+                    continue
+                shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+                n = sum(1 for _ in dst.rglob("*"))
+                log.append(f"复制 {name}（{n} 项）")
+        except Exception as e:  # noqa: BLE001
+            log.append(f"复制 {name} 失败：{type(e).__name__}: {e}")
+
+    try:
+        marker.write_text(json.dumps({
+            "from": str(legacy), "ts": int(time.time()),
+            "elapsed": round(time.time() - started, 1), "actions": log,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+_migrate_from_v25()
 
 
 def _migrate_from_resource(rel: Path) -> None:

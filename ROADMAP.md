@@ -73,7 +73,7 @@ V2.5 Final → V3.0 工作副本 → 开发 → 自动测试 → 真实平台测
 抖音 / B站 / 微博 / 小红书 / YouTube / Instagram / TikTok / Pinterest / 快手 / 关键词搜图。
 重点：V2.5 已修好的功能一条都不许回归（见 `PROJECT.md` §保留清单）。
 
-## Phase 6：测试安装包
+## Phase 6：打包与交付　✅ 便携版已出 2026-10-22
 
 `MediaDownloader-Setup-3.0.0-Test.exe`（**不转正式版**）。
 必须真机验证：pystray 已打包、Chromium 存在、ffmpeg 存在、BrowserSkill 存在、资源路径、WebView、托盘、升级安装、用户数据保留。
