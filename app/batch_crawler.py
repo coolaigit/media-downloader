@@ -1543,7 +1543,10 @@ def crawl_list(
     if expand_listing and _kinds and _kinds <= {"image"}:
         from . import profile_sources as _ps_img
         _img_platform = _ps_img.platform_for_url(list_url)
-        if _img_platform == "xhs" and "/user/profile/" in _path_low:
+        # V3.0：发现页/搜索页也走小红书专用图文来源。
+        # 以前这里只认 /user/profile/，发现页会掉到普通网页抓取 —— 而发现页是纯 JS 渲染，
+        # 实测只能捞到 6 张站点装饰图（横幅/图标/埋点），一张正文图都没有。
+        if _img_platform == "xhs" and _ps_img.xhs_page_kind(list_url) in {"profile", "feed", "search"}:
             _emit("list", 0, 1, "\u6b63\u5728\u8bfb\u53d6\u5c0f\u7ea2\u4e66\u4f5c\u8005\u4f5c\u54c1\u5217\u8868\u548c\u56fe\u6587\u7b14\u8bb0\u6b63\u6587\u56fe\u7247\u2026")
             xhs_exp, _xhs_note = _expand_xhs_image_source(
                 list_url, limit=max(1, min(int(max_items or 30) or 30, 2000)),

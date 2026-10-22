@@ -852,6 +852,284 @@ def xhs_detail_item(url: str, *, timeout: int = 300, on_note=None) -> dict:
     return direct
 
 
+# ---------- 小红书发现页 / 搜索页（V3.0 Phase 5）----------
+# 主页有 /user/profile/<id> 可以按用户拉列表；发现页和搜索页没有「用户」这个概念，
+# 只能先拿到一批笔记引用（note_id + xsec_token），再逐篇下钻。
+# 两条接口都走 xhshow 签名，和 xhs_author_items 同一套机制。
+_XHS_HOMEFEED_API = "https://edith.xiaohongshu.com/api/sns/web/v1/homefeed"
+_XHS_SEARCH_API = "https://edith.xiaohongshu.com/api/sns/web/v1/search/notes"
+
+
+def xhs_page_kind(url: str) -> str:
+    """判断一个小红书地址属于哪类页面：profile / feed / search / note / 空。
+
+    为什么要分：主页拉列表、发现页/搜索页拉列表、单篇笔记取图片，
+    三者用的接口和参数完全不同，混用只会报「缺少 xsec_token」这种看不懂的错。
+    """
+    try:
+        pu = urlparse(url)
+    except Exception:
+        return ""
+    host = (pu.hostname or "").lower()
+    if "xiaohongshu.com" not in host:
+        return ""
+    path = (pu.path or "").lower()
+    if "/user/profile/" in path:
+        return "profile"
+    if "/search_result" in path:
+        return "search"
+    if path.startswith("/explore") and path.strip("/") == "explore":
+        return "feed"
+    if "/explore/" in path or "/discovery/item/" in path:
+        return "note"
+    if path.strip("/") in ("", "explore"):
+        return "feed"
+    return ""
+
+
+def _xhs_https(u: str) -> str:
+    """小红书 CDN 返回的是 http 链接，统一升级到 https。
+
+    只在发现页这条新链路上用，不动作者主页的既有行为（避免回归）。
+    xhscdn.com 两种协议都能访问，但 https 在代理/重定向环境下更稳。
+    """
+    u = str(u or "")
+    if u.startswith("http://") and "xhscdn.com" in u:
+        return "https://" + u[len("http://"):]
+    return u
+
+
+def _xhs_note_url(note_id: str, token: str, source: str = "pc_feed") -> str:
+    from urllib.parse import quote
+    return (f"https://www.xiaohongshu.com/explore/{note_id}"
+            f"?xsec_token={quote(str(token), safe='')}&xsec_source={source}")
+
+
+def _xhs_api_post(endpoint: str, payload: dict, *, referer: str, cookies: dict,
+                  timeout: int = 30) -> tuple[dict | None, str]:
+    """小红书签名 POST 的统一封装（代理 ⇄ 直连互为兜底）。返回 (data, error)。"""
+    try:
+        from xhshow import Xhshow
+    except ImportError:
+        return None, "内置 xhshow 不可用"
+    try:
+        headers = Xhshow().sign_headers_post(
+            uri=endpoint, cookies=cookies, payload=payload, x_rap=True)
+    except Exception as e:  # noqa: BLE001
+        return None, f"小红书签名失败：{e}"
+    headers.update({
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0 Safari/537.36",
+        "accept": "application/json, text/plain, */*",
+        "content-type": "application/json;charset=UTF-8",
+        "origin": "https://www.xiaohongshu.com",
+        "referer": referer,
+    })
+    resp = None
+    last_exc: Exception | None = None
+    for trust in (True, False):
+        try:
+            with requests.Session() as sess:
+                sess.trust_env = trust
+                resp = sess.post(endpoint, json=payload, cookies=cookies,
+                                 headers=headers, timeout=min(int(timeout), 30))
+            break
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+    if resp is None:
+        return None, f"小红书接口请求失败：{type(last_exc).__name__}: {last_exc}"
+    try:
+        data = resp.json()
+    except Exception:
+        return None, f"小红书接口返回非 JSON（HTTP {resp.status_code}）"
+    if not data.get("success"):
+        err = (f"小红书接口报错（code={data.get('code')}）："
+               f"{str(data.get('msg') or '')[:100]}")
+        if data.get("code") == -101 or platform_login.looks_like_auth_error(err):
+            platform_login.mark_invalid("xhs", err)
+        return None, err
+    return data, ""
+
+
+def xhs_feed_note_refs(url: str, *, limit: int = 30, timeout: int = 30,
+                       on_note=None) -> dict:
+    """发现页 / 搜索页 → 笔记引用列表（note_id + xsec_token + xsec_source）。
+
+    返回 {"ok","refs":[{note_id,xsec_token,xsec_source,title}],"login_required","error"}。
+    """
+    from urllib.parse import parse_qs
+
+    kind = xhs_page_kind(url)
+    if kind not in {"feed", "search"}:
+        return {"ok": False, "refs": [], "login_required": False,
+                "error": f"不是发现页/搜索页地址（识别为 {kind or '未知'}）"}
+    ck, _ = _load_cookie_dict("xiaohongshu")
+    if not ck.get("web_session"):
+        return {"ok": False, "refs": [], "login_required": True,
+                "error": "小红书发现页需要登录态（web_session），"
+                         "请到「平台登录」登录小红书一次。"}
+
+    want = max(1, min(int(limit or 30), 300))
+    refs: list[dict] = []
+    seen: set[str] = set()
+
+    def _take(items, source: str) -> int:
+        added = 0
+        for it in items if isinstance(items, list) else []:
+            if not isinstance(it, dict):
+                continue
+            nid = str(it.get("id") or (it.get("note_card") or {}).get("note_id") or "")
+            tok = str(it.get("xsec_token") or "")
+            if not nid or not tok or nid in seen:
+                continue
+            seen.add(nid)
+            card = it.get("note_card") if isinstance(it.get("note_card"), dict) else {}
+            refs.append({
+                "note_id": nid,
+                "xsec_token": tok,
+                "xsec_source": source,
+                "title": str(card.get("display_title") or card.get("title") or "")[:120],
+            })
+            added += 1
+        return added
+
+    if kind == "search":
+        qs = parse_qs(urlparse(url).query or "")
+        keyword = str((qs.get("keyword") or qs.get("q") or [""])[0]).strip()
+        if not keyword:
+            return {"ok": False, "refs": [], "login_required": False,
+                    "error": "搜索页地址里没有 keyword 参数"}
+        if on_note:
+            on_note(f"正在用签名接口搜索「{keyword}」并读取笔记列表…")
+        # search_id 不能为空：实测传空字符串时接口 success=True 但 data 是空对象（0 条），
+        # 传一个 24 位十六进制（与前端生成的一致）才能拿到 items。这是个很坑的静默失败。
+        import random as _random
+        search_id = "".join(_random.choices("0123456789abcdef", k=24))
+        page = 1
+        while len(refs) < want and page <= 8:
+            payload = {
+                "keyword": keyword, "page": page, "page_size": 20,
+                "search_id": search_id, "sort": "general", "note_type": 0,
+            }
+            data, err = _xhs_api_post(
+                _XHS_SEARCH_API, payload, referer=url, cookies=ck, timeout=timeout)
+            if not data:
+                if refs:
+                    break
+                return {"ok": False, "refs": [], "login_required": False, "error": err}
+            got = _take(((data.get("data") or {}).get("items") or []), "pc_search")
+            if not got:
+                break
+            page += 1
+    else:
+        if on_note:
+            on_note("正在用签名接口读取小红书发现页笔记列表…")
+        cursor = ""
+        rounds = 0
+        while len(refs) < want and rounds < 8:
+            rounds += 1
+            payload = {
+                "cursor_score": cursor, "num": 20, "refresh_type": 1,
+                "note_index": len(refs), "unread_begin_note_id": "",
+                "unread_end_note_id": "", "unread_note_count": 0,
+                "category": "homefeed_recommend", "search_key": "",
+                "need_num": 20, "image_formats": ["jpg", "webp", "avif"],
+                "need_filter_image": False,
+            }
+            data, err = _xhs_api_post(
+                _XHS_HOMEFEED_API, payload, referer="https://www.xiaohongshu.com/explore",
+                cookies=ck, timeout=timeout)
+            if not data:
+                if refs:
+                    break
+                return {"ok": False, "refs": [], "login_required": False, "error": err}
+            body = data.get("data") or {}
+            got = _take(body.get("items") or [], "pc_feed")
+            cursor = str(body.get("cursor_score") or "")
+            if not got or not cursor:
+                break
+
+    if not refs:
+        return {"ok": False, "refs": [], "login_required": False,
+                "error": "接口正常但没有解析出任何笔记（可能是账号无推荐内容或需要重新登录）。"}
+    return {"ok": True, "refs": refs[:want], "login_required": False, "error": ""}
+
+
+def xhs_feed_items(url: str, *, limit: int = 30, want_video: bool = False,
+                   on_note=None) -> dict:
+    """发现页 / 搜索页 → 逐篇下钻取图或视频。
+
+    图片笔记走 xhs_detail_images（正文图，排除头像/UI），
+    视频笔记走 xhs_detail_item（签名详情拿 mp4 直链）。
+    视频模式下遇到纯图文笔记会自然跳过；图片模式下遇到视频笔记同理。
+    """
+    got = xhs_feed_note_refs(url, limit=max(int(limit or 30) * 2, 20), on_note=on_note)
+    if not got.get("ok"):
+        return {"ok": False, "items": [], "login_required": got.get("login_required", False),
+                "error": got.get("error") or "没有拿到发现页笔记列表"}
+
+    refs = got.get("refs") or []
+    if on_note:
+        on_note(f"发现页拿到 {len(refs)} 篇笔记，正在逐篇读取"
+                f"{'视频' if want_video else '正文图片'}…")
+
+    out: list[dict] = []
+    videos = images = failed = skipped = 0
+    for r in refs:
+        if len(out) >= max(1, int(limit or 30)) and (videos if want_video else images):
+            break
+        note_url = _xhs_note_url(r["note_id"], r["xsec_token"],
+                                 r.get("xsec_source") or "pc_feed")
+        if want_video:
+            res = xhs_detail_item(note_url)
+            item = (res or {}).get("item") or {}
+            direct = str(item.get("direct_url") or "")
+            if not direct:
+                # 接口成功但没有视频直链 = 这是一篇图文笔记，视频模式下正常跳过；
+                # 只有接口本身失败才算 failed（否则统计会把「跳过」说成「失败」）。
+                if (res or {}).get("ok"):
+                    skipped += 1
+                else:
+                    failed += 1
+                continue
+            videos += 1
+            out.append({
+                "page_url": note_url,
+                "direct_url": _xhs_https(direct),
+                "variants": item.get("variants") or [],
+                "title": str(item.get("title") or r.get("title") or "")[:150],
+                "cover": _xhs_https(str(item.get("cover") or "")),
+                "uploader": str(item.get("uploader") or ""),
+                "site": "xiaohongshu.com",
+                "duration": item.get("duration"),
+                "kind_hint": "video",
+            })
+        else:
+            res = xhs_detail_images(note_url)
+            if res.get("is_video"):
+                continue          # 视频笔记在图片模式里本来就该跳过，不算失败
+            if not res.get("ok"):
+                failed += 1
+                continue
+            for it in res.get("items") or []:
+                it = dict(it)
+                it["page_url"] = note_url
+                it.setdefault("uploader", "")
+                it["direct_url"] = _xhs_https(it.get("direct_url") or "")
+                it["cover"] = _xhs_https(it.get("cover") or it.get("direct_url") or "")
+                out.append(it)
+                images += 1
+                if len(out) >= max(1, int(limit or 30)):
+                    break
+
+    if not out:
+        return {"ok": False, "items": [], "login_required": False,
+                "error": f"发现页共 {len(refs)} 篇笔记，但没读到"
+                         f"{'可下载的视频' if want_video else '正文图片'}"
+                         f"（跳过 {skipped} 篇类型不符，失败 {failed} 篇）。"}
+    return {"ok": True, "items": out[:max(1, int(limit or 30))], "login_required": False,
+            "error": "", "scanned": len(refs), "failed": failed, "skipped": skipped}
+
+
 def _entry_item(entry: dict, source_url: str) -> dict | None:
     page = str(entry.get("webpage_url") or entry.get("original_url") or entry.get("url") or "").strip()
     if page and not page.startswith("http"):
@@ -914,6 +1192,12 @@ def weibo_author_items(url: str, *, limit: int = 30, want_video: bool = False,
         "Referer": f"https://weibo.com/u/{uid}",
         "X-Requested-With": "XMLHttpRequest",
     }
+    # V3.0：微博的 ajax 接口除了 SUB cookie，还校验 X-XSRF-TOKEN 头。
+    # 只带 cookie 不带这个头会直接 403（实测 2026-10-22：cookie 里 XSRF-TOKEN 明明存在，
+    # 但 platform_login.status 只看 cookie 是否存在，所以界面显示「已登录」而接口拒绝）。
+    _xsrf = str(cookies.get("XSRF-TOKEN") or "").strip()
+    if _xsrf:
+        headers["X-XSRF-TOKEN"] = _xsrf
     target = max(1, min(int(limit or 30), 2000))
     items: list[dict] = []
     seen: set[str] = set()
@@ -937,8 +1221,13 @@ def weibo_author_items(url: str, *, limit: int = 30, want_video: bool = False,
             return {"ok": False, "items": [], "login_required": False,
                     "error": f"微博作品流请求失败：{type(e).__name__}: {e}"}
         if r.status_code in (401, 403, 418):
+            # 标记失效，否则平台登录页会一直显示「已登录」（它只看 cookie 在不在），
+            # 用户完全不知道要去重新登录一次。实测 2026-10-22：cookie 全在但服务端 403。
+            platform_login.mark_invalid(
+                "wb", f"微博作品流返回 HTTP {r.status_code}，登录凭据已被服务端拒绝")
             return {"ok": False, "items": items, "login_required": True,
-                    "error": f"微博作品流返回 HTTP {r.status_code}，登录态可能失效"}
+                    "error": f"微博作品流返回 HTTP {r.status_code}，登录态已失效，"
+                             f"请到「平台登录」重新登录微博后再试。"}
         try:
             payload = r.json()
         except Exception:
@@ -1656,10 +1945,17 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
     attempts = []
 
     if platform == "xhs":
-        res = (xhs_author_items(url, limit=limit, on_note=on_note)
-               if want_video else
-               xhs_author_image_items(url, limit=limit, on_note=on_note))
-        attempts.append(("xhshow", res))
+        # V3.0：发现页/搜索页和作者主页是两条完全不同的链路。
+        # 发现页没有「用户」概念，只能先拿笔记引用再逐篇下钻。
+        _xhs_kind = xhs_page_kind(url)
+        if _xhs_kind in {"feed", "search"}:
+            res = xhs_feed_items(url, limit=limit, want_video=want_video, on_note=on_note)
+            attempts.append(("xhshow-发现页", res))
+        else:
+            res = (xhs_author_items(url, limit=limit, on_note=on_note)
+                   if want_video else
+                   xhs_author_image_items(url, limit=limit, on_note=on_note))
+            attempts.append(("xhshow", res))
         # Image mode must not fall back to generic page scanning: that reintroduces
         # avatars, site UI assets and recommendation-feed images.
         if not want_video and not res.get("ok"):
@@ -1678,6 +1974,13 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
     if platform == "wb" and not res.get("ok"):
         res = weibo_author_items(url, limit=limit, want_video=want_video, on_note=on_note)
         attempts.append(("微博作品流", res))
+        if res.get("login_required"):
+            # 微博自有接口明确说「登录凭据被服务端拒绝」时就不再兜底了：
+            # gallery-dl / yt-dlp 走微博同样要吃登录态，实测它们只会返回 1 条无关视频
+            # 然后被当成「成功」，上层再按图片过滤成 0 条 —— 用户看到的是「0 条」而不是
+            # 「请重新登录」，这个歧义正是 V3.0 要消掉的（实测 2026-10-22）。
+            why = str(res.get("error") or "微博登录态不可用")
+            return [], (f"微博登录态已失效，请到「平台登录」重新登录微博后再试。{why}")
 
     if platform == "dy" and not res.get("ok"):
         res = douyin_author_items(url, limit=limit, on_note=on_note)
