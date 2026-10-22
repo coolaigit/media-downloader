@@ -1287,9 +1287,13 @@ def api_reveal_download(payload: dict = Body(default={})):
 
 @app.get("/api/health")
 def api_health():
-    # app 标记（1D）：启动器靠它区分「本工具已在运行」与「其它程序恰好在监听端口」，
-    # 见 app/ports.probe_running —— 不要删。
-    return {"ok": True, "app": "MediaDownloader", "root": str(ROOT)}
+    # app 标记（1D）：启动器靠它区分「本工具已在运行」与「其它程序恰好在监听端口」。
+    # instance（V3.0）：数据目录+资源目录的指纹。启动器认领实例时必须比对它 ——
+    # 否则开发版跑在 8850 会被已安装版当成「自己」，窗口挂到错误的版本上
+    # （2026-10-22 真实事故，详见 app/ports.py 顶部说明）。这两项都不要删。
+    from .ports import instance_id
+    return {"ok": True, "app": "MediaDownloader", "root": str(ROOT),
+            "instance": instance_id(), "data_root": str(DATA_ROOT)}
 
 
 # ---------- 前端静态资源 ----------

@@ -14,22 +14,53 @@ bat / PowerShell / launcher.py / serve.py 直启 全部经 resolve_port()，
   3. 都没有                —— 先扫 8848-8870 找「本工具已有实例」（识别到就
                               打开页面、绝不双实例），再扫空闲端口启动。
 
-已有实例识别：探测 /api/health 并校验 app 标记 —— 不能只看端口有没有人听，
-恰好有别的程序占着 8848 时不能误认成自己。
+已有实例识别：探测 /api/health，校验 app 标记 **和实例身份** —— 不能只看端口有没有人听，
+恰好有别的程序占着 8848 时不能误认成自己；
+**另一个版本 / 另一份数据目录的实例也不能认领**（见下）。
+
+⚠️ 2026-10-22 事故：开发机在 8850 跑源码版（数据目录是隔离的 _v3_data_auth），
+用户双击已安装的 V2.5，它扫到 8850 的 app 标记就认领成「我已经在运行」，
+窗口直接连到源码版 —— 用户看到的是开发版界面和开发版的下载目录，
+以为安装好的客户端被污染了。根因就是「只认 app 标记，不认是谁」。
+所以现在健康检查必须带 instance（数据目录+资源目录指纹），认领时必须比对。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
 import urllib.request
+from pathlib import Path
 
 PORT_FIRST = 8848
 PORT_LAST = 8870
 PORT_RANGE = range(PORT_FIRST, PORT_LAST + 1)
+# 源码运行（开发/测试）默认端口段：故意远离 8848-8870。
+# 原因见下方 instance_id 与顶部事故说明 —— 已安装的老版本只认 app 标记，
+# 它扫 8848-8870 时会把开发实例当成自己。旧版本已经编译死了改不了，
+# 唯一保险就是开发服务根本不出现在那个段里。
+DEV_PORT_FIRST = 18700
+DEV_PORT_LAST = 18720
+DEV_PORT_RANGE = range(DEV_PORT_FIRST, DEV_PORT_LAST + 1)
 ENV_PORT = "MEDIA_DOWNLOADER_PORT"
 ENV_NO_BROWSER = "MEDIA_DOWNLOADER_NO_BROWSER"
 APP_MARKER = "MediaDownloader"
+
+
+def instance_id() -> str:
+    """当前实例的身份指纹 = 数据目录 + 资源目录。
+
+    同一个安装的第二次启动会得到相同指纹（正确认领）；
+    源码版 / 另一份数据目录的实例指纹不同（绝不认领）。
+    """
+    try:
+        from .config import DATA_ROOT, RESOURCE_ROOT
+        raw = f"{Path(DATA_ROOT).resolve()}|{Path(RESOURCE_ROOT).resolve()}"
+    except Exception:  # noqa: BLE001
+        raw = "unknown"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
 
 
 def _fetch_health(port: int, timeout: float) -> dict | None:
@@ -43,10 +74,21 @@ def _fetch_health(port: int, timeout: float) -> dict | None:
         return None
 
 
-def probe_running(port: int, timeout: float = 1.0) -> bool:
-    """该端口上是否跑着**本工具**的实例（健康检查 + app 标记双重确认）。"""
+def probe_running(port: int, timeout: float = 1.0, expect_instance: str = "") -> bool:
+    """该端口上是否跑着**本工具、且是同一个实例**。
+
+    expect_instance 为空时退化为只校验 app 标记（兼容旧调用）；
+    给定时要求 /api/health 里的 instance 与之一致 ——
+    没有 instance 字段的老版本一律**不认领**：宁可多起一个服务，
+    也不能把窗口挂到别的版本/别的数据目录上。
+    """
     data = _fetch_health(port, timeout)
-    return bool(data) and data.get("app") == APP_MARKER and data.get("ok") is True
+    if not (data and data.get("app") == APP_MARKER and data.get("ok") is True):
+        return False
+    if not expect_instance:
+        return True
+    got = str(data.get("instance") or "")
+    return bool(got) and got == expect_instance
 
 
 def port_free(port: int) -> bool:
@@ -72,18 +114,26 @@ def resolve_port(cli_port: int | None = None) -> tuple[str, int | None]:
         if env.isdigit() and 0 < int(env) < 65536:
             explicit = int(env)
 
+    me = instance_id()
+    # 源码运行用独立端口段，绝不落在已安装版本的扫描范围里（2026-10-22 事故的根治）
+    try:
+        from .config import FROZEN
+        ranges = PORT_RANGE if FROZEN else DEV_PORT_RANGE
+    except Exception:  # noqa: BLE001
+        ranges = PORT_RANGE
+
     if explicit is not None:  # 显式指定：只用它，成败分明
-        if probe_running(explicit):
+        if probe_running(explicit, expect_instance=me):
             return ("running", explicit)
         if port_free(explicit):
             return ("serve", explicit)
         return ("busy-foreign", explicit)
 
-    # 默认：先认领已有实例，再找空闲端口
-    for p in PORT_RANGE:
-        if probe_running(p):
+    # 默认：先认领**同一个实例**，再找空闲端口
+    for p in ranges:
+        if probe_running(p, expect_instance=me):
             return ("running", p)
-    for p in PORT_RANGE:
+    for p in ranges:
         if port_free(p):
             return ("serve", p)
     return ("exhausted", None)
