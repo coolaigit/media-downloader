@@ -513,17 +513,22 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40) -> str:
             pass
 
     def _score(u: str) -> int:
-        """给候选打分：越像"正片"分越高（站点自己的 /contents/data 推广位分最低）。"""
+        """给候选打分：越像"正片"分越高。
+
+        只用通用特征，不为任何具体站点写规则：
+        - 视频目录（/upload/videos/、/videos/、/original）加分
+        - 站点自己的推广位目录（contents/data、creative、promo）减分
+        """
         low = (u or "").lower()
         s = 0
-        if "hdplayer" in low or "/upload/videos/" in low:
-            s += 100          # 独立播放器的视频目录，最像正片
+        if any(k in low for k in ("/upload/videos/", "/videos/", "/video/")):
+            s += 60
         if any(k in low for k in ("/original", "/hd/", "/source", "/media/")):
             s += 40
         if any(k in low.split("?")[0] for k in (".mp4", ".m3u8", ".webm")):
             s += 20
-        if any(k in low for k in ("/contents/data/", "/creative/", "/promo/")):
-            s -= 60           # 站内推广位
+        if any(k in low for k in ("/contents/data/", "/creative/", "/promo/", "/banner/")):
+            s -= 60
         return s
 
     dom_cands: list = []
