@@ -455,24 +455,28 @@ def _run_with_deadline(fn, deadline: float):
 
 _AD_MEDIA_MARKERS = ("728x90", "300x250", "320x50", "970x250", "160x600", "300x600",
                      "/ads/", "/ad/", "banner", "sponsor", "promo")
+# 站内「推广位」路径：hornyleak 的 HL.VIDEOS 里 8 条全是 contents/data/video-XX，
+# 那是广告轮播，不是当前视频（实测 2026-10-24）。
+_AD_PATH_HINTS = ("/contents/data/video-", "/creative/", "/promo/")
 
 
 def _is_ad_media(url: str) -> bool:
     low = (url or "").lower()
-    return any(mk in low for mk in _AD_MEDIA_MARKERS)
+    return any(mk in low for mk in _AD_MEDIA_MARKERS) or any(h in low for h in _AD_PATH_HINTS)
 
 
 def resolve_media_via_render(page_url: str, *, timeout: int = 40) -> str:
-    """给 yt-dlp 不认识的站解析真实媒体地址（渲染页面找播放器）。
+    """给 yt-dlp 不认识的站解析真实媒体地址（渲染页面 + 监听网络请求）。
 
-    为什么需要（2026-10-24 用户实测 hornyleak.tv「下载的文件不对」）：
-    yt-dlp 的 HTML5MediaEmbed 会抓页面里**第一个** `<video>`，而那个位置常常是广告位——
-    实测该站解析出来的是 `https://www.hornyleak.tv/contents/data/728x90-1.mp4`，
-    728×90 正是标准广告横幅尺寸。于是用户下到的是广告，不是视频。
+    为什么需要（2026-10-24 用户实测 hornyleak.tv）：
+    1) yt-dlp 的 HTML5MediaEmbed 抓页面**第一个** `<video>`，那个位置是 728x90 广告位；
+    2) 只读 DOM 也不行 —— 主播放器的 `<video>` 要点击后才挂 src，而页面上的
+       `HL.VIDEOS` 里 8 条全是站内推广位（contents/data/video-XX），
+       直接按 DOM 顺序取会拿到「推荐视频」，用户看到的就是"下载的不是列表里的那个"。
 
-    做法：渲染页面（必要时点一下播放按钮），收集 `<video src>` / `<source src>` /
-    带 mp4|m3u8 的 data-* 属性，过滤掉广告尺寸与 /ads/ 路径，返回第一个候选。
-    拿不到就返回空字符串，调用方继续走原流程。
+    做法：监听网络响应收集所有 mp4/m3u8/webm，点击播放，排除广告尺寸与站内推广路径，
+    取最后一个候选（主播放器通常在点击后才发请求，所以排在后面）。
+    拿不到再退回 DOM 里的 <video src> / data-* 候选。
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -480,34 +484,91 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40) -> str:
         from .config import DEFAULT_UA
     except Exception:  # noqa: BLE001
         return ""
-    cands: list = []
+    fetched: list = []
+
+    def _on_resp(resp):
+        try:
+            u = str(resp.url or "")
+            low = u.lower()
+            ct = str((resp.headers or {}).get("content-type") or "").lower()
+            # 只按 .mp4/.m3u8 后缀判会漏掉一大类：实测 hornyleak 的正片在
+            # https://hdplayer.gives/upload/videos/2026/09/xxx_vid —— 没有扩展名、
+            # content-type 是 application/octet-stream。所以这里"宽进"：
+            # 后缀、video/*、octet-stream、/videos/ 路径、常见播放域名都收。
+            is_media = (
+                any(x in low.split("?")[0] for x in (".mp4", ".m3u8", ".webm", ".mov", ".flv"))
+                or ct.startswith("video/")
+                or ct.startswith("application/octet-stream")
+                or "/upload/videos/" in low
+            )
+            # 注意不要把播放器**页面**当成媒体：hdplayer.gives/embed/xxx 是 HTML。
+            # 也别把同目录的 thumbs.vtt / poster.jpg 当视频 ——
+            # hdplayer 的正片没有扩展名，所以这里按"排除法"过滤非视频后缀。
+            _non_video = (".vtt", ".srt", ".ass", ".jpg", ".jpeg", ".png", ".webp",
+                          ".gif", ".json", ".css", ".js", ".html", ".xml", ".txt")
+            if is_media and "/embed/" not in low \
+                    and not low.split("?")[0].endswith(_non_video):
+                fetched.append(u)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _score(u: str) -> int:
+        """给候选打分：越像"正片"分越高（站点自己的 /contents/data 推广位分最低）。"""
+        low = (u or "").lower()
+        s = 0
+        if "hdplayer" in low or "/upload/videos/" in low:
+            s += 100          # 独立播放器的视频目录，最像正片
+        if any(k in low for k in ("/original", "/hd/", "/source", "/media/")):
+            s += 40
+        if any(k in low.split("?")[0] for k in (".mp4", ".m3u8", ".webm")):
+            s += 20
+        if any(k in low for k in ("/contents/data/", "/creative/", "/promo/")):
+            s -= 60           # 站内推广位
+        return s
+
+    dom_cands: list = []
     try:
         with sync_playwright() as p:
             b = p.chromium.launch(headless=True, **browser_runtime.launch_kwargs())
             page = b.new_page(user_agent=DEFAULT_UA,
                               viewport={"width": 1400, "height": 1000}, locale="zh-CN")
+            page.on("response", _on_resp)
             try:
                 page.goto(page_url, wait_until="domcontentloaded", timeout=timeout * 1000)
             except Exception:  # noqa: BLE001
                 pass
             page.wait_for_timeout(3500)
-            # 不少站的播放器要点了才开始挂 src
+            # 真正的播放器常独立在一个 /embed/ iframe 里：
+            # hornyleak 主框架只有 728x90 广告，正片由 iframe 里的播放器提供，
+            # 而那个播放器只有「直接打开 embed 页」时才会请求视频文件
+            # （在父页面里点 iframe 拿不到，实测 2026-10-24）。
+            embed_url = ""
+            for fr_ in page.frames:
+                fu = str(fr_.url or "")
+                if "/embed/" in fu.lower():
+                    embed_url = fu
+                    break
+            if embed_url:
+                try:
+                    page.goto(embed_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(3000)
+                except Exception:  # noqa: BLE001
+                    pass
+            # 必须点一下播放：播放器不点不发媒体请求
             for sel in ("video", ".play, [class*=play], [id*=play], .vjs-big-play-button"):
                 try:
-                    page.click(sel, timeout=1200)
+                    page.click(sel, timeout=1800)
                     break
                 except Exception:  # noqa: BLE001
                     continue
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(7000)
             try:
-                cands = page.evaluate(
+                dom_cands = page.evaluate(
                     """() => {
                         const out = [];
                         document.querySelectorAll('video').forEach(v => {
                           if (v.src) out.push(v.src);
                           v.querySelectorAll('source').forEach(s => { if (s.src) out.push(s.src); });
-                          const ps = v.getAttribute('data-src') || v.getAttribute('data-url');
-                          if (ps) out.push(ps);
                         });
                         document.querySelectorAll('[data-src],[data-video],[data-file],[data-href],[data-url]').forEach(el => {
                           ['data-src','data-video','data-file','data-href','data-url'].forEach(a => {
@@ -518,15 +579,27 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40) -> str:
                         return out;
                     }""")
             except Exception:  # noqa: BLE001
-                cands = []
+                dom_cands = []
             b.close()
     except Exception:  # noqa: BLE001
         return ""
-    for u in cands if isinstance(cands, list) else []:
+
+    def _ok(u: str) -> str:
         u = str(u or "").strip()
         if not u.startswith("http") or _is_ad_media(u):
-            continue
+            return ""
         return u
+
+    # 网络请求优先：按「像正片的程度」排序，而不是按出现顺序 ——
+    # 页面上先发的往往是推广位/预览，正片由 iframe 播放器后发。
+    pool = [u for u in fetched if _ok(u)]
+    if pool:
+        pool.sort(key=_score, reverse=True)
+        return pool[0]
+    for u in dom_cands if isinstance(dom_cands, list) else []:
+        good = _ok(u)
+        if good:
+            return good
     return ""
 
 
@@ -1037,6 +1110,16 @@ def download_video(
                     }
             except Exception:  # noqa: BLE001 —— 失败就回到原流程
                 pass
+        else:
+            # 解析不到真实播放器时**明确失败**，绝不退回 yt-dlp ——
+            # 那条路会把这个站的 728x90 广告位当成视频下下来，
+            # 用户拿到一个"能播放的假文件"比报错更糟（2026-10-24 实测）。
+            return {
+                "ok": False, "url": url, "files": [],
+                "error": ("这个站点的视频由第三方播放器承载（iframe / 无扩展名地址），"
+                          "暂时无法稳定解析出真实视频地址。为避免把页面上的广告位"
+                          "当成视频下载，这里直接报失败而不是给你一个假文件。"),
+            }
 
     # 已经解析出的签名媒体直链（XHS/Douyin 等）不要再套网页格式选择器。
     # Generic extractor 对这类 .mp4 经常不填 vcodec/acodec/height；继续使用
