@@ -198,8 +198,11 @@ async def _render_async(
             try:
                 pctx = await p.chromium.launch_persistent_context(
                     user_data_dir=prof_dir,
-                    headless=(True if force_headless else
-                              (False if platform_key else not browser_profile.headed())),
+                    # 以前是 (False if platform_key else ...) —— 只要抓的是需要登录态的平台
+                    # （ig/dy/xhs…）就**强制开可见窗口**，跟「显示浏览器窗口」设置无关。
+                    # 用户实测抓 Instagram 视频时窗口凭空弹出，就是这个分支
+                    # （2026-10-24）。现在统一听设置，只有明确要求 headless 时才无头。
+                    headless=(True if force_headless else not browser_profile.headed()),
                     viewport={"width": 1600, "height": 1000},
                     locale="zh-CN",
                     user_agent=user_agent or DEFAULT_UA,
