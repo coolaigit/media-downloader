@@ -1047,6 +1047,117 @@ def _page_main_video_anchor(html: str, base: str):
     return None, vobj, ""
 
 
+_LISTING_LINK_WORDS = ("video", "watch", "view", "clip", "post", "scene", "movie", "embed")
+_LISTING_LINK_DENY = ("tag", "category", "categor", "page=", "sort", "filter",
+                      "login", "signup", "register", "premium", "dmca", "terms",
+                      "privacy", "contact", "about", "help")
+
+
+def _render_listing_links(list_url: str, *, limit: int = 60, on_note=None) -> list[dict]:
+    """用内置浏览器渲染列表页，抽出「视频页」链接（yt-dlp 不认识这个站时的兜底）。
+
+    为什么需要（2026-10-24 用户反馈 hornyleak.tv）：
+    页面形态是 `/models/<名字>/` 这种博主/集合页，识别没问题；但 yt-dlp 没有这个站的
+    提取器，于是回退到通用网页抓取 —— 这类站内容全靠 JS 渲染，静态抓只拿到 1 条。
+    这是一般性问题：**所有 yt-dlp 不支持的中小站点的列表页都会这样**。
+
+    筛选刻意保守（宁可少抓，也不要抓一堆标签页/登录页回来）：
+    - 必须同域
+    - 路径深度 ≥ 2
+    - 命中视频类路径词，或末段是长 ID
+    - 排除 tag/category/page=/login 这类非内容链接
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        from . import browser_runtime
+        from .config import DEFAULT_UA
+    except Exception:  # noqa: BLE001
+        return []
+    from urllib.parse import urlparse as _up
+    try:
+        base = _up(list_url)
+    except ValueError:
+        return []
+    host = (base.hostname or "").lower().removeprefix("www.")
+    if not host:
+        return []
+    if on_note:
+        on_note("这个站 yt-dlp 不认识，改用内置浏览器渲染列表页并逐条找视频页…")
+
+    rows: list[dict] = []
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch(headless=True, **browser_runtime.launch_kwargs())
+            page = b.new_page(user_agent=DEFAULT_UA,
+                              viewport={"width": 1400, "height": 1000}, locale="zh-CN")
+            try:
+                page.goto(list_url, wait_until="domcontentloaded", timeout=45000)
+            except Exception:  # noqa: BLE001
+                pass
+            page.wait_for_timeout(3500)
+            for _ in range(4):        # 往下拉几次，让懒加载的卡片出来
+                try:
+                    page.mouse.wheel(0, 2400)
+                except Exception:  # noqa: BLE001
+                    break
+                page.wait_for_timeout(1200)
+            try:
+                rows = page.evaluate(
+                    """() => Array.from(document.links).map(a => ({
+                         href: a.href || '',
+                         text: (a.innerText || a.getAttribute('title') || '').trim().slice(0, 140),
+                         img: (a.querySelector('img') && a.querySelector('img').src) || ''}))""")
+            except Exception:  # noqa: BLE001
+                rows = []
+            b.close()
+    except Exception:  # noqa: BLE001
+        return []
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    list_path = (base.path or "").rstrip("/")
+    for r in rows if isinstance(rows, list) else []:
+        href = str((r or {}).get("href") or "").split("#", 1)[0]
+        if not href.startswith("http"):
+            continue
+        try:
+            pu = _up(href)
+        except ValueError:
+            continue
+        if (pu.hostname or "").lower().removeprefix("www.") != host:
+            continue
+        path = "/".join([s for s in (pu.path or "").split("/") if s])
+        segs = [s for s in (pu.path or "").split("/") if s]
+        if len(segs) < 2:
+            continue
+        low_q = (pu.query or "").lower()
+        if any(w in low_q for w in ("tag", "category", "sort", "page")):
+            continue
+        low_path = path.lower()
+        if any(w in low_path for w in _LISTING_LINK_DENY):
+            continue
+        last = segs[-1].lower()
+        # 末段是长 ID（数字/十六进制/短横线混合，≥6 位）也算内容页
+        looks_like_id = bool(re.fullmatch(r"(?=.*\d)[\w\-]{6,}", last))
+        if not (any(w in low_path for w in _LISTING_LINK_WORDS) or looks_like_id):
+            continue
+        if path == list_path.strip("/") or href in seen:
+            continue
+        seen.add(href)
+        out.append({
+            "page_url": href,
+            "direct_url": "",
+            "title": str((r or {}).get("text") or "")[:150],
+            "cover": str((r or {}).get("img") or ""),
+            "uploader": "",
+            "site": host,
+            "kind_hint": "video",
+        })
+        if len(out) >= max(1, int(limit or 60)):
+            break
+    return out
+
+
 def _looks_like_collection_page(url: str) -> bool:
     """地址**形态**上像「人 / 集合」页（主页、频道、合集），而不是单条内容页。
 
@@ -1140,8 +1251,43 @@ def _expand_video_listing(
     if not _looks_like_collection_page(list_url):
         return None, ""
     if not has_specific_extractor(list_url):
-        # yt-dlp 对这个站没有专门提取器：它给不出「列表」，只会走 generic 白花时间
-        return None, ""
+        # yt-dlp 没有这个站的提取器。以前这里直接放弃 → 回退通用网页抓取，
+        # 而这类站的内容基本都是 JS 渲染，静态抓只拿到 1 条（实测 hornyleak.tv）。
+        # 现在改用内置浏览器渲染列表页，把视频页链接抽出来当列表结果。
+        rendered = _render_listing_links(list_url, limit=limit, on_note=on_note)
+        if len(rendered) < 2:
+            return None, ""
+        site_host = (urlparse(list_url).hostname or "").removeprefix("www.")
+        r_items = [
+            MediaItem(
+                url=r["page_url"], kind="video",
+                source=f"渲染列表:{site_host}",
+                title=r.get("title") or "", thumbnail=r.get("cover") or "",
+                referer=list_url, origin_page=list_url,
+                extra={"is_page": True, "ext": "", "duration": None,
+                       "duration_string": "", "uploader": "",
+                       "site": site_host},
+            )
+            for r in rendered
+        ]
+        return {
+            "items": [m.to_dict() for m in r_items],
+            "summary": summarize(r_items),
+            "pages": [{"page": 1, "url": list_url, "method": "内置浏览器渲染列表",
+                       "html_bytes": 0, "media": len(r_items), "links": len(r_items),
+                       "elapsed": 0.0, "visible_text": 0}],
+            "detail_pages": {"total": 0, "ok": 0, "failed": 0, "urls": []},
+            "stats": {"list_pages": 1, "detail_pages": 0, "http_ok": 0,
+                      "render_used": 1, "variants_collapsed": 0, "elapsed": 0.0},
+            "warnings": [
+                f"这个站 yt-dlp 没有专用提取器，已用内置浏览器渲染列表页并抽出 "
+                f"{len(r_items)} 个视频页 —— 这类站的内容由 JS 渲染，普通网页抓取通常只有 1 条。",
+                "每条都是视频页地址：勾选后点「下载选中」，由 yt-dlp 逐条解析下载。",
+            ],
+            "list_url": list_url,
+            "renderer": renderer_status(),
+            "via": "render-listing",
+        }, ""
 
     try:
         if on_note:
