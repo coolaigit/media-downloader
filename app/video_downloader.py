@@ -453,6 +453,83 @@ def _run_with_deadline(fn, deadline: float):
     return box.get("ok"), ""
 
 
+_AD_MEDIA_MARKERS = ("728x90", "300x250", "320x50", "970x250", "160x600", "300x600",
+                     "/ads/", "/ad/", "banner", "sponsor", "promo")
+
+
+def _is_ad_media(url: str) -> bool:
+    low = (url or "").lower()
+    return any(mk in low for mk in _AD_MEDIA_MARKERS)
+
+
+def resolve_media_via_render(page_url: str, *, timeout: int = 40) -> str:
+    """给 yt-dlp 不认识的站解析真实媒体地址（渲染页面找播放器）。
+
+    为什么需要（2026-10-24 用户实测 hornyleak.tv「下载的文件不对」）：
+    yt-dlp 的 HTML5MediaEmbed 会抓页面里**第一个** `<video>`，而那个位置常常是广告位——
+    实测该站解析出来的是 `https://www.hornyleak.tv/contents/data/728x90-1.mp4`，
+    728×90 正是标准广告横幅尺寸。于是用户下到的是广告，不是视频。
+
+    做法：渲染页面（必要时点一下播放按钮），收集 `<video src>` / `<source src>` /
+    带 mp4|m3u8 的 data-* 属性，过滤掉广告尺寸与 /ads/ 路径，返回第一个候选。
+    拿不到就返回空字符串，调用方继续走原流程。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        from . import browser_runtime
+        from .config import DEFAULT_UA
+    except Exception:  # noqa: BLE001
+        return ""
+    cands: list = []
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch(headless=True, **browser_runtime.launch_kwargs())
+            page = b.new_page(user_agent=DEFAULT_UA,
+                              viewport={"width": 1400, "height": 1000}, locale="zh-CN")
+            try:
+                page.goto(page_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            except Exception:  # noqa: BLE001
+                pass
+            page.wait_for_timeout(3500)
+            # 不少站的播放器要点了才开始挂 src
+            for sel in ("video", ".play, [class*=play], [id*=play], .vjs-big-play-button"):
+                try:
+                    page.click(sel, timeout=1200)
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+            page.wait_for_timeout(2500)
+            try:
+                cands = page.evaluate(
+                    """() => {
+                        const out = [];
+                        document.querySelectorAll('video').forEach(v => {
+                          if (v.src) out.push(v.src);
+                          v.querySelectorAll('source').forEach(s => { if (s.src) out.push(s.src); });
+                          const ps = v.getAttribute('data-src') || v.getAttribute('data-url');
+                          if (ps) out.push(ps);
+                        });
+                        document.querySelectorAll('[data-src],[data-video],[data-file],[data-href],[data-url]').forEach(el => {
+                          ['data-src','data-video','data-file','data-href','data-url'].forEach(a => {
+                            const v = el.getAttribute(a);
+                            if (v && /\\.(mp4|m3u8|webm)(\\?|$)/i.test(v)) out.push(v);
+                          });
+                        });
+                        return out;
+                    }""")
+            except Exception:  # noqa: BLE001
+                cands = []
+            b.close()
+    except Exception:  # noqa: BLE001
+        return ""
+    for u in cands if isinstance(cands, list) else []:
+        u = str(u or "").strip()
+        if not u.startswith("http") or _is_ad_media(u):
+            continue
+        return u
+    return ""
+
+
 def expand_video_list(
     url: str,
     *,
@@ -929,6 +1006,37 @@ def download_video(
                 }
         except Exception:  # noqa: BLE001 —— 台账读失败不该阻断下载
             pass
+
+    # ---- 未知站先渲染找真实播放器 ----
+    # yt-dlp 的 HTML5MediaEmbed 会抓页面第一个 <video>，而那里常是广告位
+    # （实测 hornyleak 拿到 728x90-1.mp4，用户看到的就是"下载的文件不对"）。
+    # 这里先渲染解析一次；拿到非广告地址就走直链下载，绕开 yt-dlp 的误判。
+    if not has_specific_extractor(url):
+        _real = resolve_media_via_render(url)
+        if _real:
+            try:
+                from .downloader import download_file as _dl_file
+                _r = _dl_file(_real, output_dir, skip_existing=False, referer=url)
+                if _r.ok and _r.path:
+                    _name = Path(_r.path).name
+                    try:
+                        (output_dir / f".{_url_fp(url)}.done").write_text(_name, encoding="utf-8")
+                    except OSError:
+                        pass
+                    try:
+                        from . import history as _hist2
+                        _hist2.record(url, {"title": _name, "kind": "video",
+                                           "path": _r.path, "size": _r.size})
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return {
+                        "ok": True, "url": url,
+                        "files": [{"path": _r.path, "name": _name, "size": _r.size}],
+                        "note": "已用内置浏览器解析出真实播放地址"
+                                "（yt-dlp 对这类站会误抓广告位，已绕开）。",
+                    }
+            except Exception:  # noqa: BLE001 —— 失败就回到原流程
+                pass
 
     # 已经解析出的签名媒体直链（XHS/Douyin 等）不要再套网页格式选择器。
     # Generic extractor 对这类 .mp4 经常不填 vcodec/acodec/height；继续使用
