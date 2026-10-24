@@ -223,8 +223,13 @@ def _recover_with_browser_skill(url: str, wall: str, on_note=None) -> FetchResul
     try:
         if on_note:
             on_note("普通浏览器渲染遇到验证，正在准备可见验证窗口…")
-        # daemon 没跑就拉起来；没有可用浏览器就用内置 Chromium + 内置扩展起一个
-        ready = browser_skill.ensure_ready(headless=False, timeout=40)
+        # 可见性交给「设置 → 显示浏览器窗口」，不再硬写 headless=False。
+        # 原因（2026-10-24 用户实测）：抓 Instagram 视频时 gallery-dl 被风控挡回，
+        # 回退渲染又撞验证墙，于是凭空弹出一个窗口 —— 用户明明登录着，弹窗帮不上忙，
+        # 还打断他正在做的事。默认后台跑；真需要人工滑块的那种，把开关打开即可。
+        from . import browser_profile
+        want_headed = browser_profile.headed()
+        ready = browser_skill.ensure_ready(headless=not want_headed, timeout=40)
         if not ready.get("ok"):
             if on_note:
                 on_note(f"验证窗口准备失败：{ready.get('error') or '未知原因'}")
@@ -1103,10 +1108,18 @@ def _render_listing_links(list_url: str, *, limit: int = 60, on_note=None) -> li
                 page.wait_for_timeout(1200)
             try:
                 rows = page.evaluate(
-                    """() => Array.from(document.links).map(a => ({
-                         href: a.href || '',
-                         text: (a.innerText || a.getAttribute('title') || '').trim().slice(0, 140),
-                         img: (a.querySelector('img') && a.querySelector('img').src) || ''}))""")
+                    """() => Array.from(document.links).map(a => {
+                         const img = a.querySelector('img');
+                         const head = a.querySelector('h1,h2,h3,h4,h5,[class*=title],[class*=Title]');
+                         return {
+                           href: a.href || '',
+                           text: (a.innerText || '').trim().slice(0, 140),
+                           title_attr: (a.getAttribute('title') || '').trim().slice(0, 140),
+                           img_alt: img ? (img.getAttribute('alt') || '').trim().slice(0, 140) : '',
+                           heading: head ? (head.innerText || '').trim().slice(0, 140) : '',
+                           img: img ? (img.src || '') : ''
+                         };
+                       })""")
             except Exception:  # noqa: BLE001
                 rows = []
             b.close()
@@ -1144,10 +1157,31 @@ def _render_listing_links(list_url: str, *, limit: int = 60, on_note=None) -> li
         if path == list_path.strip("/") or href in seen:
             continue
         seen.add(href)
+        # 标题优先级：title 属性 > 图片 alt > 卡片内标题元素 > URL slug > 链接文字。
+        # 链接文字常常是「16:01 / 86%」这种时长+进度，绝不能拿来当名字
+        # （实测 hornyleak.tv 抓出来的名字全是 "16:01 86%"）。
+        cands = [
+            str((r or {}).get("title_attr") or "").strip(),
+            str((r or {}).get("img_alt") or "").strip(),
+            str((r or {}).get("heading") or "").strip(),
+        ]
+        title = ""
+        for c in cands:
+            if len(c) >= 4 and not re.fullmatch(r"[\d:.\s%\-/]+", c):
+                title = c
+                break
+        if not title:
+            slug = segs[-1]
+            if re.fullmatch(r"\d+", slug) and len(segs) >= 3:
+                slug = segs[-2]          # /video/33006/comatozze-xxx/ → 用 xxx
+            if slug and not re.fullmatch(r"[\d\-]+", slug):
+                title = slug.replace("-", " ").replace("_", " ").strip()
+        if not title:
+            title = str((r or {}).get("text") or "")[:150]
         out.append({
             "page_url": href,
             "direct_url": "",
-            "title": str((r or {}).get("text") or "")[:150],
+            "title": title[:150],
             "cover": str((r or {}).get("img") or ""),
             "uploader": "",
             "site": host,

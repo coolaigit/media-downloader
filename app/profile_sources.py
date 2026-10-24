@@ -1864,8 +1864,11 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
     try:
         if on_note:
             on_note("检测到验证码，正在准备可见验证窗口…")
-        # V3.0：bsk / 扩展 / 内核都随包，没装过任何浏览器也能起验证窗口
-        ready = browser_skill.ensure_ready(headless=False, timeout=40)
+        # V3.0：bsk / 扩展 / 内核都随包，没装过任何浏览器也能起验证窗口。
+        # 可见性听「设置 → 显示浏览器窗口」：默认后台，别在用户没要求时弹窗
+        # （2026-10-24 实测：抓 Instagram 撞风控会凭空弹出窗口，打断用户）。
+        from . import browser_profile
+        ready = browser_skill.ensure_ready(headless=not browser_profile.headed(), timeout=40)
         if not ready.get("ok"):
             return {"ok": False, "items": [], "login_required": False,
                     "error": f"验证窗口准备失败：{ready.get('error') or '未知原因'}"}
