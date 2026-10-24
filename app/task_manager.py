@@ -825,6 +825,9 @@ class TaskManager:
                         write_subtitles=bool(o.get("write_subtitles")),
                         subtitle_langs=o.get("subtitle_langs", "zh.*,en"),
                         include_playlist=bool(o.get("include_playlist")),
+                        # V3.0：把「跳过已存在」也传给 yt-dlp 路径 ——
+                        # 它现在会读写 .done 标记，不传的话开关对它无效。
+                        skip_existing=bool(o.get("skip_existing", True)),
                         # 有平台 Cookie 时只把“任务私有快照”交给 yt-dlp。
                         # 主 cookies_from_profile.txt 永远不让并发 yt-dlp 直接回写。
                         cookies_file=snap or None,

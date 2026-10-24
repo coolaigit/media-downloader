@@ -1158,6 +1158,17 @@ def _expand_video_listing(
     if not exp.get("is_list"):
         return None, ""
 
+    # 列表模式（extract_flat）不解析详情，很多站的条目里根本没有封面 ——
+    # 实测 2026-10-24：pornhub 的 PornHubPagedVideoList 每条只有 title/url。
+    # 抓一次列表页 HTML 把缩略图补回来（匹配不上就留空，绝不乱配别人的图）。
+    try:
+        from .profile_sources import _backfill_covers
+        if any(not str(e.get("thumbnail") or "").strip()
+               for e in (exp.get("entries") or [])):
+            _backfill_covers(list_url, exp.get("entries") or [])
+    except Exception:  # noqa: BLE001 —— 补封面失败不该影响抓取本身
+        pass
+
     items: list[MediaItem] = []
     seen: set[str] = set()
     for e in exp.get("entries") or []:

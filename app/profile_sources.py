@@ -18,7 +18,7 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
-from .config import RESOURCE_ROOT
+from .config import RESOURCE_ROOT, HEADERS
 from .concurrency import (GOVERNOR, KIND_METADATA, NETWORK, OK, RATE_LIMIT,
                           classify_error)
 from . import browser_profile, platform_login, subproc
@@ -1130,6 +1130,103 @@ def xhs_feed_items(url: str, *, limit: int = 30, want_video: bool = False,
             "error": "", "scanned": len(refs), "failed": failed, "skipped": skipped}
 
 
+def _best_thumb(entry: dict) -> str:
+    """从 yt-dlp / 网页条目里挑一张最合适的封面。
+
+    关键：yt-dlp 的 info 用的是 **thumbnails（列表）**，带 width/preference；
+    而网页来源常用单值 thumbnail。原来的 `entry.get("thumbnail")` 对 yt-dlp 条目
+    永远是空 —— 所以走 yt-dlp 列表提取器的站点（pornhub 的
+    PornHubPagedVideoList、微博/抖音/TikTok 的部分路径）抓下来全都没有封面，
+    但下载之后又能在「已下载」里看到封面（下载时解析的是完整 info）。
+    实测 2026-10-24 用户反馈。
+    """
+    direct = str(entry.get("thumbnail") or "").strip()
+    if direct.startswith("http"):
+        return direct
+    arr = entry.get("thumbnails")
+    if not isinstance(arr, list):
+        return ""
+    best, best_score = "", -1.0
+    for c in arr:
+        if not isinstance(c, dict):
+            continue
+        u = str(c.get("url") or "").strip()
+        if not u.startswith("http"):
+            continue
+        # preference 是最权威的排序依据；同分时按宽度取更大的那张
+        try:
+            pref = float(c.get("preference") or 0)
+        except (TypeError, ValueError):
+            pref = 0.0
+        try:
+            width = float(c.get("width") or 0)
+        except (TypeError, ValueError):
+            width = 0.0
+        score = pref * 1e6 + width
+        if score >= best_score:
+            best, best_score = u, score
+    return best
+
+
+def _backfill_covers(page_url: str, items: list[dict]) -> int:
+    """列表页补封面：抓一次 HTML，按视频 key 把缩略图对回去。
+
+    为什么需要（2026-10-24 用户反馈 pornhub 抓取没缩略图）：
+    yt-dlp 的列表模式 `extract_flat` 不解析详情，条目里常常只有
+    `title / url / ie_key / _type` 四个字段 —— 缩略图完全没有。
+    所以走 yt-dlp 列表的站点抓下来全是空封面，而下载之后又能看到封面
+    （下载时解析的是完整 info）。
+
+    做法：抓一次列表页 HTML，按 `data-video-vkey="..."` 切卡片，
+    取卡片里第一张图，再用这个 key 去匹配条目的 URL。匹配不上就跳过，
+    不会乱配 —— 宁可没封面，也不能挂一张别人的图。
+    """
+    if not page_url or not items:
+        return 0
+    resp = None
+    for trust in (False, True):        # 先直连再代理：这类站点多数在国内可直连
+        try:
+            with requests.Session() as s:
+                s.trust_env = trust
+                resp = s.get(page_url,
+                             headers={**HEADERS, "Accept-Language": "zh-CN,zh;q=0.9"},
+                             timeout=20)
+            break
+        except requests.RequestException:
+            continue
+    if resp is None or resp.status_code != 200:
+        return 0
+    html = resp.text or ""
+
+    thumb_map: dict[str, str] = {}
+    for m in re.finditer(r'data-video-vkey="([^"]+)"(.*?)(?=data-video-vkey=|$)', html, re.S):
+        vkey, chunk = m.group(1), (m.group(2) or "")[:6000]
+        # 这类站点常把缩略图挂在 data-mediumthumb / data-thumbs 上，不是 <img src>；
+        # 只有都没有时才退回 <img src>。实测 pornhub 2026-10：卡片里没有 <img>，
+        # 但每个卡片块内有 data-mediumthumb。
+        hit = (re.search(r'data-mediumthumb="(https?://[^"]+)"', chunk)
+               or re.search(r'<img[^>]+src="(https?://[^"]+?\.(?:jpg|jpeg|png|webp))"', chunk))
+        if hit:
+            thumb_map[vkey] = hit.group(1)
+    if not thumb_map:
+        return 0
+
+    filled = 0
+    for it in items:
+        if str(it.get("cover") or it.get("thumbnail") or "").strip():
+            continue
+        target = f'{it.get("page_url") or it.get("webpage_url") or ""} {it.get("direct_url") or ""} {it.get("url") or ""}'
+        for vkey, thumb in thumb_map.items():
+            if vkey and vkey in target:
+                it["cover"] = thumb
+                # 兼容 yt-dlp 原始条目（它用 thumbnail 这个键）
+                if not str(it.get("thumbnail") or "").strip():
+                    it["thumbnail"] = thumb
+                filled += 1
+                break
+    return filled
+
+
 def _entry_item(entry: dict, source_url: str) -> dict | None:
     page = str(entry.get("webpage_url") or entry.get("original_url") or entry.get("url") or "").strip()
     if page and not page.startswith("http"):
@@ -1147,7 +1244,7 @@ def _entry_item(entry: dict, source_url: str) -> dict | None:
         "direct_url": direct,
         "variants": [],
         "title": str(entry.get("title") or entry.get("description") or "")[:150],
-        "cover": str(entry.get("thumbnail") or ""),
+        "cover": _best_thumb(entry),
         "uploader": str(entry.get("uploader") or entry.get("channel") or ""),
         "site": (urlparse(page or source_url).hostname or "").replace("www.", ""),
         "duration": entry.get("duration"),
@@ -1460,6 +1557,11 @@ def ytdlp_items(url: str, *, limit: int = 30, on_note=None) -> dict:
         items.append(got)
         if len(items) >= int(limit):
             break
+    # 列表模式（extract_flat）不解析详情，条目里常常没有封面 ——
+    # 抓一次列表页 HTML 把缩略图补回来（匹配不上就留空，不乱配）。
+    if any(not str(it.get("cover") or "").strip() for it in items):
+        _backfill_covers(url, items)
+
     if platform == "bili" and items:
         items = _bili_enrich(items, cookie, on_note=on_note)
     return {"ok": bool(items), "items": items, "login_required": False,

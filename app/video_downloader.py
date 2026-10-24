@@ -873,6 +873,7 @@ def download_video(
     rate_limit: str = "",
     max_height: int | None = None,
     format_id: str = "",
+    skip_existing: bool = True,
 ) -> dict:
     """下载单个视频（或播放列表），返回结果摘要。
 
@@ -883,6 +884,51 @@ def download_video(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- 去重标记（V3.0 统一）----
+    # 实测（2026-10-24，用户报告）：TikTok / pornhub 走 yt-dlp 下载时**完全没写 .done**，
+    # 而 cn.avjoy.me 那种直链下载会写 —— 同一个软件两种行为。
+    # 后果：用户把视频转移走之后无从判断"下过没有"，重新抓同一个页面会再下一遍。
+    # 所以这里和 downloader.py 用同一套标记：.{url指纹}.done，内容存实际文件名。
+    from .downloader import url_fingerprint as _url_fp
+    _marker = output_dir / f".{_url_fp(url)}.done"
+    if skip_existing and _marker.exists():
+        try:
+            _saved = _marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            _saved = ""
+        if _saved:
+            _p = output_dir / _saved
+            if _p.exists() and _p.stat().st_size > 0:
+                return {
+                    "ok": True, "url": url, "skipped": True, "note": "此前已下载过，本次跳过。",
+                    "files": [{"path": str(_p), "name": _p.name,
+                               "size": _p.stat().st_size}],
+                }
+            # 文件不在了（被移走或删掉）：仍然算「下过」并按记录跳过。
+            # 这是用户明确要的语义 —— 转移视频后不要重复下一遍。
+            # 真要重下：关掉界面上的「跳过已存在」。
+            return {
+                "ok": True, "url": url, "skipped": True, "files": [],
+                "note": (f"此前已下载过，但文件已不在当前目录（{_saved}），已按记录跳过。"
+                         "需要重新下载请关闭「跳过已存在」。"),
+            }
+
+    # ---- 台账去重（V3.0 接上原本没被调用的 history.is_downloaded）----
+    # history.is_downloaded 的语义是「只看视频身份，不看文件还在不在」，
+    # 正好就是用户要的：视频转移走了也仍然算下过。但这个函数此前**没有任何调用处**，
+    # 批量下载只靠 .done 标记，所以标记一丢就会重下。
+    if skip_existing:
+        try:
+            from . import history as _hist
+            if _hist.is_downloaded(url):
+                return {
+                    "ok": True, "url": url, "skipped": True, "files": [],
+                    "note": ("下载台账里已有这条记录（文件可能已转移），按记录跳过。"
+                             "需要重新下载请关闭「跳过已存在」。"),
+                }
+        except Exception:  # noqa: BLE001 —— 台账读失败不该阻断下载
+            pass
 
     # 已经解析出的签名媒体直链（XHS/Douyin 等）不要再套网页格式选择器。
     # Generic extractor 对这类 .mp4 经常不填 vcodec/acodec/height；继续使用
@@ -1061,6 +1107,16 @@ def download_video(
                 if cand.exists() and cand.suffix.lower() not in (".part", ".ytdl", ".tmp"):
                     real_files.append({"path": str(cand), "name": cand.name, "size": cand.stat().st_size})
                     break
+
+    # ---- 写去重标记（和直链下载保持一致）----
+    # 成功落盘后写 .done，内容为实际文件名。这样用户把文件转移走之后，
+    # 下次再抓同一页面能凭标记判断「下过」，不会重复下载。
+    if real_files:
+        try:
+            (output_dir / f".{_url_fp(url)}.done").write_text(
+                str(real_files[0]["name"]), encoding="utf-8")
+        except OSError:
+            pass
 
     # ---- 记入下载台账（去重用）----
     # 记的是**视频身份**（yt-dlp 的 extractor+id，以及归一的页面地址），

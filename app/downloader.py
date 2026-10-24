@@ -282,11 +282,15 @@ def download_file(
                                  "progressed_bytes": res.size, "total_bytes": res.size,
                                  "skipped": True})
                 return res
-            # 标记存在但文件已被移动/删除：清理失效标记，继续正常下载
-            try:
-                marker.unlink(missing_ok=True)
-            except Exception:
-                pass
+            # 标记存在但文件已被移动/删除：**仍然算下载过**，按记录跳过。
+            # V3.0 改这里的原因（2026-10-24 用户需求）：以前会删掉标记并重新下载，
+            # 用户把视频转移到别的盘之后，再抓同一个页面就会白白重下一整批。
+            # 想真正重下：关掉「跳过已存在」。
+            return DownloadResult(
+                True, "", 0, skipped=True, url=target_url,
+                error="", note=(f"此前已下载过（{saved_name or '文件名未记录'}），"
+                                "但文件已不在当前目录，已按记录跳过。"
+                                "需要重新下载请关闭「跳过已存在」。"))
 
         last_err = ""
         # ---- 断点续传：.part 按 URL 指纹固定命名，重试接着已下的字节继续 ----
