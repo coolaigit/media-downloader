@@ -1663,8 +1663,10 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                 if old is None:
                     found[key] = card
                     return
-                if not old.get("thumbnail") and card.get("thumbnail"):
-                    old["thumbnail"] = card["thumbnail"]
+                # 键名是 cover（_douyin_card 的返回键）。原来写成 thumbnail，
+                # 这个分支永远命中不了 —— 缺封面的条目一直补不上去（2026-10-24）。
+                if not old.get("cover") and card.get("cover"):
+                    old["cover"] = card["cover"]
                 if not old.get("title") and card.get("title"):
                     old["title"] = card["title"]
 
@@ -1918,7 +1920,15 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
         expr = """Array.from(document.links)
           .filter(a => a.href && a.href.includes('/video/'))
           .map(a => {
-            const im = a.querySelector('img') || a.querySelector('[style*="background-image"]');
+            let im = a.querySelector('img');
+            if (!im) {
+              // 抖音的作品封面常挂在 <a> 的兄弟节点或父容器里，不在 <a> 内部。
+              // 只查 a 内部会拿到空封面（实测 2026-10-24：BrowserSkill 路径 10 条全无封面）。
+              for (const c of [a.parentElement, a.previousElementSibling, a.nextElementSibling]) {
+                if (c && c.querySelector) { im = c.querySelector('img'); if (im) break; }
+              }
+            }
+            if (!im) im = a.querySelector('[style*="background-image"]');
             let src = '';
             if (im) {
               src = im.src || '';
@@ -1951,17 +1961,19 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
         for _ in range(min(160, max(16, (target // 8 + 1) * 8))):
             rows = browser_skill.evaluate(sid, expr, timeout=30) or []
             before = len(found)
+            before_covers = sum(1 for v in found.values() if v.get("cover"))
             for row in rows if isinstance(rows, list) else []:
                 card = _douyin_card((row or {}).get("href"), (row or {}).get("title"),
                                      (row or {}).get("img"))
                 if card:
-                    # 同样是「缺封面就补」，不能用 setdefault 让空封面占位
+                    # 缺封面就补。注意键名是 cover（_douyin_card 的返回键），
+                    # 原来写成 thumbnail 永远命中不了 —— 实测 10 条里 7 条空封面。
                     old = found.get(card["page_url"])
                     if old is None:
                         found[card["page_url"]] = card
-                    elif not old.get("thumbnail") and card.get("thumbnail"):
-                        old["thumbnail"] = card["thumbnail"]
-            if len(found) >= target:
+                    elif not old.get("cover") and card.get("cover"):
+                        old["cover"] = card["cover"]
+            if len(found) >= target and all(v.get("cover") for v in found.values()):
                 break
             browser_skill.evaluate(
                 sid,
@@ -1974,8 +1986,12 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
                   window.scrollBy(0,Math.max(1000,innerHeight)); return false})()""",
                 timeout=15,
             )
-            time.sleep(1)
-            stale = stale + 1 if len(found) == before else 0
+            # 图片是懒加载的，滚动后要给它时间加载；1 秒太短，封面补不上
+            time.sleep(1.8)
+            after_covers = sum(1 for v in found.values() if v.get("cover"))
+            # 进度判定要把「补到封面」也算进去，否则条目数不变就一直被判成停滞
+            progressed = (len(found) > before) or (after_covers > before_covers)
+            stale = 0 if progressed else stale + 1
             if stale >= 10:
                 break
         items = list(found.values())[:target]
@@ -2099,6 +2115,9 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
     if platform == "dy" and not res.get("ok"):
         res = douyin_author_items(url, limit=limit, on_note=on_note)
         attempts.append(("内置Playwright", res))
+        # 「账号不存在」是确定性结论，继续兜底只会白跑三条路再给出同一个结果。
+        if "账号不存在" in str(res.get("error") or ""):
+            return [], str(res.get("error"))
         if res.get("verification_required") and len(res.get("items") or []) < max(1, int(limit or 30)):
             bsk_res = browser_skill_author_items(url, limit=limit, on_note=on_note)
             attempts.append(("BrowserSkill验证码辅助", bsk_res))
