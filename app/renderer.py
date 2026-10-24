@@ -369,17 +369,21 @@ async def _render_async(
                         except Exception:
                             pass
 
-        await asyncio.gather(*[_one(i, u) for i, u in enumerate(urls)],
-                             return_exceptions=True)
-        if pctx is not None:
+        try:
+            await asyncio.gather(*[_one(i, u) for i, u in enumerate(urls)],
+                                 return_exceptions=True)
+        finally:
+            # 关闭放 finally：并发里出意外时也要把 persistent context 关掉，
+            # 否则浏览器进程会留在后台占着 profile（同类问题见 2026-10-24 抖音）。
+            if pctx is not None:
+                try:
+                    await pctx.close()
+                except Exception:
+                    pass
             try:
-                await pctx.close()
+                await browser.close()
             except Exception:
                 pass
-        try:
-            await browser.close()
-        except Exception:
-            pass
         # 让 playwright 的连接任务收尾，避免退出时打印 pending task 噪音
         await asyncio.sleep(0.3)
     return results

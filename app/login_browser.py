@@ -146,12 +146,20 @@ def export_from_profile(profile_dir: str, headless: bool = True, warm_url: str =
             ctx.close()
             return {"ok": False, "path": "", "count": 0, "domains": {}, "error": err}
         domains: dict = {}
-        for c in cks:
-            d = (c.get("domain") or "").lstrip(".")
-            if d:
-                domains[d] = domains.get(d, 0) + 1
-        n = _export_netscape(cks, out)
-        ctx.close()
+        n = 0
+        try:
+            for c in cks:
+                d = (c.get("domain") or "").lstrip(".")
+                if d:
+                    domains[d] = domains.get(d, 0) + 1
+            n = _export_netscape(cks, out)
+        finally:
+            # 放在 finally：导出过程中抛异常时也必须关掉 context，
+            # 否则 chrome 进程会留着占 profile（同类问题见 2026-10-24 抖音）。
+            try:
+                ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
     return {"ok": n > 0, "path": str(out) if n else "", "count": n,
             "domains": domains, "error": "" if n else "这个 profile 里没有任何 cookie"}
 

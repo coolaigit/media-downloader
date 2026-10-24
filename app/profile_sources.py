@@ -1627,6 +1627,7 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
 
     found: dict[str, dict] = {}
     verification_required = False
+    ctx = None                     # 供 finally 关闭，见下方说明
     try:
         with sync_playwright() as p:
             # 内核：包内 Chromium 优先 —— 用户电脑没有任何浏览器时抖音主页也要能读
@@ -1828,14 +1829,22 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                         break
                 if stale >= 10:
                     break
-            try:
-                ctx.close()
-            except Exception:
-                pass
     except Exception as e:
         return {"ok": False, "items": list(found.values())[:target],
                 "login_required": False, "verification_required": False,
                 "error": f"{type(e).__name__}: {e}"}
+    finally:
+        # 必须在 finally 里关。原来这行写在滚动循环之后，
+        # 中途任何 return / 抛异常都会跳过它，浏览器进程就留在后台占着
+        # profile 目录 —— 用户点几次抓取，后台积了 8 个 chrome 全占 dy profile，
+        # 之后每次都报「profile 正在被占用」（2026-10-24 实测）。
+        # 参考：用户 10-07 用同一套流程成功下过 619 个视频，说明流程本身没问题，
+        # 就是这里的资源泄漏把后续抓取堵死了。
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     items = list(found.values())[:target]
     return {
