@@ -208,10 +208,16 @@ def _browser_ids(force: bool = False) -> list[str]:
 
 
 def ensure_browser(*, headless: bool = False, timeout: float = 25.0) -> dict:
-    """确保 daemon 至少有一个可用浏览器；没有就用内置 Chromium + 内置扩展起一个。
+    """确保有一个**我们自己启动的**浏览器实例（内置 Chromium + 内置扩展）。
 
     headless=False 时是有窗口的 —— 这是**验证场景专用**，因为要人来看。
     正常抓取不会走到这里。
+
+    ⚠️ 绝不复用 daemon 里"来历不明"的浏览器实例（2026-10-25 实测教训）：
+    用户自己的 Chrome 如果装过 bsk 扩展，会自动连上 daemon。复用它干后台活
+    = 当着用户的面在他自己的浏览器里开标签页 —— 用户看到的就是「一直弹窗」，
+    而且那也不是内置浏览器。所以这里只认「本进程启动、模式一致」的实例；
+    其它一律自己起一个（daemon 支持多浏览器并存，用户的实例一根汗毛不碰）。
 
     返回 {"ok", "instance_id", "started", "error"}。
     """
@@ -222,24 +228,25 @@ def ensure_browser(*, headless: bool = False, timeout: float = 25.0) -> dict:
         return {"ok": False, "instance_id": "", "started": False, "error": why}
 
     existing = _browser_ids(force=True)
-    if existing:
-        # 复用前先比对模式：如果现有实例是**我们起的**、但模式和这次请求不一致，
-        # 就把它关掉重起。否则只要有一次以可见模式启动过，后面每次
-        # headless=True 的抓取都会沿用那个窗口 —— 用户看到的就是「一直弹窗」
-        # （2026-10-25 实测：用户要求全部内置后台运行）。
-        if (_browser_proc is not None and _browser_proc.poll() is None
-                and _browser_headless != bool(headless)):
-            try:
-                _browser_proc.terminate()
-                _browser_proc.wait(timeout=6)
-            except Exception:  # noqa: BLE001
-                pass
-            _browser_proc = None
-            time.sleep(1.2)
-            existing = _browser_ids(force=True)
-        if existing:
-            # 用户自己开着 Chrome 且装了扩展时直接用他的实例，省一次启动
-            return {"ok": True, "instance_id": existing[0], "started": False, "error": ""}
+    # 唯一可复用的情况：本进程自己起的实例还活着、且模式与本次请求一致
+    if (_browser_instance and _browser_instance in existing
+            and _browser_headless == bool(headless)
+            and _browser_proc is not None and _browser_proc.poll() is None):
+        return {"ok": True, "instance_id": _browser_instance,
+                "started": False, "error": ""}
+
+    # 我们自己起的实例但模式不一致（比如验证时开过有头窗口，现在要后台）：
+    # 关掉重起，否则后续 headless 抓取会沿用可见窗口
+    if (_browser_proc is not None and _browser_proc.poll() is None
+            and _browser_headless != bool(headless)):
+        try:
+            _browser_proc.terminate()
+            _browser_proc.wait(timeout=6)
+        except Exception:  # noqa: BLE001
+            pass
+        _browser_proc = None
+        _browser_instance = ""
+        time.sleep(1.2)
 
     exe = chromium_exe()
     if not exe:
@@ -277,14 +284,16 @@ def ensure_browser(*, headless: bool = False, timeout: float = 25.0) -> dict:
                 return {"ok": False, "instance_id": "", "started": False,
                         "error": f"启动内置浏览器失败：{type(e).__name__}: {e}"}
 
-    # 等扩展连上 daemon（实测 2~6 秒）
+    # 等扩展连上 daemon（实测 2~6 秒）。
+    # 必须等「新出现」的实例：daemon 里可能一直挂着别的浏览器（比如用户自己的
+    # Chrome），拿全量列表碰运气会选中别人的实例，页面就开到用户浏览器里去了。
     t0 = time.time()
     while time.time() - t0 < timeout:
         time.sleep(0.6)
         now = _browser_ids(force=True)
         fresh = [i for i in now if i not in existing]
-        if fresh or now:
-            _browser_instance = (fresh or now)[0]
+        if fresh:
+            _browser_instance = fresh[0]
             return {"ok": True, "instance_id": _browser_instance, "started": True,
                     "error": "", "waited": round(time.time() - t0, 1)}
     return {"ok": False, "instance_id": "", "started": True,
@@ -328,8 +337,14 @@ def start_page(url: str, *, name: str = "MediaDownloader 验证辅助",
                browser_id: str = "") -> dict:
     args = ["session", "start", "--name", name]
     target = browser_id or _browser_instance
-    if target:
-        args += ["--browser", target]
+    if not target:
+        # 没有明确目标时绝不裸发 session start —— daemon 会挑它的默认实例，
+        # 那可能是用户自己的 Chrome（装过扩展就会连上 daemon），页面就开到
+        # 用户眼皮底下了（2026-10-25 实测弹窗事故）。
+        raise RuntimeError(
+            "BrowserSkill 未就绪：没有本进程启动的浏览器实例，"
+            "拒绝在来历不明的浏览器里开页面")
+    args += ["--browser", target]
     sess = _json(args, timeout=30)
     sid = str(sess.get("session_id") or "")
     if not sid:
