@@ -465,6 +465,120 @@ def _is_ad_media(url: str) -> bool:
     return any(mk in low for mk in _AD_MEDIA_MARKERS) or any(h in low for h in _AD_PATH_HINTS)
 
 
+def _douyin_real_url_via_bsk(url: str, timeout: int = 45) -> str:
+    """用 BrowserSkill 打开抖音视频页，读 <video>.currentSrc。
+
+    为什么必须走这条路（2026-10-25 实测三种方式）：
+    - 无登录态渲染 → 页面里的 <video> 是静态占位资源（douyinstatic.com/uuu_265.mp4）
+    - 带 dy profile 渲染 → 抖音返回「验证码中间页」，什么都拿不到
+    - BrowserSkill → 能过验证（抓 423 条列表就是这么拿到的），视频页同样有效
+
+    注意过滤 douyinstatic.com：那不是正片。
+    """
+    try:
+        from . import browser_skill as bs
+        from . import browser_profile
+    except Exception:  # noqa: BLE001
+        return ""
+    ready = bs.ensure_ready(headless=not browser_profile.headed(), timeout=40)
+    if not ready.get("ok"):
+        return ""
+    sid = ""
+    try:
+        op = bs.start_page(url)
+        sid = str(op.get("session_id") or "")
+        time.sleep(6)
+        deadline = time.time() + max(5, timeout - 12)
+        while time.time() < deadline:
+            srcs = bs.evaluate(
+                sid,
+                "() => Array.from(document.querySelectorAll('video'))"
+                ".map(v => v.currentSrc || v.src || '').filter(s => s && s.indexOf('douyinstatic.com') < 0)",
+                timeout=20) or []
+            if isinstance(srcs, list):
+                good = [s for s in srcs if isinstance(s, str) and s.startswith("http")]
+                if good:
+                    return good[-1]
+            # 还没挂上地址：补一次播放
+            try:
+                bs.evaluate(sid, "() => { const v = document.querySelector('video');"
+                                 " if (v) { v.muted = true; v.play().catch(()=>{}); } }",
+                            timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(2.2)
+        return ""
+    except Exception:  # noqa: BLE001
+        return ""
+    finally:
+        if sid:
+            try:
+                bs.stop(sid)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _douyin_real_url_headed(url: str, timeout: int = 50) -> str:
+    """最后兜底：弹出带抖音登录态的窗口解析直链。
+
+    实测矩阵（2026-10-25，四个头都试过）：
+    - headless + 无登录   → <video> 是占位资源 douyinstatic.com/uuu_265.mp4
+    - headless + dy登录   → 「验证码中间页」，什么都拿不到
+    - bsk（无 dy 登录）   → 视频页空白（列表页能看，视频页不给）
+    - yt-dlp + dy cookies → 403 Forbidden（extractor 被封）
+    只剩「有头 + dy 登录」这一条路：弹一次窗，可能需要用户过一次验证码，
+    过了之后 profile 里会记住状态，后续 batch 大多能直接加载。
+
+    拿到直链或超时后窗口自动关闭。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        from . import browser_runtime
+        from .config import DEFAULT_UA
+        from .renderer import _LAUNCH_ARGS
+        from .platform_login import profile_dir_for_url
+        prof = profile_dir_for_url(url, ready_only=True)
+        if not prof:
+            return ""
+    except Exception:  # noqa: BLE001
+        return ""
+    try:
+        with sync_playwright() as p:
+            try:
+                ctx = p.chromium.launch_persistent_context(
+                    user_data_dir=str(prof), headless=False, locale="zh-CN",
+                    user_agent=DEFAULT_UA, viewport={"width": 1150, "height": 880},
+                    args=list(_LAUNCH_ARGS), **browser_runtime.launch_kwargs())
+            except Exception:  # noqa: BLE001 —— profile 打不开（比如被占用）
+                return ""
+            try:
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                except Exception:  # noqa: BLE001
+                    pass
+                deadline = time.time() + max(12, timeout - 12)
+                while time.time() < deadline:
+                    try:
+                        srcs = page.evaluate(
+                            "() => Array.from(document.querySelectorAll('video'))"
+                            ".map(v => v.currentSrc || v.src || '')"
+                            ".filter(s => s && s.indexOf('douyinstatic.com') < 0)")
+                    except Exception:  # noqa: BLE001
+                        srcs = []
+                    if srcs:
+                        return str(srcs[-1])
+                    time.sleep(2.5)
+                return ""
+            finally:
+                try:
+                    ctx.close()
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def resolve_media_via_render(page_url: str, *, timeout: int = 40,
                              profile_dir: str | None = None) -> str:
     """给 yt-dlp 不认识的站解析真实媒体地址（渲染页面 + 监听网络请求）。
@@ -1141,17 +1255,25 @@ def download_video(
     # （2026-10-25：抖音批量抓取成功、下载全部失败）。
     _dy_page = "douyin.com/video/" in url or "iesdouyin.com/share/video/" in url
     if (not has_specific_extractor(url)) or _dy_page:
-        # 抖音必须带登录态解析：不带的话页面里的 <video> 是占位资源
-        # （douyinstatic.com/.../uuu_265.mp4），所有视频都解析成同一个文件。
-        _prof = None
+        # 抖音直链解析的完整顺序（实测矩阵见 _douyin_real_url_headed 的注释）：
+        # ① BrowserSkill（无弹窗）→ ② 普通渲染 headless（无弹窗）
+        # → ③ 有头窗口带登录态（弹窗，最后兜底：headless 全军覆没，只剩这条路）
+        _real = ""
         if _dy_page:
-            try:
-                from .platform_login import profile_dir_for_url as _pdu
-                _p = _pdu(url, ready_only=True)
-                _prof = _p or None
-            except Exception:  # noqa: BLE001
-                _prof = None
-        _real = resolve_media_via_render(url, profile_dir=_prof)
+            _real = _douyin_real_url_via_bsk(url)
+        if not _real:
+            _prof = None
+            if _dy_page:
+                try:
+                    from .platform_login import profile_dir_for_url as _pdu
+                    _p = _pdu(url, ready_only=True)
+                    _prof = _p or None
+                except Exception:  # noqa: BLE001
+                    _prof = None
+            if _dy_page:
+                _real = _douyin_real_url_headed(url)
+            if not _real:
+                _real = resolve_media_via_render(url, profile_dir=_prof)
         if _real:
             try:
                 from .downloader import download_file as _dl_file
