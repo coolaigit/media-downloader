@@ -49,6 +49,10 @@ _browser_proc: subprocess.Popen | None = None
 # 记录当前实例是以什么模式起的。复用实例时必须比对它，
 # 否则一次「可见」启动会让后续所有抓取都弹窗（2026-10-25 用户实测）。
 _browser_headless: bool | None = None
+# 当前实例用的 profile 目录。不同平台的抓取需要不同登录态
+# （抖音要用 dy profile，否则主页只给推荐流 —— 2026-10-25 实测），
+# 复用前必须比对，不一致就重启。
+_browser_user_data_dir: str = ""
 _browser_instance: str = ""
 
 
@@ -207,11 +211,17 @@ def _browser_ids(force: bool = False) -> list[str]:
     return [str(b.get("instance_id") or "") for b in (st.get("browsers") or [])]
 
 
-def ensure_browser(*, headless: bool = False, timeout: float = 25.0) -> dict:
+def ensure_browser(*, headless: bool = False, timeout: float = 25.0,
+                   user_data_dir: str | None = None) -> dict:
     """确保有一个**我们自己启动的**浏览器实例（内置 Chromium + 内置扩展）。
 
     headless=False 时是有窗口的 —— 这是**验证场景专用**，因为要人来看。
     正常抓取不会走到这里。
+
+    user_data_dir：指定浏览器 profile 目录。需要平台登录态的抓取
+    （抖音）必须传对应的 platform profile —— bsk_profile 没有抖音登录，
+    抖音主页只会给推荐流（2026-10-25 实测：抓到 8 条全是无关视频）。
+    不传则用默认 bsk_profile。
 
     ⚠️ 绝不复用 daemon 里"来历不明"的浏览器实例（2026-10-25 实测教训）：
     用户自己的 Chrome 如果装过 bsk 扩展，会自动连上 daemon。复用它干后台活
@@ -221,24 +231,28 @@ def ensure_browser(*, headless: bool = False, timeout: float = 25.0) -> dict:
 
     返回 {"ok", "instance_id", "started", "error"}。
     """
-    global _browser_proc, _browser_instance, _browser_headless
+    global _browser_proc, _browser_instance, _browser_headless, _browser_user_data_dir
 
     ok, why = ensure_daemon()
     if not ok:
         return {"ok": False, "instance_id": "", "started": False, "error": why}
 
+    want_profile = str(user_data_dir) if user_data_dir else str(DATA_ROOT / "bsk_profile")
+
     existing = _browser_ids(force=True)
-    # 唯一可复用的情况：本进程自己起的实例还活着、且模式与本次请求一致
+    # 唯一可复用的情况：本进程自己起的实例还活着、且模式与 profile 都与本次一致
     if (_browser_instance and _browser_instance in existing
             and _browser_headless == bool(headless)
+            and _browser_user_data_dir == want_profile
             and _browser_proc is not None and _browser_proc.poll() is None):
         return {"ok": True, "instance_id": _browser_instance,
                 "started": False, "error": ""}
 
-    # 我们自己起的实例但模式不一致（比如验证时开过有头窗口，现在要后台）：
-    # 关掉重起，否则后续 headless 抓取会沿用可见窗口
+    # 我们自己起的实例但模式或 profile 不一致（比如验证时开过有头窗口、
+    # 或上一个是 dy profile 现在要默认的）：关掉重起，绝不将就着用
     if (_browser_proc is not None and _browser_proc.poll() is None
-            and _browser_headless != bool(headless)):
+            and (_browser_headless != bool(headless)
+                 or _browser_user_data_dir != want_profile)):
         try:
             _browser_proc.terminate()
             _browser_proc.wait(timeout=6)
@@ -257,7 +271,7 @@ def ensure_browser(*, headless: bool = False, timeout: float = 25.0) -> dict:
         return {"ok": False, "instance_id": "", "started": False,
                 "error": f"内置扩展缺失：{ext}"}
 
-    profile = DATA_ROOT / "bsk_profile"
+    profile = Path(want_profile)
     profile.mkdir(parents=True, exist_ok=True)
     args = [
         exe,
@@ -278,8 +292,9 @@ def ensure_browser(*, headless: bool = False, timeout: float = 25.0) -> dict:
                     args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
                     close_fds=True)
-                # 记下这次是以什么模式起的，供下次复用前比对
+                # 记下这次是以什么模式/profile 起的，供下次复用前比对
                 _browser_headless = bool(headless)
+                _browser_user_data_dir = want_profile
             except Exception as e:  # noqa: BLE001
                 return {"ok": False, "instance_id": "", "started": False,
                         "error": f"启动内置浏览器失败：{type(e).__name__}: {e}"}
@@ -305,12 +320,13 @@ def stop_browser() -> None:
 
     只杀 Popen 的 pid —— 用户自己的 Chrome 一根汗毛都不能碰。
     """
-    global _browser_proc, _browser_instance, _browser_headless
+    global _browser_proc, _browser_instance, _browser_headless, _browser_user_data_dir
     with _browser_lock:
         proc = _browser_proc
         _browser_proc = None
         _browser_instance = ""
         _browser_headless = None
+        _browser_user_data_dir = ""
     if proc is None or proc.poll() is not None:
         return
     try:
@@ -323,10 +339,11 @@ def stop_browser() -> None:
             pass
 
 
-def ensure_ready(*, headless: bool = False, timeout: float = 40.0) -> dict:
+def ensure_ready(*, headless: bool = False, timeout: float = 40.0,
+                 user_data_dir: str | None = None) -> dict:
     """一步到位：daemon + 浏览器都就绪。调用方拿到 instance_id 后直接 start_page。"""
     t0 = time.time()
-    res = ensure_browser(headless=headless, timeout=timeout)
+    res = ensure_browser(headless=headless, timeout=timeout, user_data_dir=user_data_dir)
     res["elapsed"] = round(time.time() - t0, 1)
     return res
 

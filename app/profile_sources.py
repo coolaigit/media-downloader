@@ -1896,7 +1896,9 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
         "ok": bool(items), "items": items, "login_required": False,
         "verification_required": verification_required,
         "error": "" if items else (
-            "抖音触发安全验证，需要验证码辅助。"
+            "抖音触发安全验证（登录态已过期或被风控，headless 指纹无法自动通过）。"
+            "请到【平台登录】页刷新一次抖音登录态（可能需要过一次滑块），"
+            "刷新后趁登录态有效立刻重试。"
             if verification_required else
             "内置浏览器已打开抖音主页，但没有读到作品卡片。"
         ),
@@ -1922,7 +1924,21 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
         # 可见性听「设置 → 显示浏览器窗口」：默认后台，别在用户没要求时弹窗
         # （2026-10-24 实测：抓 Instagram 撞风控会凭空弹出窗口，打断用户）。
         from . import browser_profile
-        ready = browser_skill.ensure_ready(headless=not browser_profile.headed(), timeout=40)
+        # 抖音必须用 dy 登录态的浏览器打开主页：bsk_profile 没有抖音登录，
+        # 抖音对未登录访问主页只给推荐流（2026-10-25 实测：抓到 8 条全是
+        # 无关视频）。用 platform_profiles/dy/profile 起的 bsk 实例才有博主内容。
+        _used_dy_profile = False
+        _ud = None
+        try:
+            from .platform_login import profile_dir_for_url as _pdu
+            _p = _pdu(url, ready_only=True)
+            if _p and platform_for_url(url) == "dy":
+                _ud = _p
+                _used_dy_profile = True
+        except Exception:  # noqa: BLE001
+            _ud = None
+        ready = browser_skill.ensure_ready(headless=not browser_profile.headed(),
+                                           timeout=40, user_data_dir=_ud)
         if not ready.get("ok"):
             _why = str(ready.get("error") or "未知原因")
             # 失败也必须让用户看见原因。原来的写法只在成功时打 note，
@@ -1941,6 +1957,20 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
         if not sid:
             raise RuntimeError("BrowserSkill 未返回 session_id")
         time.sleep(2.5)
+        # 开页后先看一眼标题：抖音对 headless 指纹 + 过期登录态会直接给
+        # 「验证码中间页」，页面连正文都是空的 —— 这种情况下滚动循环
+        # 只会白跑 60 秒（2026-10-25 实测 64s 白跑）。快速失败 + 给出
+        # 可操作的指引，比静默 0 条强得多。
+        try:
+            _t = str(browser_skill.evaluate(
+                sid, "() => document.title.slice(0, 40)", timeout=12) or "")
+        except Exception:  # noqa: BLE001
+            _t = ""
+        if any(x in _t for x in ("验证码", "安全验证", "登录", "verify")):
+            return {"ok": False, "items": [], "login_required": True,
+                    "error": ("抖音要求重新验证（登录态已过期，headless 指纹无法自动通过）。"
+                              "请到【平台登录】页重新刷新一次抖音登录（可能需要过一次滑块），"
+                              "刷新后趁登录态有效立刻回来重试 —— 新鲜登录态下 headless 是能直接抓的。")}
         state = browser_skill.evaluate(
             sid,
             """(()=>({
@@ -2052,6 +2082,14 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
     finally:
         if sid:
             browser_skill.stop(sid)
+        # 用 dy profile 起的实例必须用完就关：dy profile 是排他资源，
+        # 下载侧的直链解析（video_downloader._douyin_real_url_profiled）
+        # 还要用 playwright 打开同一个 profile。不关会把它锁死。
+        if _used_dy_profile:
+            try:
+                browser_skill.stop_browser()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def browser_items(url: str, *, limit: int = 30, on_note=None) -> dict:
