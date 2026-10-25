@@ -875,6 +875,10 @@ class TaskManager:
                 base_note = str(res.get("note") or "")
                 t.note = "；".join(x for x in (base_note, retry_note) if x)
                 t.done = len(t.files)
+                # 跳过也要计数，否则界面永远是「跳过 0」：
+                # 用户下 2 个只出 1 个文件，统计显示 0 跳过，就会以为程序出错了
+                # （2026-10-25 实测：台账/占位名残留导致跳过，但统计看不出来）。
+                t.skipped = 1 if res.get("skipped") else 0
                 t.total = max(t.total, t.done)
                 t.percent = 100.0 if res.get("ok") else t.percent
                 t.speed = 0.0
