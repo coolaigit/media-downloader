@@ -465,16 +465,22 @@ def _is_ad_media(url: str) -> bool:
     return any(mk in low for mk in _AD_MEDIA_MARKERS) or any(h in low for h in _AD_PATH_HINTS)
 
 
-def _douyin_real_url_via_bsk(url: str, timeout: int = 45) -> str:
-    """用 BrowserSkill 打开抖音视频页，读 <video>.currentSrc。
+_dy_bsk_video_failed = False
 
-    为什么必须走这条路（2026-10-25 实测三种方式）：
-    - 无登录态渲染 → 页面里的 <video> 是静态占位资源（douyinstatic.com/uuu_265.mp4）
-    - 带 dy profile 渲染 → 抖音返回「验证码中间页」，什么都拿不到
-    - BrowserSkill → 能过验证（抓 423 条列表就是这么拿到的），视频页同样有效
+
+def _douyin_real_url_via_bsk(url: str, timeout: int = 45) -> str:
+    """用 BrowserSkill 打开抖音视频页，读 <video>.currentSrc（无窗口）。
+
+    作为抖音直链解析的**第二意见**（主力是 _douyin_real_url_profiled）：
+    - bsk 的浏览器指纹和内置 Chromium 不同，主力路被风控时可能从这里过；
+    - 但实测视频页在 bsk 下拿不到内容（约 87s 才空手而归，2026-10-25），
+      所以失败一次就在本进程内记为不可用 —— 批量下载时不能每条都白等 80 秒。
 
     注意过滤 douyinstatic.com：那不是正片。
     """
+    global _dy_bsk_video_failed
+    if _dy_bsk_video_failed:
+        return ""
     try:
         from . import browser_skill as bs
         from . import browser_profile
@@ -482,6 +488,7 @@ def _douyin_real_url_via_bsk(url: str, timeout: int = 45) -> str:
         return ""
     ready = bs.ensure_ready(headless=not browser_profile.headed(), timeout=40)
     if not ready.get("ok"):
+        _dy_bsk_video_failed = True
         return ""
     sid = ""
     try:
@@ -507,8 +514,10 @@ def _douyin_real_url_via_bsk(url: str, timeout: int = 45) -> str:
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(2.2)
+        _dy_bsk_video_failed = True   # 视频页确认拿不到：本进程后续不再试
         return ""
     except Exception:  # noqa: BLE001
+        _dy_bsk_video_failed = True
         return ""
     finally:
         if sid:
@@ -518,18 +527,20 @@ def _douyin_real_url_via_bsk(url: str, timeout: int = 45) -> str:
                 pass
 
 
-def _douyin_real_url_headed(url: str, timeout: int = 50) -> str:
-    """最后兜底：弹出带抖音登录态的窗口解析直链。
+_dy_profile_lock = threading.Lock()
 
-    实测矩阵（2026-10-25，四个头都试过）：
-    - headless + 无登录   → <video> 是占位资源 douyinstatic.com/uuu_265.mp4
-    - headless + dy登录   → 「验证码中间页」，什么都拿不到
-    - bsk（无 dy 登录）   → 视频页空白（列表页能看，视频页不给）
+
+def _douyin_real_url_profiled(url: str, timeout: int = 50) -> str:
+    """内置 Chromium（headless）+ 抖音登录态解析直链，全程无窗口。
+
+    2026-10-25 实测矩阵（当天多轮验证，结论已更新）：
+    - headless + dy登录 → **能拿到正片直链**（zjcdn.com/video/tos/…，8~25s）。
+      前提是登录态健康：用户在 16:46 的可见窗口里过完一次验证后，
+      同一 profile 的 headless 渲染不再弹验证码、<video>.currentSrc 直接有值。
+    - headless + 无登录 → <video> 是占位资源 douyinstatic.com/uuu_265.mp4
     - yt-dlp + dy cookies → 403 Forbidden（extractor 被封）
-    只剩「有头 + dy 登录」这一条路：弹一次窗，可能需要用户过一次验证码，
-    过了之后 profile 里会记住状态，后续 batch 大多能直接加载。
-
-    拿到直链或超时后窗口自动关闭。
+    曾经在这里弹「有头窗口兜底」—— 用户明确要求下载时不许弹窗（2026-10-25），
+    已删除。登录态过期时本函数空手而归，由调用方提示去「平台登录」页刷新。
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -542,41 +553,52 @@ def _douyin_real_url_headed(url: str, timeout: int = 50) -> str:
             return ""
     except Exception:  # noqa: BLE001
         return ""
-    try:
-        with sync_playwright() as p:
-            try:
-                ctx = p.chromium.launch_persistent_context(
-                    user_data_dir=str(prof), headless=False, locale="zh-CN",
-                    user_agent=DEFAULT_UA, viewport={"width": 1150, "height": 880},
-                    args=list(_LAUNCH_ARGS), **browser_runtime.launch_kwargs())
-            except Exception:  # noqa: BLE001 —— profile 打不开（比如被占用）
-                return ""
-            try:
-                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    # 同一个 dy profile 同时只能被一个 Chromium 占用：并发下载时在这里串行化，
+    # 抢不到锁的请求等前一个关完再开（每次只占几秒到几十秒）。
+    with _dy_profile_lock:
+        try:
+            with sync_playwright() as p:
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                except Exception:  # noqa: BLE001
-                    pass
-                deadline = time.time() + max(12, timeout - 12)
-                while time.time() < deadline:
+                    ctx = p.chromium.launch_persistent_context(
+                        user_data_dir=str(prof), headless=True, locale="zh-CN",
+                        user_agent=DEFAULT_UA, viewport={"width": 1150, "height": 880},
+                        args=list(_LAUNCH_ARGS), **browser_runtime.launch_kwargs())
+                except Exception:  # noqa: BLE001 —— profile 打不开（比如被占用）
+                    return ""
+                try:
+                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
                     try:
-                        srcs = page.evaluate(
-                            "() => Array.from(document.querySelectorAll('video'))"
-                            ".map(v => v.currentSrc || v.src || '')"
-                            ".filter(s => s && s.indexOf('douyinstatic.com') < 0)")
+                        page.goto(url, wait_until="domcontentloaded", timeout=25000)
                     except Exception:  # noqa: BLE001
-                        srcs = []
-                    if srcs:
-                        return str(srcs[-1])
-                    time.sleep(2.5)
-                return ""
-            finally:
-                try:
-                    ctx.close()
-                except Exception:  # noqa: BLE001
-                    pass
-    except Exception:  # noqa: BLE001
-        return ""
+                        pass
+                    deadline = time.time() + max(12, timeout - 12)
+                    while time.time() < deadline:
+                        try:
+                            srcs = page.evaluate(
+                                "() => Array.from(document.querySelectorAll('video'))"
+                                ".map(v => v.currentSrc || v.src || '')"
+                                ".filter(s => s && s.indexOf('douyinstatic.com') < 0)")
+                        except Exception:  # noqa: BLE001
+                            srcs = []
+                        if srcs:
+                            return str(srcs[-1])
+                        # 还没挂上地址：补一次播放（有的播放器要用户手势才加载）
+                        try:
+                            page.evaluate(
+                                "() => { const v = document.querySelector('video');"
+                                " if (v) { v.muted = true; v.play().catch(()=>{}); } }")
+                        except Exception:  # noqa: BLE001
+                            pass
+                        time.sleep(2.5)
+                    return ""
+                finally:
+                    try:
+                        ctx.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception:  # noqa: BLE001
+            return ""
+    return ""
 
 
 def resolve_media_via_render(page_url: str, *, timeout: int = 40,
@@ -750,6 +772,12 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40,
     def _ok(u: str) -> str:
         u = str(u or "").strip()
         if not u.startswith("http") or _is_ad_media(u):
+            return ""
+        # 抖音页面的静态占位视频（douyinstatic.com/.../uuu_265.mp4，2 秒）：
+        # 上面的网络监听路径已过滤该域名，DOM 候选路径必须同样过滤 ——
+        # 否则无登录态时每条视频都会"成功"下成同一个占位文件（2026-10-25 实测）。
+        low = u.lower()
+        if "douyinstatic.com" in low or "/obj/douyin-pc-web/" in low:
             return ""
         return u
 
@@ -1255,12 +1283,17 @@ def download_video(
     # （2026-10-25：抖音批量抓取成功、下载全部失败）。
     _dy_page = "douyin.com/video/" in url or "iesdouyin.com/share/video/" in url
     if (not has_specific_extractor(url)) or _dy_page:
-        # 抖音直链解析的完整顺序（实测矩阵见 _douyin_real_url_headed 的注释）：
-        # ① BrowserSkill（无弹窗）→ ② 普通渲染 headless（无弹窗）
-        # → ③ 有头窗口带登录态（弹窗，最后兜底：headless 全军覆没，只剩这条路）
+        # 抖音直链解析顺序（全部无窗口 —— 2026-10-25 用户要求：下载用内置浏览器、绝不弹窗）：
+        # ① 内置 Chromium headless + dy登录态（主力：实测拿到 zjcdn.com 正片直链）
+        # → ② BrowserSkill（不同指纹的第二意见；失败一次本进程内不再试）
+        # → ③ resolve_media_via_render + dy登录态（通用渲染兜底，同样 headless）
+        # 无登录态时 ③ 直接跳过：抖音页面在无登录态下只有 uuu_265 占位视频，
+        # 渲染纯属白跑（2026-10-25 实测），直接给出「去平台登录」的明确失败。
         _real = ""
         if _dy_page:
-            _real = _douyin_real_url_via_bsk(url)
+            _real = _douyin_real_url_profiled(url)
+            if not _real:
+                _real = _douyin_real_url_via_bsk(url)
         if not _real:
             _prof = None
             if _dy_page:
@@ -1270,9 +1303,7 @@ def download_video(
                     _prof = _p or None
                 except Exception:  # noqa: BLE001
                     _prof = None
-            if _dy_page:
-                _real = _douyin_real_url_headed(url)
-            if not _real:
+            if not _dy_page or _prof:
                 _real = resolve_media_via_render(url, profile_dir=_prof)
         if _real:
             try:
@@ -1319,11 +1350,17 @@ def download_video(
             # 解析不到真实播放器时**明确失败**，绝不退回 yt-dlp ——
             # 那条路会把这个站的 728x90 广告位当成视频下下来，
             # 用户拿到一个"能播放的假文件"比报错更糟（2026-10-24 实测）。
+            if _dy_page:
+                _err = ("没能解析出这条抖音视频的真实播放地址（全程后台、没有弹窗）。"
+                        "最常见原因是抖音登录态过期或触发风控："
+                        "请到「平台登录」页重新登录/刷新抖音，然后重试这批任务。")
+            else:
+                _err = ("这个站点的视频由第三方播放器承载（iframe / 无扩展名地址），"
+                        "暂时无法稳定解析出真实视频地址。为避免把页面上的广告位"
+                        "当成视频下载，这里直接报失败而不是给你一个假文件。")
             return {
                 "ok": False, "url": url, "files": [],
-                "error": ("这个站点的视频由第三方播放器承载（iframe / 无扩展名地址），"
-                          "暂时无法稳定解析出真实视频地址。为避免把页面上的广告位"
-                          "当成视频下载，这里直接报失败而不是给你一个假文件。"),
+                "error": _err,
             }
 
     # 已经解析出的签名媒体直链（XHS/Douyin 等）不要再套网页格式选择器。
