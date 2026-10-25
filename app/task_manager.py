@@ -819,6 +819,9 @@ class TaskManager:
                         t.video_url,
                         Path(t.output_dir),
                         task_id=task_id,
+                        # 传标题：直链下载（抖音/P站等）的文件名是哈希，
+                        # 只有 title 能让它落成可读的文件名（2026-10-25 实测）。
+                        title=t.title or "",
                         quality=o.get("quality", "best"),
                         container=o.get("container", ""),
                         prefer_audio_only=bool(o.get("prefer_audio_only")),

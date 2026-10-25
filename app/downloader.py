@@ -76,7 +76,12 @@ def sanitize_filename(name: str, max_len: int = 120) -> str:
 # 落盘变成 video_360p.mp4 / video_360p (1).mp4 …用户完全分不清哪部是哪部。
 _GENERIC_STEM_RE = re.compile(
     r"^(?:video|media|file|download|image|photo|pic|img|index|main|movie|"
-    r"stream|play|clip|full|hd|watch|attachment|banner|temp|tmp)\d*$|^\d{1,6}$",
+    r"stream|play|clip|full|hd|watch|attachment|banner|temp|tmp)\d*$|^\d{1,6}$"
+    # 长哈希名也算「没语义」：抖音等站的直链文件名是 40+ 位无分隔的字母数字
+    # （如 oEuftOeB1CwymGriiQxF5AILAEOYvbxw4eEsjz）。不认它，标题就没机会生效，
+    # 用户下到的就是一串乱码文件名（2026-10-25 实测）。
+    # 要求「无分隔符 + 18 位以上」，正常文件名基本都带 - _ 或空格，不会误伤。
+    r"|^[A-Za-z0-9]{18,}$",
     re.I)
 _QUALITY_SUFFIX_RE = re.compile(r"[_\-.](\d{3,4})p$", re.I)
 

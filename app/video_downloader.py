@@ -1032,6 +1032,7 @@ def download_video(
     max_height: int | None = None,
     format_id: str = "",
     skip_existing: bool = True,
+    title: str = "",
 ) -> dict:
     """下载单个视频（或播放列表），返回结果摘要。
 
@@ -1103,7 +1104,11 @@ def download_video(
         if _real:
             try:
                 from .downloader import download_file as _dl_file
-                _r = _dl_file(_real, output_dir, skip_existing=False, referer=url)
+                # 一定把 title 传下去：抖音/P站这类直链的文件名是一串哈希，
+                # 不传 title 就只能落成「一堆乱码」（2026-10-25 用户实测）。
+                # download_file 内部会判断 URL 文件名是否"通用"，是则改用 title。
+                _r = _dl_file(_real, output_dir, skip_existing=False,
+                              referer=url, title=title or "")
                 if _r.ok and _r.path:
                     _name = Path(_r.path).name
                     try:
