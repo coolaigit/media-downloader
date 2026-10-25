@@ -1924,8 +1924,14 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
         from . import browser_profile
         ready = browser_skill.ensure_ready(headless=not browser_profile.headed(), timeout=40)
         if not ready.get("ok"):
+            _why = str(ready.get("error") or "未知原因")
+            # 失败也必须让用户看见原因。原来的写法只在成功时打 note，
+            # 失败时用户只等到一个「0 条」，完全不知道是验证窗口没起来
+            # （2026-10-25 实测：bsk daemon 状态文件残留导致起不来，白排查好几轮）。
+            if on_note:
+                on_note(f"验证窗口没能启动：{_why}")
             return {"ok": False, "items": [], "login_required": False,
-                    "error": f"验证窗口准备失败：{ready.get('error') or '未知原因'}"}
+                    "error": f"验证窗口准备失败：{_why}"}
         if on_note:
             on_note("验证窗口已就绪，正在打开主页…")
         opened = browser_skill.start_page(
@@ -2208,6 +2214,14 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
         return items, f"已用{used}展开{name}主页。{suffix}"
 
     why = str(res.get("error") or "没有返回作品")
+    # 需要验证码但 bsk 也没起来时，把 bsk 的失败原因接在后面。
+    # 否则用户只看到「没有返回作品」，完全不知道卡在哪。
+    if res.get("verification_required"):
+        _bsk_fail = next((r for n, r in attempts
+                          if n == "BrowserSkill验证码辅助" and not r.get("ok")), None)
+        if _bsk_fail is not None:
+            why = (f"{why}｜自动验证窗口没能启动："
+                   f"{_bsk_fail.get('error') or '未知原因'}")
     if res.get("login_required"):
         st = platform_login.status(platform)
         if st.get("logged_in"):
