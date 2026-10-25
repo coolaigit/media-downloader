@@ -1104,11 +1104,24 @@ def download_video(
         if _real:
             try:
                 from .downloader import download_file as _dl_file
-                # 一定把 title 传下去：抖音/P站这类直链的文件名是一串哈希，
-                # 不传 title 就只能落成「一堆乱码」（2026-10-25 用户实测）。
-                # download_file 内部会判断 URL 文件名是否"通用"，是则改用 title。
+                # 这里**直接指定文件名**，不再依赖「URL 名像不像哈希」去判断。
+                # 原因：抖音 CDN 的直链文件名是 uuu_265.mp4 这种短名（不是长哈希），
+                # 原来的占位名规则认不出来 → 一批视频全落成同一个 uuu_265.mp4，
+                # 互相覆盖（2026-10-25 用户实测：下载下来很多都是同一个视频）。
+                # 既然抓取时标题是准的，就直接用它命名，最稳。
+                _fname = ""
+                if title:
+                    try:
+                        from .downloader import sanitize_filename as _sn
+                        _stem = _sn(title)[:110].strip()
+                        if _stem:
+                            # 带上 URL 指纹：抖音一批视频里标题重复的情况不少，
+                            # 只用标题会互相覆盖，最后只剩一个文件。
+                            _fname = f"{_stem} [{_url_fp(url)[:8]}].mp4"
+                    except Exception:  # noqa: BLE001
+                        _fname = ""
                 _r = _dl_file(_real, output_dir, skip_existing=False,
-                              referer=url, title=title or "")
+                              referer=url, title=title or "", filename=_fname)
                 if _r.ok and _r.path:
                     _name = Path(_r.path).name
                     try:
