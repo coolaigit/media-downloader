@@ -1679,6 +1679,33 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                     cover = video.get("cover") if isinstance(video.get("cover"), dict) else {}
                     urls = cover.get("url_list") if isinstance(cover.get("url_list"), list) else []
                     author = obj.get("author") if isinstance(obj.get("author"), dict) else {}
+                    # 视频直链：抖音放在 video.play_addr（高码率在 bit_rate[].play_addr）。
+                    # 不取它，条目就只有「视频页地址」，下载时交给 yt-dlp 会直接
+                    # Unsupported URL —— 表现为「批量抓取成功、下载全部失败」
+                    # （实测 2026-10-25）。
+                    direct = ""
+                    for _key in ("play_addr", "play_addr_h264", "download_addr"):
+                        _node = video.get(_key)
+                        if not isinstance(_node, dict):
+                            continue
+                        for u in (_node.get("url_list") or []):
+                            if isinstance(u, str) and u.startswith("http"):
+                                # playwm = 带水印，换成 play 取无水印
+                                direct = u.replace("/playwm/", "/play/")
+                                break
+                        if direct:
+                            break
+                    if not direct:
+                        for br in (video.get("bit_rate") or []):
+                            if not isinstance(br, dict):
+                                continue
+                            pa = br.get("play_addr") if isinstance(br.get("play_addr"), dict) else {}
+                            for u in (pa.get("url_list") or []):
+                                if isinstance(u, str) and u.startswith("http"):
+                                    direct = u.replace("/playwm/", "/play/")
+                                    break
+                            if direct:
+                                break
                     card = _douyin_card(
                         f"https://www.douyin.com/video/{aid}",
                         obj.get("desc") or "",
@@ -1686,6 +1713,8 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                     )
                     if card:
                         card["uploader"] = str(author.get("nickname") or "")
+                        if direct:
+                            card["direct_url"] = direct
                         _put(card)
                 for v in obj.values():
                     if isinstance(v, dict):
@@ -1768,15 +1797,29 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                 if len(found) >= target:
                     break
 
-                if rnd in (1, 4) and not found:
+                if rnd == 4 and not found:
+                    # 只有「一条都没抓到」且「页面上确实没有作品链接」时才怀疑验证码。
+                    # 原来 rnd=1 就检查、且只按 body 文本匹配 —— 而「验证」这类词在
+                    # 推荐流里到处都是，首屏还没渲染出来时就误判成验证码，
+                    # 把本来能走通、**带视频直链**的 JSON 路径挤到了 BrowserSkill
+                    # （BrowserSkill 只有 DOM，拿不到 play_addr）。
+                    # 结果就是「列表能抓到、但下载全部失败」（2026-10-25 实测）。
+                    _links = 0
                     try:
-                        txt = (page.title() + " " + page.locator("body").inner_text(timeout=3000)).lower()
-                    except Exception:
-                        txt = ""
-                    if any(x in txt for x in ("验证码", "安全验证", "验证后继续", "captcha",
-                                              "verify you are human", "滑块验证")):
-                        verification_required = True
-                        break
+                        _links = int(page.evaluate(
+                            "() => document.links ? Array.from(document.links)"
+                            ".filter(a => a.href && a.href.includes('/video/')).length : 0") or 0)
+                    except Exception:  # noqa: BLE001
+                        _links = 0
+                    if _links == 0:
+                        try:
+                            txt = (page.title() + " " + page.locator("body").inner_text(timeout=3000)).lower()
+                        except Exception:  # noqa: BLE001
+                            txt = ""
+                        if any(x in txt for x in ("验证码", "安全验证", "验证后继续", "captcha",
+                                                  "verify you are human", "滑块验证")):
+                            verification_required = True
+                            break
 
                 before = len(found)
                 try:

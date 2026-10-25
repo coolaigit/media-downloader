@@ -572,8 +572,11 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40) -> str:
                     """() => {
                         const out = [];
                         document.querySelectorAll('video').forEach(v => {
-                          if (v.src) out.push(v.src);
-                          v.querySelectorAll('source').forEach(s => { if (s.src) out.push(s.src); });
+                          // 必须同时看 currentSrc：抖音这类用 MSE 播放的页面，
+                          // v.src 是空、真正的地址在 v.currentSrc（2026-10-25 实测）。
+                          const s = v.currentSrc || v.src;
+                          if (s) out.push(s);
+                          v.querySelectorAll('source').forEach(x => { if (x.src) out.push(x.src); });
                         });
                         document.querySelectorAll('[data-src],[data-video],[data-file],[data-href],[data-url]').forEach(el => {
                           ['data-src','data-video','data-file','data-href','data-url'].forEach(a => {
@@ -1089,7 +1092,13 @@ def download_video(
     # yt-dlp 的 HTML5MediaEmbed 会抓页面第一个 <video>，而那里常是广告位
     # （实测 hornyleak 拿到 728x90-1.mp4，用户看到的就是"下载的文件不对"）。
     # 这里先渲染解析一次；拿到非广告地址就走直链下载，绕开 yt-dlp 的误判。
-    if not has_specific_extractor(url):
+    #
+    # 抖音单独列出来：yt-dlp **有** Douyin extractor，但它要求 fresh cookies，
+    # 批量抓来的页面地址直接下会报 "Fresh cookies (not necessarily logged in)
+    # are needed" —— 而页面里 <video>.currentSrc 就是可用直链（实测能下）
+    # （2026-10-25：抖音批量抓取成功、下载全部失败）。
+    _dy_page = "douyin.com/video/" in url or "iesdouyin.com/share/video/" in url
+    if (not has_specific_extractor(url)) or _dy_page:
         _real = resolve_media_via_render(url)
         if _real:
             try:
@@ -1111,7 +1120,7 @@ def download_video(
                         "ok": True, "url": url,
                         "files": [{"path": _r.path, "name": _name, "size": _r.size}],
                         "note": "已用内置浏览器解析出真实播放地址"
-                                "（yt-dlp 对这类站会误抓广告位，已绕开）。",
+                                "（绕开了 yt-dlp 对这类页面的限制）。",
                     }
             except Exception:  # noqa: BLE001 —— 失败就回到原流程
                 pass

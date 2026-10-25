@@ -46,6 +46,9 @@ _REF_LINE = re.compile(r'(@e\d+)\s+(?:button|link)\s+"([^"]+)"', re.I)
 # 我们启动的那个浏览器进程（只用来善后，绝不杀用户自己的浏览器）
 _browser_lock = threading.Lock()
 _browser_proc: subprocess.Popen | None = None
+# 记录当前实例是以什么模式起的。复用实例时必须比对它，
+# 否则一次「可见」启动会让后续所有抓取都弹窗（2026-10-25 用户实测）。
+_browser_headless: bool | None = None
 _browser_instance: str = ""
 
 
@@ -198,7 +201,7 @@ def ensure_browser(*, headless: bool = False, timeout: float = 25.0) -> dict:
 
     返回 {"ok", "instance_id", "started", "error"}。
     """
-    global _browser_proc, _browser_instance
+    global _browser_proc, _browser_instance, _browser_headless
 
     ok, why = ensure_daemon()
     if not ok:
@@ -206,8 +209,23 @@ def ensure_browser(*, headless: bool = False, timeout: float = 25.0) -> dict:
 
     existing = _browser_ids(force=True)
     if existing:
-        # 用户自己开着 Chrome 且装了扩展时直接用他的实例，省一次启动
-        return {"ok": True, "instance_id": existing[0], "started": False, "error": ""}
+        # 复用前先比对模式：如果现有实例是**我们起的**、但模式和这次请求不一致，
+        # 就把它关掉重起。否则只要有一次以可见模式启动过，后面每次
+        # headless=True 的抓取都会沿用那个窗口 —— 用户看到的就是「一直弹窗」
+        # （2026-10-25 实测：用户要求全部内置后台运行）。
+        if (_browser_proc is not None and _browser_proc.poll() is None
+                and _browser_headless != bool(headless)):
+            try:
+                _browser_proc.terminate()
+                _browser_proc.wait(timeout=6)
+            except Exception:  # noqa: BLE001
+                pass
+            _browser_proc = None
+            time.sleep(1.2)
+            existing = _browser_ids(force=True)
+        if existing:
+            # 用户自己开着 Chrome 且装了扩展时直接用他的实例，省一次启动
+            return {"ok": True, "instance_id": existing[0], "started": False, "error": ""}
 
     exe = chromium_exe()
     if not exe:
@@ -239,6 +257,8 @@ def ensure_browser(*, headless: bool = False, timeout: float = 25.0) -> dict:
                     args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
                     close_fds=True)
+                # 记下这次是以什么模式起的，供下次复用前比对
+                _browser_headless = bool(headless)
             except Exception as e:  # noqa: BLE001
                 return {"ok": False, "instance_id": "", "started": False,
                         "error": f"启动内置浏览器失败：{type(e).__name__}: {e}"}
@@ -262,11 +282,12 @@ def stop_browser() -> None:
 
     只杀 Popen 的 pid —— 用户自己的 Chrome 一根汗毛都不能碰。
     """
-    global _browser_proc, _browser_instance
+    global _browser_proc, _browser_instance, _browser_headless
     with _browser_lock:
         proc = _browser_proc
         _browser_proc = None
         _browser_instance = ""
+        _browser_headless = None
     if proc is None or proc.poll() is not None:
         return
     try:
