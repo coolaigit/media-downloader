@@ -283,12 +283,6 @@ def _recover_with_browser_skill(url: str, wall: str, on_note=None) -> FetchResul
     finally:
         if session_id:
             browser_skill.stop(session_id)
-        # 同 profile_sources.browser_skill_author_items：
-        # 用完就关浏览器，避免可见实例长期挂着、被下一轮复用导致"一直弹窗"。
-        try:
-            browser_skill.stop_browser()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def _page_self_report(html: str) -> tuple[str, str]:

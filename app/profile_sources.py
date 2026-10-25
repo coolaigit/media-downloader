@@ -2046,15 +2046,6 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
     finally:
         if sid:
             browser_skill.stop(sid)
-        # 抓完就把 BrowserSkill 的浏览器一起关掉。
-        # 不这么做的话，这一轮可能是以「可见」模式起的（比如为了过滑块），
-        # 而浏览器会一直挂着，下一轮抓取复用同一个实例 —— 用户看到的就是
-        # 「明明设了后台，还是弹窗」（2026-10-25 实测）。
-        # 关掉后下一轮必然按当前配置重新启动（默认无头）。
-        try:
-            browser_skill.stop_browser()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def browser_items(url: str, *, limit: int = 30, on_note=None) -> dict:
