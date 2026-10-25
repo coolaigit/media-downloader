@@ -179,7 +179,11 @@ def _load() -> dict:
 def _save(data: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = HISTORY_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    # 不加 indent：这是纯程序读的台账，格式化会让文件大 ~30%、序列化也更慢。
+    # 每下载一个视频都要重写一次全量（2898 条 ≈ 2MB → 1000 个视频累积写 2GB），
+    # 记录越多越明显。紧凑格式是不改存储结构前提下最直接的一档优化。
+    tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                   encoding="utf-8")
     tmp.replace(HISTORY_FILE)      # 原子替换：写一半被打断也不会毁掉台账
     with _LOCK:
         _CACHE["mtime"] = _mtime()
