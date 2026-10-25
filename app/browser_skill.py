@@ -163,17 +163,31 @@ def daemon_status(force: bool = False) -> dict | None:
 
 
 def ensure_daemon(timeout: float = 15.0) -> tuple[bool, str]:
-    """确保 daemon 在跑。没跑就用包内 bsk 拉起来（后台，不弹窗）。"""
+    """确保 daemon 在跑。没跑就用包内 bsk 拉起来（后台，不弹窗）。
+
+    ⚠️ 必须用 `daemon start --foreground`，**不能**用默认的 `daemon start`：
+    默认模式会尝试把 daemon **脱离 Job 对象**（breakaway）常驻，
+    在有 Job 限制的环境里直接被拒：
+
+        cannot start an independent Windows daemon;
+        the host may prohibit Job Object breakaway ... 拒绝访问 (os error 5)
+
+    `--foreground` 则留在当前 Job 内（日志里 `in_job=Ok(true)`），能正常启动，
+    生命周期跟着本进程走（客户端关了就退，正是我们想要的）。
+    同时**不能**加 `CREATE_NEW_PROCESS_GROUP`，那等于又要求脱离进程组。
+    （2026-10-25 实测：这是抖音撞验证码后 0 抓取的真根因。）
+    """
     if daemon_status():
         return True, "daemon 已在运行"
     bsk = bsk_binary()
     if not bsk:
         return False, "找不到 bsk（安装包应自带 bin/bsk.exe）"
     try:
+        # --foreground：留在本进程的 Job 内启动，绕开 breakaway 限制
         subprocess.Popen(
-            [bsk, "daemon", "start"],
+            [bsk, "daemon", "start", "--foreground"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-            creationflags=_CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP,
+            creationflags=_CREATE_NO_WINDOW,
             close_fds=True,
         )
     except Exception as e:  # noqa: BLE001
