@@ -465,7 +465,8 @@ def _is_ad_media(url: str) -> bool:
     return any(mk in low for mk in _AD_MEDIA_MARKERS) or any(h in low for h in _AD_PATH_HINTS)
 
 
-def resolve_media_via_render(page_url: str, *, timeout: int = 40) -> str:
+def resolve_media_via_render(page_url: str, *, timeout: int = 40,
+                             profile_dir: str | None = None) -> str:
     """给 yt-dlp 不认识的站解析真实媒体地址（渲染页面 + 监听网络请求）。
 
     为什么需要（2026-10-24 用户实测 hornyleak.tv）：
@@ -506,6 +507,13 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40) -> str:
             # hdplayer 的正片没有扩展名，所以这里按"排除法"过滤非视频后缀。
             _non_video = (".vtt", ".srt", ".ass", ".jpg", ".jpeg", ".png", ".webp",
                           ".gif", ".json", ".css", ".js", ".html", ".xml", ".txt")
+            # 抖音的**静态资源域名**里有 uuu_265.mp4 这类 UI 占位视频
+            # （lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/uuu_265.mp4），
+            # content-type 同样是 video/mp4，会被当成正片收进来 ——
+            # 结果所有抖音视频都解析到同一个文件，用户下到的全是一模一样的
+            # 「uuu_265」（2026-10-25 实测）。正片在 douyinvod.com，这里排掉静态域。
+            if "douyinstatic.com" in low or "/obj/douyin-pc-web/" in low:
+                return
             if is_media and "/embed/" not in low \
                     and not low.split("?")[0].endswith(_non_video):
                 fetched.append(u)
@@ -534,9 +542,26 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40) -> str:
     dom_cands: list = []
     try:
         with sync_playwright() as p:
-            b = p.chromium.launch(headless=True, **browser_runtime.launch_kwargs())
-            page = b.new_page(user_agent=DEFAULT_UA,
-                              viewport={"width": 1400, "height": 1000}, locale="zh-CN")
+            # 需要登录态的站（抖音）必须带 platform profile 打开：
+            # 不带登录态时，页面里的 <video> 只是一段占位视频
+            # （douyinstatic.com/obj/douyin-pc-web/uuu_265.mp4），
+            # 所有视频都会解析成同一个文件（2026-10-25 实测）。
+            b = None
+            if profile_dir:
+                try:
+                    from .renderer import _LAUNCH_ARGS
+                    b = p.chromium.launch_persistent_context(
+                        user_data_dir=str(profile_dir), headless=True,
+                        locale="zh-CN", user_agent=DEFAULT_UA,
+                        viewport={"width": 1400, "height": 1000},
+                        args=list(_LAUNCH_ARGS), **browser_runtime.launch_kwargs())
+                    page = b.pages[0] if b.pages else b.new_page()
+                except Exception:  # noqa: BLE001 —— profile 打不开就退回无登录态
+                    b = None
+            if b is None:
+                b = p.chromium.launch(headless=True, **browser_runtime.launch_kwargs())
+                page = b.new_page(user_agent=DEFAULT_UA,
+                                  viewport={"width": 1400, "height": 1000}, locale="zh-CN")
             page.on("response", _on_resp)
             try:
                 page.goto(page_url, wait_until="domcontentloaded", timeout=timeout * 1000)
@@ -567,9 +592,12 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40) -> str:
                 except Exception:  # noqa: BLE001
                     continue
             page.wait_for_timeout(7000)
-            try:
-                dom_cands = page.evaluate(
-                    """() => {
+
+            # 耐心等 <video> 真正挂上地址。
+            # 抖音这类页面首帧的 <video> 是空的，点完播放还要再等一会儿
+            # currentSrc 才有值；固定等 7 秒常常不够，结果被当成「解析不出」
+            # 直接报失败（2026-10-25 用户实测）。这里改成轮询，最多再等 18 秒。
+            _dom_expr = """() => {
                         const out = [];
                         document.querySelectorAll('video').forEach(v => {
                           // 必须同时看 currentSrc：抖音这类用 MSE 播放的页面，
@@ -585,9 +613,22 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40) -> str:
                           });
                         });
                         return out;
-                    }""")
-            except Exception:  # noqa: BLE001
-                dom_cands = []
+                    }"""
+            dom_cands: list = []
+            _deadline = time.time() + 18
+            while True:
+                try:
+                    dom_cands = page.evaluate(_dom_expr) or []
+                except Exception:  # noqa: BLE001
+                    dom_cands = []
+                if dom_cands or time.time() >= _deadline:
+                    break
+                # 还没挂上地址：再点一次播放（有的播放器要用户手势才加载）
+                try:
+                    page.click("video", timeout=1200)
+                except Exception:  # noqa: BLE001
+                    pass
+                page.wait_for_timeout(1500)
             b.close()
     except Exception:  # noqa: BLE001
         return ""
@@ -1100,7 +1141,17 @@ def download_video(
     # （2026-10-25：抖音批量抓取成功、下载全部失败）。
     _dy_page = "douyin.com/video/" in url or "iesdouyin.com/share/video/" in url
     if (not has_specific_extractor(url)) or _dy_page:
-        _real = resolve_media_via_render(url)
+        # 抖音必须带登录态解析：不带的话页面里的 <video> 是占位资源
+        # （douyinstatic.com/.../uuu_265.mp4），所有视频都解析成同一个文件。
+        _prof = None
+        if _dy_page:
+            try:
+                from .platform_login import profile_dir_for_url as _pdu
+                _p = _pdu(url, ready_only=True)
+                _prof = _p or None
+            except Exception:  # noqa: BLE001
+                _prof = None
+        _real = resolve_media_via_render(url, profile_dir=_prof)
         if _real:
             try:
                 from .downloader import download_file as _dl_file
