@@ -1607,6 +1607,215 @@ def _douyin_card(href: str, title: str = "", cover: str = "") -> dict | None:
     }
 
 
+def ig_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
+    """Instagram 主页抓取：登录浏览器渲染 + 拦截 feed XHR。
+
+    为什么不靠 gallery-dl / yt-dlp（2026-10-26 实测）：
+    - gallery-dl 1.32.13 对用户主页直接崩 KeyError:'username'
+      （web_profile_info 被 429 限流，响应里没有 user 字段）
+    - yt-dlp instagram:user Unable to extract data
+    - 通用兜底把主页链接本身当条目（8 条全是主页 URL）
+    用户走代理访问 IG，共享出口 IP 被 429 限流极凶；真实浏览器
+    （完整指纹 + 登录态 + 代理）比裸 API 请求稳得多。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        from .renderer import _LAUNCH_ARGS
+        from . import browser_runtime
+        from .config import DEFAULT_UA
+    except Exception as e:
+        return {"ok": False, "items": [], "login_required": False,
+                "error": f"内置浏览器不可用：{e}"}
+
+    try:
+        pu = urlparse(url)
+        segs = [x for x in (pu.path or "").split("/") if x]
+    except Exception:
+        segs = []
+    if not segs:
+        return {"ok": False, "items": [], "login_required": False,
+                "error": "Instagram 地址里没有用户名。"}
+    username = segs[0]
+
+    target = max(1, min(int(limit or 30), 2000))
+    st = platform_login.status("ig")
+    profile_dir = str(st.get("profile_dir") or "")
+    if not profile_dir:
+        return {"ok": False, "items": [], "login_required": True,
+                "error": "Instagram 尚未建立登录 profile，请先到「平台登录」登录一次。"}
+
+    found: dict[str, dict] = {}
+    login_required = False
+    ctx = None
+    try:
+        with sync_playwright() as p:
+            kw = dict(
+                user_data_dir=profile_dir,
+                headless=not bool(browser_profile.headed()),
+                viewport={"width": 1400, "height": 950},
+                locale="en-US", user_agent=DEFAULT_UA,
+                args=list(_LAUNCH_ARGS) + ["--disable-blink-features=AutomationControlled"],
+                **browser_runtime.launch_kwargs(),
+            )
+            try:
+                ctx = p.chromium.launch_persistent_context(**kw)
+            except Exception as e:
+                return {"ok": False, "items": [], "login_required": False,
+                        "error": f"Instagram 登录 profile 正在被占用或无法打开：{e}"}
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+            # 关键（2026-10-26 实测）：profile 里的登录态说丢就丢 —— 打开主页
+            # 直接是游客态（"Log In Sign Up"，帖子网格根本不渲染，/p/ 链接 0 个），
+            # 但 cookies_from_profile.txt 里的 sessionid 仍然有效
+            # （走 API 返回 "useragent mismatch" 而非 401，说明会话活着）。
+            # 所以每次开页前把保存的 cookie 强制注入上下文，不赌 profile 内置
+            # cookie 的存活。实测：注入后 "Log In" 消失，滚动一轮就出 8 个帖子。
+            try:
+                _cks = platform_login.playwright_cookies("ig")
+                if _cks:
+                    ctx.add_cookies(_cks)
+            except Exception:  # noqa: BLE001 —— 注入失败仍有 profile 自带 cookie 兜底
+                pass
+
+            def _put(code: str, title: str, cover: str, direct: str, is_video: bool) -> None:
+                if not code:
+                    return
+                key = f"https://www.instagram.com/p/{code}/"
+                old = found.get(key)
+                if old is None:
+                    found[key] = {"page_url": key, "url": direct or key,
+                                  "title": (title or "")[:120], "cover": cover or "",
+                                  "kind_hint": "video" if is_video else "",
+                                  "is_page": not direct,
+                                  "type": "video" if is_video else "image"}
+                else:
+                    if not old.get("cover") and cover:
+                        old["cover"] = cover
+                    if not old.get("title") and title:
+                        old["title"] = title[:120]
+                    if direct and not str(old.get("url") or "").startswith("http"):
+                        old["url"] = direct
+
+            def add_item(obj) -> None:
+                if not isinstance(obj, dict):
+                    return
+                code = str(obj.get("code") or obj.get("shortcode") or "")
+                if not code:
+                    return
+                cap = obj.get("caption") if isinstance(obj.get("caption"), dict) else None
+                title = str((cap or {}).get("text") or "")
+                vids = obj.get("video_versions")
+                direct = ""
+                if isinstance(vids, list) and vids and isinstance(vids[0], dict):
+                    direct = str(vids[0].get("url") or "")
+                cover = ""
+                iv = obj.get("image_versions2")
+                if isinstance(iv, dict):
+                    cand = iv.get("candidates")
+                    if isinstance(cand, list) and cand and isinstance(cand[0], dict):
+                        cover = str(cand[0].get("url") or "")
+                _put(code, title, cover, direct, bool(direct))
+
+            def on_response(resp) -> None:
+                low = str(resp.url or "").lower()
+                if "/api/v1/feed/user/" not in low and "/graphql/query" not in low:
+                    return
+                try:
+                    d = resp.json()
+                except Exception:  # noqa: BLE001
+                    return
+                if not isinstance(d, dict):
+                    return
+                for it in (d.get("items") or []):
+                    add_item(it)
+                med = (((d.get("data") or {}).get("user") or {})
+                       .get("edge_owner_to_timeline_media") or {})
+                for edge in (med.get("edges") or []):
+                    node = (edge or {}).get("node") or {}
+                    code = str(node.get("shortcode") or "")
+                    if code:
+                        disp = str(node.get("display_url") or "")
+                        is_vid = bool(node.get("is_video"))
+                        vurl = str(node.get("video_url") or "") if is_vid else ""
+                        _put(code, "", disp, vurl, is_vid)
+
+            page.on("response", on_response)
+            if on_note:
+                on_note("正在用登录浏览器打开 Instagram 主页并持续下拉…")
+            try:
+                page.goto(f"https://www.instagram.com/{username}/",
+                          wait_until="domcontentloaded", timeout=45000)
+            except Exception:  # noqa: BLE001
+                pass
+            page.wait_for_timeout(4000)
+            # 登录墙判断：标题/正文要求登录且页面上没有帖子链接
+            try:
+                ttl = (page.title() or "").lower()
+                body = ""
+                try:
+                    body = page.locator("body").inner_text(timeout=3000)[:600].lower()
+                except Exception:  # noqa: BLE001
+                    pass
+                if ("login" in ttl or "log in" in body[:250]
+                        or "sign up" in body[:250]):
+                    if not page.locator("a[href*='/p/']").count():
+                        login_required = True
+            except Exception:  # noqa: BLE001
+                pass
+
+            rnd = 0
+            stale = 0
+            while len(found) < target and rnd < 40 and not login_required:
+                rnd += 1
+                before = len(found)
+                try:
+                    page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:  # noqa: BLE001
+                    pass
+                page.wait_for_timeout(1800)
+                # DOM 兜底（2026-10-26 实测）：IG 主页已改成**服务端渲染** ——
+                # 帖子数据直接写进 HTML，不再发 /api/v1/feed/user/ 这类 XHR。
+                # 只监听网络响应会一条都拿不到（页面明明显示了 8 个帖子，
+                # found 却是空的）。这里直接从 a[href*='/p/'] 读 shortcode + 封面。
+                try:
+                    dom_rows = page.evaluate(
+                        """() => Array.from(document.querySelectorAll("a[href*='/p/'], a[href*='/reel/']"))
+                             .map(a => {
+                               const href = a.getAttribute('href') || '';
+                               const img = a.querySelector('img');
+                               return {
+                                 code: href.split('/').filter(Boolean).pop() || '',
+                                 cover: img ? (img.currentSrc || img.src || '') : '',
+                                 alt: img ? (img.alt || '') : '',
+                                 is_video: !!a.querySelector('video') || href.indexOf('/reel/') >= 0
+                               };
+                             }).filter(x => x.code)""") or []
+                    for d in dom_rows:
+                        _put(str(d.get("code") or ""), str(d.get("alt") or ""),
+                             str(d.get("cover") or ""), "", bool(d.get("is_video")))
+                except Exception:  # noqa: BLE001
+                    pass
+                stale = 0 if len(found) > before else stale + 1
+                if stale >= 8:
+                    break
+            items = list(found.values())[:target]
+            return {"ok": bool(items), "items": items, "login_required": login_required,
+                    "error": "" if items else
+                    ("Instagram 要求登录，请到「平台登录」重新登录一次。"
+                     if login_required else
+                     "Instagram 没有返回作品（大概率是出口 IP 被限流）。"
+                     "稍等几分钟再试；若反复失败，请到「平台登录」刷新一次 Instagram 登录态。")}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "items": list(found.values()),
+                "login_required": False, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
     """Bundled Douyin author crawler using Playwright and the saved platform profile."""
     try:
@@ -2198,6 +2407,10 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
             # 「请重新登录」，这个歧义正是 V3.0 要消掉的（实测 2026-10-22）。
             why = str(res.get("error") or "微博登录态不可用")
             return [], (f"微博登录态已失效，请到「平台登录」重新登录微博后再试。{why}")
+
+    if platform == "ig" and not res.get("ok"):
+        res = ig_author_items(url, limit=limit, on_note=on_note)
+        attempts.append(("内置登录浏览器", res))
 
     if platform == "dy" and not res.get("ok"):
         res = douyin_author_items(url, limit=limit, on_note=on_note)
