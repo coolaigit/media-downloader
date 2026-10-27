@@ -1514,6 +1514,7 @@ def _expand_via_platform_source(
     list_url: str,
     *,
     limit: int = 30,
+    want_kinds: tuple[str, ...] | list[str] | None = None,
     on_note=None,
 ) -> tuple[dict | None, str]:
     """平台主页的自包含来源：内置提取器优先，必要时用独立登录浏览器。
@@ -1522,6 +1523,11 @@ def _expand_via_platform_source(
     2.0 不再调用外部 Python 项目，而由 profile_sources 统一调度 yt-dlp、
     gallery-dl、xhshow 与本程序 Playwright 渲染层。
 
+    want_kinds：用户这次要的类型（image / video / stream）。
+    之前这里**写死 want_video=True**，于是「抓图片」也会按视频走，
+    导致 Instagram 这类图vid混排的主页拿到一堆视频、图片只有零星几条
+    （2026-10-27 用户实测）。现在按真实诉求走，并在返回前按类型过滤。
+
     返回 (结果 | None, 说明)。
     """
     from . import profile_sources
@@ -1529,28 +1535,43 @@ def _expand_via_platform_source(
     platform = profile_sources.platform_for_url(list_url)
     if not platform:
         return None, ""
+    _kinds = tuple(want_kinds or ("image", "video", "stream"))
+    _want_video = ("video" in _kinds) and ("image" not in _kinds)
+    _want_image = ("image" in _kinds) and ("video" not in _kinds)
     # 统一入口：按平台选择内置来源；见 profile_sources.list_author_items。
     items_raw, note = profile_sources.list_author_items(
-        list_url, limit=limit, want_video=True, on_note=on_note)
+        list_url, limit=limit, want_video=_want_video, on_note=on_note)
     if not items_raw:
         return None, note
 
     items: list[MediaItem] = []
+    _dropped = 0
     for r in items_raw:
         direct = (r.get("direct_url") or "").strip()
         page = (r.get("page_url") or "").strip()
+        # 各平台来源的字段名不统一：ig 把直链放在 url、page_url 放页面地址；
+        # 其它来源用 direct_url。这里做一次归一，否则 ig 的图片/视频永远只有
+        # 页面地址（下载层拿不到真文件，2026-10-27 实测）。
+        _u = str(r.get("url") or "").strip()
+        if not direct and page and _u.startswith("http") and _u != page:
+            direct = _u
         target = direct or page          # 有签名直链就直链，否则退回页面地址（交给 yt-dlp）
         if not target:
             continue
-        # gallery-dl 会把图片和视频混在一起返回；用户只要视频时丢掉图片条目
-        # （Pinterest 画板动辄上千张图，不丢会把结果淹掉）。
+        # 按用户这次要的类型过滤。平台来源会图vid混排，
+        # 只看 kind_hint 不够：还要看条目自己标的 type（ig 有 image/video）。
         kind_hint = (r.get("kind_hint") or "").strip()
-        if kind_hint and kind_hint != "video":
+        is_video = kind_hint == "video" or str(r.get("type") or "") == "video"
+        if is_video and _want_image:
+            _dropped += 1
+            continue
+        if (not is_video) and _want_video:
+            _dropped += 1
             continue
         # m3u8/mpd 是流媒体清单，不能当普通文件下（会得到坏文件）——
         # 标成 stream，前端会走 ffmpeg 的流下载路径（实测能合成音画齐全的单文件）。
         _ext = target.rsplit("?", 1)[0].rsplit(".", 1)[-1].lower()
-        _kind = "stream" if _ext in ("m3u8", "mpd") else "video"
+        _kind = "stream" if _ext in ("m3u8", "mpd") else ("video" if is_video else "image")
         items.append(MediaItem(
             url=target, kind=_kind, source=f"内置平台来源:{platform}",
             title=r.get("title") or "", thumbnail=r.get("cover") or "",
@@ -1568,11 +1589,13 @@ def _expand_via_platform_source(
             },
         ))
     if not items:
-        # 来源确实返回了条目、但全被类型过滤（图多视频少）时，必须说明，
+        # 来源确实返回了条目、但全被类型过滤（图vid混排）时，必须说明，
         # 否则表现成「没有原因的 0 条」（实测 Pinterest 画板踩过）。
-        if any((r.get("kind_hint") or "") == "image" for r in items_raw):
-            return None, (f"来源拿到了 {len(items_raw)} 个文件，但其中没有视频"
-                          "（这个页的文件是图和视频混排的，视频可能排得更靠后）。")
+        if _dropped:
+            _what = "图片" if _want_image else "视频"
+            return None, (f"来源拿到了 {len(items_raw)} 个作品，但其中没有{_what}"
+                          f"（这个主页是图和视频混排的，{_what}可能排在更靠后的位置，"
+                          "可以把「最多作品」调大再试）。")
         return None, note
 
     # ---------- xhs 笔记页自行下钻：把「笔记页地址」换成「视频直链」 ----------
@@ -1755,6 +1778,20 @@ def crawl_list(
             img_exp["stats"]["elapsed"] = round(time.time() - t0, 2)
             _emit("merge", 0, 0, f"已提取 {len(img_exp.get('items') or [])} 张博主图片")
             return img_exp
+        # Instagram 的图片也必须在平台来源里拿：它的作品数据同样在 JS/登录态后面，
+        # 走通用网页抓取只会捞到 56 张头像/UI/推荐位装饰图，正文图片一条都没有
+        # （2026-10-27 用户实测：抓图片只抓到一部分，且都是错的）。
+        if _img_platform == "ig":
+            _emit("list", 0, 1, "正在读取 Instagram 博主的图文作品…")
+            ig_exp, _ig_note = _expand_via_platform_source(
+                list_url, limit=max(1, min(int(max_items or 30) or 30, 2000)),
+                want_kinds=("image",),
+                on_note=lambda msg: _emit("detail", 0, 0, msg),
+            )
+            if ig_exp is not None:
+                ig_exp["stats"]["elapsed"] = round(time.time() - t0, 2)
+                _emit("merge", 0, 0, f"已提取 {len(ig_exp.get('items') or [])} 张博主图片")
+                return ig_exp
 
     if expand_listing and want_kinds and "video" in want_kinds:
         _emit("list", 0, 1, "正在判断这是不是一个视频列表 / 博主页…")
@@ -1773,6 +1810,7 @@ def crawl_list(
             pt_exp, pt_note = _expand_via_platform_source(
                 list_url,
                 limit=max(2, min(int(max_items or 30) or 30, 2000)),
+                want_kinds=want_kinds,
                 on_note=lambda s: _emit("list", 0, 1, s),
             )
             if pt_exp is not None:
@@ -1799,6 +1837,7 @@ def crawl_list(
             pt_exp, pt_note = _expand_via_platform_source(
                 list_url,
                 limit=max(2, min(int(max_items or 30) or 30, 2000)),
+                want_kinds=want_kinds,
                 on_note=lambda s: _emit("list", 0, 1, s),
             )
             if pt_exp is not None:

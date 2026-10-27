@@ -1607,7 +1607,8 @@ def _douyin_card(href: str, title: str = "", cover: str = "") -> dict | None:
     }
 
 
-def ig_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
+def ig_author_items(url: str, *, limit: int = 30, on_note=None,
+                    want_video: bool | None = None) -> dict:
     """Instagram 主页抓取：登录浏览器渲染 + 拦截 feed XHR。
 
     为什么不靠 gallery-dl / yt-dlp（2026-10-26 实测）：
@@ -1693,8 +1694,13 @@ def ig_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                         old["cover"] = cover
                     if not old.get("title") and title:
                         old["title"] = title[:120]
-                    if direct and not str(old.get("url") or "").startswith("http"):
+                    # 后到的真直链要能覆盖「先到的页面地址」。
+                    # 原来的条件是 not old.url.startswith("http")，而页面地址本身
+                    # 就是 http 开头 → 永远补不进去，图片只能拿 /p/ 页面地址去下载
+                    # （2026-10-27 实测：图片条目下载失败/被跳过）。
+                    if direct:
                         old["url"] = direct
+                        old["is_page"] = False
 
             def add_item(obj) -> None:
                 if not isinstance(obj, dict):
@@ -1765,9 +1771,24 @@ def ig_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
 
             rnd = 0
             stale = 0
-            while len(found) < target and rnd < 40 and not login_required:
+
+            def _hits() -> int:
+                """按用户这次要的类型计数。
+
+                原来是「总数到 limit 就停」——IG 主页前面常常整排是 Reels，
+                于是「抓图片」只拿到零星几张（前 30 条里图片只有几条）。
+                改成按目标类型计数，抓图片时会继续往下滚直到够数
+                （2026-10-27 用户实测）。
+                """
+                if want_video is None:
+                    return len(found)
+                want_v = bool(want_video)
+                return sum(1 for v in found.values()
+                           if (v.get("type") == "video") == want_v)
+
+            while _hits() < target and rnd < 60 and not login_required:
                 rnd += 1
-                before = len(found)
+                before = _hits()
                 try:
                     page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
                 except Exception:  # noqa: BLE001
@@ -1791,14 +1812,24 @@ def ig_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                                };
                              }).filter(x => x.code)""") or []
                     for d in dom_rows:
+                        # 图片条目要把封面地址当直链：IG 的 display_url 就是原图
+                        # （~1080px）。留空的话 url 会退回页面地址，下载层拿不到图
+                        # （2026-10-27 实测：图片条目下载失败/只能抓一部分）。
+                        _is_v = bool(d.get("is_video"))
+                        _cover = str(d.get("cover") or "")
                         _put(str(d.get("code") or ""), str(d.get("alt") or ""),
-                             str(d.get("cover") or ""), "", bool(d.get("is_video")))
+                             _cover, ("" if _is_v else _cover), _is_v)
                 except Exception:  # noqa: BLE001
                     pass
-                stale = 0 if len(found) > before else stale + 1
-                if stale >= 8:
+                stale = 0 if _hits() > before else stale + 1
+                if stale >= 10:
                     break
-            items = list(found.values())[:target]
+            _vals = list(found.values())
+            # 目标类型排前面：即使这个账号目标类型不足，返回的也是「最相关的」那批
+            if want_video is not None:
+                _wv = bool(want_video)
+                _vals.sort(key=lambda v: 0 if (v.get("type") == "video") == _wv else 1)
+            items = _vals[:target]
             return {"ok": bool(items), "items": items, "login_required": login_required,
                     "error": "" if items else
                     ("Instagram 要求登录，请到「平台登录」重新登录一次。"
@@ -2409,7 +2440,8 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
             return [], (f"微博登录态已失效，请到「平台登录」重新登录微博后再试。{why}")
 
     if platform == "ig" and not res.get("ok"):
-        res = ig_author_items(url, limit=limit, on_note=on_note)
+        res = ig_author_items(url, limit=limit, on_note=on_note,
+                              want_video=(True if want_video else False))
         attempts.append(("内置登录浏览器", res))
 
     if platform == "dy" and not res.get("ok"):
