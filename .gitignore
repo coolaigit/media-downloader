@@ -72,3 +72,6 @@ dist-archive/
 installer/output/
 build_media/
 dist_new/
+
+# 安装包产物（241MB，不进仓库）
+installer_out/
