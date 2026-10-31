@@ -1292,35 +1292,152 @@ def _expand_video_listing(
         if len(rendered) < 2:
             return None, ""
         site_host = (urlparse(list_url).hostname or "").removeprefix("www.")
-        r_items = [
-            MediaItem(
-                url=r["page_url"], kind="video",
-                source=f"渲染列表:{site_host}",
-                title=r.get("title") or "", thumbnail=r.get("cover") or "",
-                referer=list_url, origin_page=list_url,
-                extra={"is_page": True, "ext": "", "duration": None,
-                       "duration_string": "", "uploader": "",
-                       "site": site_host},
+
+        # ★ 必须就地换成直链，不能把「视频页地址」丢给 yt-dlp。
+        # 判据是「yt-dlp 自己说不认识这个站」（has_specific_extractor=False），
+        # 那 /api/download/videos 拿这些地址去问 yt-dlp 只会得到 Unsupported URL。
+        # 2026-10-29 实测 pornhao.com：列表页渲染出 8 个视频页，勾选后下载全部
+        # Unsupported URL —— 用户看到的就是「能抓、点下载全失败」；而这些页面的
+        # mp4 直链就写在 HTML 里，纯 HTTP 下钻一次就能拿到。
+        page_urls = [r["page_url"] for r in rendered]
+        if on_note:
+            on_note(f"正在逐个打开 {len(page_urls)} 个视频页取直链…")
+        try:
+            dres = fetch_many(
+                page_urls, allow_render=False, concurrency=6, render_scroll=0,
+                on_progress=(lambda stage, d, t: on_note(
+                    f"正在打开视频页（{stage}）{d}/{t}")) if on_note else None,
             )
-            for r in rendered
+        except Exception:  # noqa: BLE001
+            dres = []
+
+        # 先解析每一页，再统一校验，因为「可信」要跨页面比对才知道。
+        per_page: list[tuple[dict, list[MediaItem]]] = []
+        for idx, r in enumerate(rendered):
+            vids: list[MediaItem] = []
+            fr = dres[idx] if idx < len(dres) else None
+            if fr is not None and getattr(fr, "ok", False) and getattr(fr, "html", ""):
+                try:
+                    found = extract_from_html(fr.html, fr.final_url or r["page_url"],
+                                              r["page_url"])
+                    vids = [g for g in found if g.kind == "video"]
+                except Exception:  # noqa: BLE001
+                    vids = []
+            if vids:
+                try:
+                    vids = collapse_video_variants(vids)
+                except Exception:  # noqa: BLE001
+                    pass
+            per_page.append((r, vids))
+
+        # ---- 下钻结果的通用校验（2026-10-30 hornyleak.tv 实测教训）----
+        # 每个详情页主框架都挂同一个 728x90 广告视频，正片在 iframe 播放器里，
+        # 纯 HTTP 下钻能看到的只有广告。「取第一个 video」的结果就是 6 个不同
+        # 视频页全部解析出同一个 contents/data/728x90-1.mp4 —— 用户看到的还是
+        # 「下载的视频不是列表里的」（10-24 修过下载侧，这次抓取侧也堵住）。
+        # 两条判据，都不含站点名单：
+        #   a) 广告位命名：路径里出现「宽x高」标准 banner 尺寸（728x90、300x250…）
+        #      —— 广告位按标准尺寸命名是行业惯例；正片尺寸命名（1280x720 等）
+        #      位数对不上，不会被误伤。
+        #   b) 跨页同 URL：不同详情页解析出**同一条**直链 = 拿到的是页面模板的
+        #      通用资源（广告/背景视频），不是各页自己的内容。
+        def _is_ad_slot(u: str) -> bool:
+            try:
+                path = urlparse(u).path
+            except ValueError:
+                return False
+            return bool(re.search(r"(?:^|/)\d{3,4}x\d{2,3}[-_.]", path))
+
+        # 预览片段命名（行业通用词）：hornyleak 每个详情页都有一部当前片的
+        # preview.mp4（实测 400~700KB，只有十几秒），各页不同所以「跨页唯一」
+        # 拦不住 —— 必须按命名识别。正片文件名几乎从不含这些词。
+        _PREVIEW_RE = re.compile(
+            r"(?:^|[/_.])(preview|trailer|sample|teaser)(?:[/_.]|$)", re.I)
+
+        def _looks_preview(u: str) -> bool:
+            try:
+                path = urlparse(u).path
+            except ValueError:
+                return False
+            return bool(_PREVIEW_RE.search(path))
+
+        dup_count: dict[str, int] = {}
+        for _r, vids in per_page:
+            for v in vids:
+                dup_count[v.url] = dup_count.get(v.url, 0) + 1
+
+        def _trustworthy(v: MediaItem) -> bool:
+            return (not _is_ad_slot(v.url)
+                    and not _looks_preview(v.url)
+                    and dup_count.get(v.url, 0) <= 1)
+
+        r_items: list[MediaItem] = []
+        got_direct = 0
+        for r, vids in per_page:
+            best = next((v for v in vids if _trustworthy(v)), None)
+            if best is not None:
+                got_direct += 1
+                r_items.append(MediaItem(
+                    url=best.url, kind="video", source=f"下钻:{site_host}",
+                    title=r.get("title") or best.title or "",
+                    thumbnail=r.get("cover") or best.thumbnail or "",
+                    referer=r["page_url"], origin_page=r["page_url"],
+                    width=best.width, height=best.height,
+                    extra={
+                        "is_page": False,
+                        "ext": best.extra.get("ext", ""),
+                        "variants": [v.url for v in vids[1:]
+                                     if v.url != best.url and _trustworthy(v)],
+                        "duration_string": best.extra.get("duration_string", ""),
+                        "uploader": "", "site": site_host,
+                        "stream_heights": best.extra.get("stream_heights", []),
+                    },
+                ))
+            else:
+                # 没有可信直链（页面打不开 / 内容在 iframe 播放器里 / 解析出的
+                # 全是广告位与模板资源）：保留视频页地址，交给下载层用渲染解析
+                # （那套逻辑会跟随 iframe 播放器），而不是把错文件当成结果。
+                r_items.append(MediaItem(
+                    url=r["page_url"], kind="video", source=f"渲染列表:{site_host}",
+                    title=r.get("title") or "", thumbnail=r.get("cover") or "",
+                    referer=list_url, origin_page=list_url,
+                    extra={"is_page": True, "ext": "", "duration": None,
+                           "duration_string": "", "uploader": "", "site": site_host},
+                ))
+
+        warnings = [
+            "这个站 yt-dlp 没有专用提取器，已用内置浏览器渲染列表页并抽出 "
+            f"{len(r_items)} 个视频条目。",
         ]
+        if got_direct:
+            warnings.append(
+                f"其中 {got_direct} 条已逐个打开视频页取到**直链**，可以直接下载。")
+        if got_direct < len(r_items):
+            warnings.append(
+                f"另有 {len(r_items) - got_direct} 条只保留视频页地址（正片在 "
+                "iframe/加密播放器里，网页里能直接看到的视频被识别为广告位已剔除）"
+                "—— 下载时会逐条渲染解析真实播放器。")
+        if got_direct:
+            warnings.append(
+                "直链带签名会过期（实测 pornhao 约 3 小时）；过期后重新抓一次即可，"
+                "下载时若已过期，工具会自动回源换新地址再下一次。")
+
         return {
             "items": [m.to_dict() for m in r_items],
             "summary": summarize(r_items),
-            "pages": [{"page": 1, "url": list_url, "method": "内置浏览器渲染列表",
+            "pages": [{"page": 1, "url": list_url, "method": "内置浏览器渲染列表+逐页下钻",
                        "html_bytes": 0, "media": len(r_items), "links": len(r_items),
                        "elapsed": 0.0, "visible_text": 0}],
-            "detail_pages": {"total": 0, "ok": 0, "failed": 0, "urls": []},
-            "stats": {"list_pages": 1, "detail_pages": 0, "http_ok": 0,
-                      "render_used": 1, "variants_collapsed": 0, "elapsed": 0.0},
-            "warnings": [
-                f"这个站 yt-dlp 没有专用提取器，已用内置浏览器渲染列表页并抽出 "
-                f"{len(r_items)} 个视频页 —— 这类站的内容由 JS 渲染，普通网页抓取通常只有 1 条。",
-                "每条都是视频页地址：勾选后点「下载选中」，由 yt-dlp 逐条解析下载。",
-            ],
+            "detail_pages": {"total": len(page_urls), "ok": got_direct,
+                             "failed": len(page_urls) - got_direct,
+                             "urls": page_urls[:20]},
+            "stats": {"list_pages": 1, "detail_pages": len(page_urls),
+                      "http_ok": got_direct, "render_used": 1,
+                      "variants_collapsed": 0, "elapsed": 0.0},
+            "warnings": warnings,
             "list_url": list_url,
             "renderer": renderer_status(),
-            "via": "render-listing",
+            "via": "render-listing+drill",
         }, ""
 
     try:

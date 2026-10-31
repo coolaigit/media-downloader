@@ -45,6 +45,21 @@ _CT_EXT = {
 # 一个媒体最多再试几个其它档位地址（防止一个条目挂着一长串地址时反复重试）
 MAX_ALTERNATES = 6
 
+# 只有「地址形态上是视频文件」才去试分段下载。
+# 不按站点判断，只看路径扩展名 —— 批量下 500 张图时如果每张都先发一次
+# Range 探测请求，既慢又容易被站点当异常流量；而图片普遍小于 3MB，
+# 分段本来也没有收益。
+_VIDEO_PATH_RE = re.compile(
+    r"\.(mp4|m4v|webm|mkv|mov|flv|ts|avi|wmv|mpg|mpeg|f4v|3gp)$", re.I)
+
+
+def _looks_like_video_file(url: str) -> bool:
+    try:
+        path = urlparse(url).path
+    except Exception:
+        return False
+    return bool(_VIDEO_PATH_RE.search(path))
+
 
 def sanitize_filename(name: str, max_len: int = 120) -> str:
     """把任意字符串清理为 Windows 安全文件名。"""
@@ -239,6 +254,9 @@ def download_file(
     chunk_size: int = 64 * 1024,
     alternates: list[str] | None = None,
     prefer_quality: str = "",
+    multipart: bool = True,
+    connections: int = 0,
+    cancel_check=None,
 ) -> DownloadResult:
     """下载单个文件（图片/视频直链）。
 
@@ -309,6 +327,52 @@ def download_file(
         tmp = output_dir / f".{url_fingerprint(target_url)}.part"
         stall_sec = 60          # 这么久一个字节都没到 → 判定连接停摆（重试+续传）
         gave_up_range = False   # 服务器不支持 Range 时置位，后续不再带 Range
+
+        # ---- 分段并发（通用提速）：大文件 + 支持 Range 时开多连接 ----
+        # 单连接被 CDN 按连接限速是中小站的普遍现象（2026-10-29 实测同一地址：
+        # 单连接第一次 107 KB/s、第二次 28 KB/s，8 路并发 461 KB/s，而本机
+        # 带宽上限约 380 KB/s）。192MB 的片子单连接要一小时以上，用户看到的现象
+        # 就是「点了下载没反应」。
+        # 返回 None 表示这条地址不适合分段（不支持 Range / 文件太小），
+        # 原样往下走单连接，行为与旧版完全一致。
+        if multipart and _looks_like_video_file(target_url):
+            try:
+                from .multipart import download_multipart
+                mp = download_multipart(
+                    target_url, tmp,
+                    headers=headers,
+                    session=sess,
+                    connections=connections or 0,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    chunk_size=chunk_size,
+                    on_progress=on_progress,
+                    should_cancel=cancel_check,
+                )
+            except Exception:
+                mp = None
+            if mp is not None:
+                if not mp.ok:
+                    # 已完成的分片保留在 .parts 目录：点重试从断点续传，不从 0 开始
+                    return DownloadResult(False, url=target_url,
+                                          error=mp.error or "分段下载失败")
+                fname = (sanitize_filename(filename) if filename
+                         else sanitize_filename(filename_from_url(target_url, title, "")))
+                target = unique_path(output_dir, fname)
+                try:
+                    tmp.replace(target)
+                except OSError as e:
+                    return DownloadResult(False, url=target_url, error=f"写入失败: {e}")
+                try:
+                    marker.write_text(target.name, encoding="utf-8")
+                except Exception:
+                    pass
+                if on_progress:
+                    on_progress({"status": "finished", "percent": 100.0,
+                                 "progressed_bytes": mp.size, "total_bytes": mp.size})
+                return DownloadResult(True, str(target), mp.size, url=target_url,
+                                      note=f"分段下载（{mp.connections} 路并发）")
+
         for attempt in range(1, max_retries + 1):
             try:
                 resume_from = 0
@@ -368,6 +432,11 @@ def download_file(
                         for chunk in r.iter_content(chunk_size=chunk_size):
                             if not chunk:
                                 continue
+                            # 用户点「取消」要能立刻停：旧实现只在提交前检查一次，
+                            # 点了取消任务还在后台下满整部片子（实测 300MB 的任务
+                            # 取消后百分比还在涨）。.part 保留，下次可续传。
+                            if cancel_check is not None and cancel_check():
+                                return DownloadResult(False, error="已取消", url=target_url)
                             f.write(chunk)
                             done += len(chunk)
                             last_byte_ts = time.time()
@@ -437,6 +506,12 @@ def download_file(
             res = first
         else:
             for alt in [a for a in alternates if a and a not in tried][:MAX_ALTERNATES]:
+                # 用户已经点了取消：别再一个个换档位试下去。
+                # 实测（2026-10-29）首档取消后会继续试后面 3 个档位，白等半分钟，
+                # 用户看到的就是「点了取消还在下」。
+                if cancel_check is not None and cancel_check():
+                    res = first
+                    break
                 tried.append(alt)
                 r = _try(alt)
                 if r.ok:
@@ -500,6 +575,7 @@ def batch_download_images(
     should_cancel=None,
     prefer_quality: str = "",
     cookies_file: str = "",
+    connections: int = 0,
 ) -> dict:
     """并发批量下载图片。
 
@@ -577,7 +653,40 @@ def batch_download_images(
                 on_progress=_cb,
                 alternates=it.get("alternates") or None,
                 prefer_quality=it.get("prefer_quality") or prefer_quality,
+                connections=connections,
+                cancel_check=_is_cancelled,
             )
+
+            # ---- 直链过期 → 回源刷新后重试一次 ----
+            # 签名直链（?st=..&e=..）的有效期往往只有几小时，抓取和点下载之间
+            # 隔久了就整批 403。重试同一个地址毫无意义（签名不会自己变好），
+            # 必须回源到抓到它的详情页换一条新签名的地址。只对「地址失效」类
+            # 错误这么做，网络超时/断流仍然交给上面的重试逻辑。
+            if (not r.ok) and not r.skipped and str(r.error or "") != "已取消":
+                page = str(it.get("origin_page") or it.get("referer") or "")
+                if page.startswith("http"):
+                    try:
+                        from . import refresh as _refresh
+                        if _refresh.looks_address_expired(r.error):
+                            fresh = _refresh.refresh_url(page, it.get("url", ""))
+                            if fresh:
+                                r2 = download_file(
+                                    fresh,
+                                    output_dir,
+                                    referer=it.get("referer", ""),
+                                    title=it.get("title", ""),
+                                    filename=it.get("filename", ""),
+                                    skip_existing=skip_existing,
+                                    session=sess,
+                                    on_progress=_cb,
+                                    connections=connections,
+                                )
+                                if r2.ok:
+                                    r2.note = ("原直链已失效（签名过期），"
+                                               "已回源刷新地址后下载成功")
+                                    r = r2
+                    except Exception:
+                        pass
             if r.ok:
                 signal = OK
             elif str(r.error or "") != "已取消":

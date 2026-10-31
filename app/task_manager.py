@@ -707,9 +707,38 @@ class TaskManager:
                 if result.url:
                     t.current = Path(result.url).name[:60]
 
+        # 每个条目当前的字节进度（index -> {done,total}）。
+        # 只用于算任务级百分比，条目完成后由 on_item_done 覆盖。
+        item_prog: dict[int, dict] = {}
+
         def on_progress(index: int, info: dict):
             with self._lock:
-                t.speed = info.get("speed") or t.speed
+                if info.get("speed"):
+                    t.speed = info.get("speed") or 0.0
+                slot = item_prog.setdefault(index, {})
+                if info.get("progressed_bytes") is not None:
+                    slot["done"] = int(info.get("progressed_bytes") or 0)
+                if info.get("total_bytes"):
+                    slot["total"] = int(info.get("total_bytes") or 0)
+
+                # 百分比必须跟着**字节**走，不能只在条目完成时跳一格：
+                # 单下 192MB 的片子时，旧逻辑在几十分钟里一直是 0%，
+                # 用户看到的就是「点了下载没反应」（2026-10-29 实测反馈）。
+                finished = t.done + t.failed + t.skipped
+                cnt_pct = finished * 100.0 / t.total if t.total else 0.0
+                total_bytes = sum(int(v.get("total") or 0) for v in item_prog.values())
+                done_bytes = sum(int(v.get("done") or 0) for v in item_prog.values())
+                byte_pct = (done_bytes * 100.0 / total_bytes) if total_bytes else 0.0
+                # 收敛到 99.9：100% 由收尾逻辑给，避免「显示 100% 但还没写完文件」
+                t.percent = min(99.9, max(cnt_pct, byte_pct))
+
+                # 当前正在下的条目名（前端显示「正在下哪一条」）
+                if 0 <= index < len(t.urls):
+                    cur = str((t.urls[index] or {}).get("title") or "")
+                    if not cur:
+                        cur = Path(str((t.urls[index] or {}).get("url") or "")).name
+                    if cur:
+                        t.current = cur[:60]
 
         try:
             res = batch_download_images(
@@ -728,9 +757,12 @@ class TaskManager:
                 t.done = res["ok_count"]
                 t.failed = res["fail_count"]
                 t.skipped = res["skipped_count"]
-                t.percent = 100.0
                 t.speed = 0.0
-                if res.get("cancelled") or self._cancelled(task_id):
+                was_cancelled = bool(res.get("cancelled") or self._cancelled(task_id))
+                # 取消不是「下完了」：保留取消那一刻的真实进度，
+                # 否则界面显示「100% · 已取消」，用户会以为文件其实下全了。
+                t.percent = min(t.percent, 99.9) if was_cancelled else 100.0
+                if was_cancelled:
                     t.status = ST_CANCELLED
                     t.error = "已取消"
                 elif t.done == 0 and t.skipped == 0 and t.failed > 0:

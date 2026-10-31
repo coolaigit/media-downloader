@@ -605,23 +605,39 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40,
                              profile_dir: str | None = None) -> str:
     """给 yt-dlp 不认识的站解析真实媒体地址（渲染页面 + 监听网络请求）。
 
-    为什么需要（2026-10-24 用户实测 hornyleak.tv）：
-    1) yt-dlp 的 HTML5MediaEmbed 抓页面**第一个** `<video>`，那个位置是 728x90 广告位；
-    2) 只读 DOM 也不行 —— 主播放器的 `<video>` 要点击后才挂 src，而页面上的
-       `HL.VIDEOS` 里 8 条全是站内推广位（contents/data/video-XX），
-       直接按 DOM 顺序取会拿到「推荐视频」，用户看到的就是"下载的不是列表里的那个"。
+    薄包装：完整结果见 `resolve_media_render_full`（含「txt 分片流」）。
+    """
+    res = resolve_media_render_full(page_url, timeout=timeout, profile_dir=profile_dir)
+    u = str(res.get("url") or "")
+    return u if res.get("kind") in ("direct", "both") else ""
 
-    做法：监听网络响应收集所有 mp4/m3u8/webm，点击播放，排除广告尺寸与站内推广路径，
-    取最后一个候选（主播放器通常在点击后才发请求，所以排在后面）。
-    拿不到再退回 DOM 里的 <video src> / data-* 候选。
+
+def resolve_media_render_full(page_url: str, *, timeout: int = 40,
+                              profile_dir: str | None = None) -> dict:
+    """渲染解析的完整结果：
+
+    - `{"kind": "direct", "url": u}`   单直链（多数站）
+    - `{"kind": "both", "url": u, "ts": {...}}`  同时有直链与分片流（分片优先）
+    - `{"kind": "ts", "ts": {...}}`    只有分片流
+    - `{"kind": "none"}`               解析失败
+
+    「txt 分片流」是什么（2026-10-30 hornyleak.tv 实测）：这类播放器把
+    MPEG-TS 正片切成 `480p_0.txt`、`480p_1.txt`… 递增编号的**伪 txt**，
+    内容就是 TS 段（0x47 同步字节开头，FFmpeg 封装），按序下载拼接即可播放。
+    判据全部通用：同目录 + 递增编号 + ≥2 片 + 首片 0x47 魔数，无任何站点名单。
+    正片只能这样拿 —— 详情页 HTML 里能看到的 mp4 只有 728x90 广告位和
+    400~700KB 的预览片段（preview.mp4，实测 6 部片全是），而正片在
+    「embed iframe → 第三方播放器 → JS 解密分片列表」三层嵌套的最里层。
     """
     try:
         from playwright.sync_api import sync_playwright
         from . import browser_runtime
         from .config import DEFAULT_UA
     except Exception:  # noqa: BLE001
-        return ""
+        return {"kind": "none"}
     fetched: list = []
+    # 伪 txt 分片：键 = (目录指纹, 文件名前缀)，值 = {编号: [候选完整URL]}
+    seg_map: dict = {}
 
     def _on_resp(resp):
         try:
@@ -653,6 +669,18 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40,
             if is_media and "/embed/" not in low \
                     and not low.split("?")[0].endswith(_non_video):
                 fetched.append(u)
+            # ---- 伪 txt 分片（宽进）：判定放到收尾（同目录 ≥2 片才算数）----
+            # 单凭 URL 判不了「分片」还是「说明文件」，但同目录下出现
+            # `前缀_0.txt / 前缀_1.txt / …` 递增编号的，几乎只会是分片流。
+            # 分组 key 用**纯路径**（不含域）—— 播放器会把相邻分片分散到不同
+            # CDN 域（hornyleak 实测 0~5 片分属 swa3~swa9 六个域），按完整
+            # URL 分组会把一部片拆成 6 个"每组 1 片"的假组。
+            if resp.status == 200 and low.split("?")[0].endswith(".txt"):
+                m = re.match(r"^(https?://[^/]+(/.*/))([^/]*?)_(\d{1,4})\.txt$", u)
+                if m and int(m.group(4)) < 9000:
+                    key = (m.group(2), m.group(3))
+                    seg_map.setdefault(key, {}).setdefault(
+                        int(m.group(4)), []).append(u)
         except Exception:  # noqa: BLE001
             pass
 
@@ -767,7 +795,7 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40,
                 page.wait_for_timeout(1500)
             b.close()
     except Exception:  # noqa: BLE001
-        return ""
+        return {"kind": "none"}
 
     def _ok(u: str) -> str:
         u = str(u or "").strip()
@@ -783,15 +811,513 @@ def resolve_media_via_render(page_url: str, *, timeout: int = 40,
 
     # 网络请求优先：按「像正片的程度」排序，而不是按出现顺序 ——
     # 页面上先发的往往是推广位/预览，正片由 iframe 播放器后发。
+    direct = ""
     pool = [u for u in fetched if _ok(u)]
     if pool:
         pool.sort(key=_score, reverse=True)
-        return pool[0]
-    for u in dom_cands if isinstance(dom_cands, list) else []:
-        good = _ok(u)
-        if good:
-            return good
-    return ""
+        direct = pool[0]
+    else:
+        for u in dom_cands if isinstance(dom_cands, list) else []:
+            good = _ok(u)
+            if good:
+                direct = good
+                break
+
+    # 分片流优先：有「同目录递增编号 ≥2 片」的分片组，说明正片走的是分片协议；
+    # 此时 direct 多半只是预览片段（hornyleak 的 preview.mp4 实测只有 400~700KB），
+    # 拿它当结果就会下成十几秒的预览 —— 正是「下载的视频不对」的又一个来源。
+    if seg_map:
+        ts = {"groups": [
+            {"dir": k[0], "prefix": k[1], "segments": v}
+            for k, v in seg_map.items()
+        ]}
+        if direct:
+            return {"kind": "both", "url": direct, "ts": ts}
+        return {"kind": "ts", "ts": ts}
+    if direct:
+        return {"kind": "direct", "url": direct}
+    return {"kind": "none"}
+
+
+_FETCH_SEG_JS = """async (u) => {
+    try {
+        const r = await fetch(u, {credentials: 'omit'});
+        if (!r.ok) return null;
+        const buf = await r.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        const CH = 0x8000;
+        for (let i = 0; i < bytes.length; i += CH)
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+        return btoa(bin);
+    } catch (e) { return null; }
+}"""
+
+_PROBE_SEG_JS = """async (u) => {
+    try { const r = await fetch(u, {credentials: 'omit'}); return r.status; }
+    catch (e) { return 0; }
+}"""
+
+
+def _download_ts_via_browser(page_url: str, output_dir: Path, *,
+                             title: str = "", url: str = "",
+                             cancel_event=None, on_progress=None,
+                             timeout: int = 40) -> dict:
+    """浏览器会话一体式下载「txt 分片流」正片。
+
+    为什么解析和下载必须在**同一个浏览器会话**里（2026-10-30 hornyleak.tv
+    实测两次踩坑）：分片 CDN 校验客户端指纹 —— 播放器（Chrome）请求返回
+    200，渲染窗口一关、换 requests 请求**同一个 URL** 直接 404，带不带
+    Referer 都一样，curl-cffi 又不在本机环境里。所以捕获到分片地址后，
+    不关浏览器，直接用 page.evaluate(fetch) 逐片把内容 base64 带回 ——
+    与播放器同源同指纹，CDN 视为正常播放。
+
+    判据全部通用（同目录 + 递增编号 + ≥2 片 + 首片 0x47 魔数），无站点名单。
+    """
+    import base64
+    import hashlib
+    import shutil
+
+    from playwright.sync_api import sync_playwright
+    from urllib.parse import urlparse as _up
+
+    from . import browser_runtime
+    from .config import DEFAULT_UA
+    from .downloader import url_fingerprint as _url_fp
+
+    fetched: list = []
+    seg_map: dict = {}
+
+    def _on_resp(resp):
+        try:
+            u = str(resp.url or "")
+            low = u.lower()
+            ct = str((resp.headers or {}).get("content-type") or "").lower()
+            is_media = (
+                any(x in low.split("?")[0] for x in (".mp4", ".m3u8", ".webm", ".mov", ".flv"))
+                or ct.startswith("video/")
+                or ct.startswith("application/octet-stream")
+                or "/upload/videos/" in low
+            )
+            if "douyinstatic.com" in low or "/obj/douyin-pc-web/" in low:
+                return
+            _non_video = (".vtt", ".srt", ".ass", ".jpg", ".jpeg", ".png", ".webp",
+                          ".gif", ".json", ".css", ".js", ".html", ".xml", ".txt")
+            if is_media and "/embed/" not in low \
+                    and not low.split("?")[0].endswith(_non_video):
+                fetched.append(u)
+            if resp.status == 200 and low.split("?")[0].endswith(".txt"):
+                m = re.match(r"^(https?://[^/]+(/.*/))([^/]*?)_(\d{1,4})\.txt$", u)
+                if m and int(m.group(4)) < 9000:
+                    key = (m.group(2), m.group(3))
+                    seg_map.setdefault(key, {}).setdefault(
+                        int(m.group(4)), []).append(u)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _pick_group():
+        if not seg_map:
+            return None
+        (dir_path, prefix), segs = max(seg_map.items(), key=lambda kv: len(kv[1]))
+        return {"dir": dir_path, "prefix": prefix, "segs": segs}
+
+    stem = ""
+    if title:
+        try:
+            from .downloader import sanitize_filename as _sn
+            stem = _sn(title)[:110].strip()
+        except Exception:  # noqa: BLE001
+            stem = ""
+    if not stem:
+        stem = "video"
+    fp = _url_fp(url)[:8] if url else ""
+    base_name = f"{stem} [{fp}]" if fp else stem
+    parts_dir = output_dir / f".{hashlib.md5(url.encode('utf-8')).hexdigest()[:12]}.tsseg"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch(headless=True, **browser_runtime.launch_kwargs())
+            page = b.new_page(user_agent=DEFAULT_UA,
+                              viewport={"width": 1280, "height": 800})
+            page.on("response", _on_resp)
+
+            # 播放器藏在 /embed/ iframe 里（hornyleak 是两层：站内 embed →
+            # 第三方播放器 embed）。直接导航到播放器 embed 地址，播放器才会
+            # 真正开始请求分片 —— 在父页面里点 iframe 是拿不到的（2026-10-24）。
+            # 先用纯 HTTP 把 embed 链条剥出来（通用 iframe src 提取，最多两层），
+            # 实测这比 frames 轮询稳：播放器加载时序不定，frames 等待时好时坏。
+            target = page_url
+            try:
+                from .page_scanner import http_get_with_fallback as _hgf
+                cur = page_url
+                for _depth in range(2):
+                    fr_, _errs = _hgf(cur, timeout=25)
+                    if fr_ is None:
+                        break
+                    m = re.search(r'<iframe[^>]+src="(https?://[^"]*/embed/[^"]+)"',
+                                  fr_.text, re.I)
+                    if not m:
+                        break
+                    cur = m.group(1).replace("&amp;", "&")
+                    target = cur
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                page.goto(target, wait_until="domcontentloaded",
+                          timeout=timeout * 1000)
+            except Exception:  # noqa: BLE001
+                pass
+            page.wait_for_timeout(4000)
+
+            # HTTP 剥链失败时兜底：从 frames 里找 /embed/ 逐层导航
+            for _round in range(2):
+                grp0 = _pick_group()
+                if grp0 and len(grp0.get("segs") or {}) >= 1:
+                    break
+                if cancel_event is not None and cancel_event.is_set():
+                    b.close()
+                    return {"ok": False, "error": "已取消"}
+                embed = ""
+                for fr in page.frames:
+                    fu = str(fr.url or "")
+                    if "/embed/" in fu.lower() and fu != str(page.url):
+                        embed = fu
+                        break
+                if not embed:
+                    break
+                try:
+                    page.goto(embed, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(3500)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            for sel in ("video", ".play, [class*=play], [id*=play], .vjs-big-play-button",
+                        "div[class*=player]"):
+                try:
+                    page.click(sel, timeout=1500)
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    b.close()
+                    return {"ok": False, "error": "已取消"}
+                grp = _pick_group()
+                if grp and len(grp.get("segs") or {}) >= 2:
+                    break
+                try:
+                    page.wait_for_timeout(1000)
+                except Exception:  # noqa: BLE001
+                    break
+            grp = _pick_group()
+            if not grp or len(grp.get("segs") or {}) < 2:
+                b.close()
+                return {"ok": False, "error": "未在播放器页捕获到分片流"}
+
+            dir_path, prefix, segs = grp["dir"], grp["prefix"], grp["segs"]
+            # 目录的各域变体（播放器把相邻分片分散在不同 CDN 域，
+            # 但同一片在任一域都存在 —— 逐域轮询兜底）
+            dir_variants: list[str] = []
+            for urls in segs.values():
+                for u in urls:
+                    p_ = _up(u)
+                    d = f"{p_.scheme}://{p_.netloc}{dir_path}"
+                    if d not in dir_variants:
+                        dir_variants.append(d)
+
+            def _cand_urls(n: int) -> list[str]:
+                if n in segs:
+                    return list(segs[n])
+                return [f"{d}{prefix}_{n}.txt" for d in dir_variants]
+
+            done_bytes = 0
+            ok_seg = 0
+            n = 0
+            _prog_t = [0.0]
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    b.close()
+                    return {"ok": False, "error": "已取消"}
+                body = None
+                for cu in _cand_urls(n):
+                    try:
+                        b64 = page.evaluate(_FETCH_SEG_JS, cu)
+                    except Exception:  # noqa: BLE001  页面挂了就到此为止
+                        break
+                    if not b64 or b64.startswith("ERR:"):
+                        continue
+                    body = base64.b64decode(b64)
+                    break
+                if body is None:
+                    break                      # 404/取不到：分片序列结束
+                if n == 0 and body[:1] != b"\x47":
+                    b.close()
+                    return {"ok": False,
+                            "error": "分片内容不是 MPEG-TS（首字节不是 0x47），判据不成立"}
+                pf = parts_dir / f"seg_{n:05d}.ts"
+                tmp = pf.with_suffix(".dl")
+                tmp.write_bytes(body)
+                tmp.replace(pf)
+                done_bytes += len(body)
+                ok_seg += 1
+                if on_progress:
+                    now = time.time()
+                    if now - _prog_t[0] > 0.5:
+                        _prog_t[0] = now
+                        try:
+                            on_progress({"status": "downloading",
+                                         "progressed_bytes": done_bytes,
+                                         "note": f"分片 {ok_seg}"})
+                        except Exception:  # noqa: BLE001
+                            pass
+                n += 1
+                if n > 9000:
+                    break
+            b.close()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:100]}"}
+
+    if ok_seg < 2:
+        return {"ok": False, "error": "分片下载中断（只拿到 0~1 片）"}
+
+    joined = parts_dir / "full.ts"
+    with open(joined, "wb") as out:
+        for i in range(ok_seg):
+            pf = parts_dir / f"seg_{i:05d}.ts"
+            if pf.exists():
+                out.write(pf.read_bytes())
+
+    final = output_dir / f"{base_name}.mp4"
+    ff = find_ffmpeg()
+    converted = False
+    if ff:
+        import subprocess
+        try:
+            r = subprocess.run(
+                [ff, "-hide_banner", "-loglevel", "error", "-y",
+                 "-i", str(joined), "-c", "copy", "-bsf:a", "aac_adtstoasc",
+                 str(final)],
+                capture_output=True, text=True, timeout=900)
+            converted = (r.returncode == 0 and final.exists()
+                         and final.stat().st_size > 0)
+        except Exception:  # noqa: BLE001
+            converted = False
+
+    if converted:
+        size = final.stat().st_size
+        try:
+            shutil.rmtree(parts_dir, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": True, "path": str(final), "size": size,
+                "note": f"该站正片为分片流（{ok_seg} 段），已拼接并转封装为 MP4。"}
+    target = output_dir / f"{base_name}.ts"
+    joined.replace(target)
+    try:
+        shutil.rmtree(parts_dir, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "path": str(target), "size": target.stat().st_size,
+            "note": "该站正片为 MPEG-TS 分片流，已按序拼接交付 .ts（未转封装 MP4）。"}
+
+
+def _download_ts_stream(ts_info: dict, output_dir: Path, *,
+                        title: str = "", url: str = "",
+                        cancel_event=None, on_progress=None) -> dict:
+    """下载「伪 txt 分片流」（MPEG-TS 段按编号递增的播放器协议）并转封装 mp4。
+
+    判据与流程全部通用（2026-10-30 hornyleak.tv 实测打通）：
+    1. 分片 = 播放器页捕获到的 `…/{前缀}_{n}.txt`，内容是 TS 段（首字节 0x47）；
+    2. 总片数播放器不会一次给全（按需加载），用「指数步进 + 二分」探到 404 为止；
+    3. 分片可能分布在多个 CDN 域（实测 swa3~swa9 轮换），但同一片在任一域都在 ——
+       下载时逐域轮询兜底；
+    4. 每片落盘到 .parts 目录（天然断点续传），全部完成后按序拼接，
+       ffmpeg `-c copy -bsf:a aac_adtstoasc` 转封装 mp4（无损、秒级）。
+    """
+    import hashlib
+    import shutil
+
+    import requests
+
+    from .config import DEFAULT_UA
+    from .downloader import url_fingerprint as _url_fp
+    from .page_scanner import _http_sessions as _fallback_sessions
+
+    from urllib.parse import urlparse as _up
+
+    groups = (ts_info or {}).get("groups") or []
+    if not groups:
+        return {"ok": False, "error": "没有可用的分片组"}
+    grp = max(groups, key=lambda g: len(g.get("segments") or {}))
+    segs: dict = grp.get("segments") or {}
+    dir_url = str(grp.get("dir") or "")
+    prefix = str(grp.get("prefix") or "")
+    if not dir_url or not segs:
+        return {"ok": False, "error": "分片组信息不完整"}
+
+    # 域名候选：捕获到的分片域 + 播放器页自身的域
+    hosts: list[str] = []
+    for urls in segs.values():
+        for u in urls:
+            p = _up(u)
+            if p.scheme and p.netloc:
+                host = f"{p.scheme}://{p.netloc}"
+                if host not in hosts:
+                    hosts.append(host)
+    p0 = _up(url or "")
+    if p0.scheme and p0.netloc:
+        host = f"{p0.scheme}://{p0.netloc}"
+        if host not in hosts:
+            hosts.append(host)
+    if not hosts:
+        return {"ok": False, "error": "分片没有可用域名"}
+
+    def _seg_url(n: int, host: str) -> str:
+        return f"{host}{dir_url}{prefix}_{n}.txt"
+
+    def _ts_sessions():
+        """分片下载用：代理与直连两条会话（page_scanner 同款兜底策略）。"""
+        env, direct = _fallback_sessions()
+        return (direct, env)      # 分片 CDN 直连实测稳定，直连优先
+
+    def _fetch(n: int) -> bytes | None:
+        for host in hosts:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
+            u = _seg_url(n, host)
+            # 代理与直连互为兜底（AGENTS 工程纪律）：首次实现走的是全局
+            # requests，被系统代理偶发故障整批打挂 —— 表现就是「分片 0/6
+            # 下载失败（所有候选域均不可用）」，而手工直连测试全是 200。
+            for sess in _ts_sessions():
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
+                try:
+                    r = sess.get(u, timeout=(6, 40),
+                                 headers={"User-Agent": DEFAULT_UA,
+                                          "Referer": referer or ""})
+                    if r.status_code == 200 and r.content:
+                        return r.content
+                except Exception:  # noqa: BLE001
+                    continue
+        return None
+
+    # 探测总数：捕获到的最大编号之后继续指数步进 + 二分（播放器按需加载，
+    # 渲染那 40 秒只够它预取前几片，真实片数要自己探）
+    known_max = max(segs)
+    if exists := _fetch(known_max + 1):
+        lo, hi = known_max + 1, known_max + 2
+        while _fetch(hi) is not None:
+            lo = hi
+            hi *= 2
+            if hi > 9000:
+                break
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            if _fetch(mid) is not None:
+                lo = mid
+            else:
+                hi = mid
+        total = hi          # 编号 0..hi-1
+    else:
+        total = known_max + 1
+
+    stem = ""
+    if title:
+        try:
+            from .downloader import sanitize_filename as _sn
+            stem = _sn(title)[:110].strip()
+        except Exception:  # noqa: BLE001
+            stem = ""
+    if not stem:
+        stem = "video"
+    fp = _url_fp(url)[:8] if url else ""
+    base_name = f"{stem} [{fp}]" if fp else stem
+
+    parts_dir = output_dir / f".{hashlib.md5(url.encode('utf-8')).hexdigest()[:12]}.tsseg"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+
+    done_bytes = 0
+    t_last = time.time()
+    b_last = 0
+    ok_seg = 0
+    try:
+        for n in range(total):
+            if cancel_event is not None and cancel_event.is_set():
+                return {"ok": False, "error": "已取消"}
+            pf = parts_dir / f"seg_{n:05d}.ts"
+            if pf.exists() and pf.stat().st_size > 0:
+                body = pf.read_bytes()
+            else:
+                body = _fetch(n)
+                if body is None:
+                    return {"ok": False,
+                            "error": f"分片 {n}/{total} 下载失败（所有候选域均不可用）"}
+                if n == 0 and body[:1] != b"\x47":
+                    # 首片不是 TS：判据不成立（可能是字幕/说明文件），不硬拼
+                    return {"ok": False, "error": "分片内容不是 MPEG-TS（首字节不是 0x47）"}
+                tmp = pf.with_suffix(".dl")
+                tmp.write_bytes(body)
+                tmp.replace(pf)
+            done_bytes += len(body)
+            ok_seg += 1
+            if on_progress:
+                now = time.time()
+                if now - t_last > 0.4:
+                    speed = max(0.0, (done_bytes - b_last) / (now - t_last))
+                    t_last, b_last = now, done_bytes
+                    on_progress({"status": "downloading",
+                                 "progressed_bytes": done_bytes,
+                                 "total_bytes": int(done_bytes * total / max(ok_seg, 1)),
+                                 "percent": round(ok_seg * 100.0 / total, 1),
+                                 "speed": speed})
+    finally:
+        pass
+
+    joined = parts_dir / "full.ts"
+    with open(joined, "wb") as out:
+        for n in range(ok_seg):
+            pf = parts_dir / f"seg_{n:05d}.ts"
+            if pf.exists():
+                out.write(pf.read_bytes())
+
+    # 转封装：TS → MP4（-c copy 无损；aac_adtstoasc 是 TS 里 AAC 裸流进 MP4 的标准过滤）
+    final = output_dir / f"{base_name}.mp4"
+    ff = find_ffmpeg()
+    if ff:
+        import subprocess
+        try:
+            r = subprocess.run(
+                [ff, "-hide_banner", "-loglevel", "error", "-y",
+                 "-i", str(joined), "-c", "copy", "-bsf:a", "aac_adtstoasc",
+                 str(final)],
+                capture_output=True, text=True, timeout=600)
+            if r.returncode != 0 or not final.exists() or final.stat().st_size == 0:
+                final = Path("")
+        except Exception:  # noqa: BLE001
+            final = Path("")
+    else:
+        final = Path("")
+
+    if not final:
+        # 转封装失败/无 ffmpeg：交付 .ts（主流播放器都能播），说明里写清楚
+        target = output_dir / f"{base_name}.ts"
+        joined.replace(target)
+        try:
+            shutil.rmtree(parts_dir, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": True, "path": str(target), "size": target.stat().st_size,
+                "note": "该站正片是 MPEG-TS 分片流，本机未转封装成 MP4（无 ffmpeg 或转封装失败），已交付 .ts 原始流。"}
+
+    size = final.stat().st_size
+    try:
+        shutil.rmtree(parts_dir, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "path": str(final), "size": size, "note": "分段流已转封装为 MP4"}
 
 
 def expand_video_list(
@@ -1290,6 +1816,7 @@ def download_video(
         # 无登录态时 ③ 直接跳过：抖音页面在无登录态下只有 uuu_265 占位视频，
         # 渲染纯属白跑（2026-10-25 实测），直接给出「去平台登录」的明确失败。
         _real = ""
+        _parsed = None
         if _dy_page:
             _real = _douyin_real_url_profiled(url)
             if not _real:
@@ -1304,7 +1831,44 @@ def download_video(
                 except Exception:  # noqa: BLE001
                     _prof = None
             if not _dy_page or _prof:
-                _real = resolve_media_via_render(url, profile_dir=_prof)
+                _parsed = resolve_media_render_full(url, profile_dir=_prof)
+                _real = str(_parsed.get("url") or "") \
+                    if _parsed.get("kind") in ("direct", "both") else ""
+
+        # ---- 「txt 分片流」优先 ----
+        # hornyleak 实测（2026-10-30）：direct 是 400~700KB 的 preview.mp4 预览
+        # 片段，15 分钟正片在「递增编号的伪 txt 分片」里；且分片 CDN 校验浏览器
+        # 指纹，解析与下载必须在同一个浏览器会话里完成（见 _download_ts_via_browser）。
+        # 分片下载失败才回退 direct（kind=both 时），kind=ts 时没有直链可回退。
+        if _parsed and _parsed.get("kind") in ("ts", "both"):
+            ev = register_cancel_event(task_id) if task_id else None
+            _ts = _download_ts_via_browser(
+                page_url=url, output_dir=Path(output_dir),
+                title=title or "", url=url,
+                cancel_event=ev, on_progress=on_progress)
+            if _ts.get("ok") and _ts.get("path"):
+                _name = Path(_ts["path"]).name
+                _sz = int(_ts.get("size") or 0)
+                try:
+                    (output_dir / f".{_url_fp(url)}.done").write_text(_name, encoding="utf-8")
+                except OSError:
+                    pass
+                try:
+                    from . import history as _hist3
+                    _hist3.record(url, {"title": _name, "kind": "video",
+                                        "path": _ts["path"], "size": _sz})
+                except Exception:  # noqa: BLE001
+                    pass
+                return {
+                    "ok": True, "url": url,
+                    "files": [{"path": _ts["path"], "name": _name, "size": _sz}],
+                    "note": _ts.get("note") or "已解析播放器分片流并下载正片。",
+                }
+            if _parsed.get("kind") == "ts":
+                return {"ok": False, "url": url,
+                        "error": _ts.get("error") or "分片流下载失败"}
+            # kind=both 且分片失败 → 落回下面的 direct 路径继续
+
         if _real:
             try:
                 from .downloader import download_file as _dl_file

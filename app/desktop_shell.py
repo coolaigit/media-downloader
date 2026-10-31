@@ -34,6 +34,79 @@ def _log(message: str) -> None:
         pass
 
 
+def _webview2_runtime_dir() -> str:
+    """按**文件系统**找 WebView2 运行时目录，找不到返回空串。
+
+    为什么必须自己找（2026-10-29 另一台 Win10 实机）：
+
+    pywebview 判断「这台机器有没有 WebView2」只查 4 个注册表键
+    （`EdgeUpdate\\Clients\\{F3017226-FE2A-...}` 等）。那台机器上运行时文件
+    齐全（`C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\153.x\\`，
+    383MB，msedgewebview2.exe / msedge.dll / 168 个 Locales 都在），「应用和功能」
+    里的卸载项也在，**唯独那几个注册表键一个都没有**（疑似被清理/搬迁类工具破坏）。
+
+    结果：pywebview 判定「没有 WebView2」→ 静默降级到 MSHTML(IE11) → 前端
+    用了箭头函数/async，IE11 在语法解析阶段就崩 → 白窗口 + 所有按钮失效，
+    而且**一个字的报错都不留**。
+
+    这里兜一层：文件系统里能找到 msedgewebview2.exe 就用它，通过
+    `webview.settings['WEBVIEW2_RUNTIME_PATH']` 交给 WebView2 当
+    BrowserExecutableFolder —— 绕开坏掉的注册表。
+    """
+    candidates: list[Path] = []
+    roots: list[str] = []
+    for env in ("ProgramFiles(x86)", "ProgramFiles"):
+        root = os.environ.get(env)
+        if root:
+            roots.append(root)
+    # 环境变量在部分受限进程里可能取不到（实测：从脚本/服务方式启动时
+    # ProgramFiles(x86) 会是 None），补上 Windows 的标准安装路径兜底。
+    roots += [r"C:\Program Files (x86)", r"C:\Program Files"]
+    for root in dict.fromkeys(roots):     # 去重且保持顺序
+        candidates.append(Path(root) / "Microsoft" / "EdgeWebView" / "Application")
+
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        local = str(Path.home() / "AppData" / "Local")
+    candidates.append(Path(local) / "Microsoft" / "EdgeWebView" / "Application")
+
+    for base in candidates:
+        try:
+            if not base.is_dir():
+                continue
+            versions = sorted(base.iterdir(), reverse=True)
+        except OSError:
+            continue
+        for ver in versions:
+            try:
+                if (ver / "msedgewebview2.exe").is_file():
+                    return str(ver)
+            except OSError:
+                continue
+    return ""
+
+
+def _attach_webview_logging() -> None:
+    """把 pywebview 自己的日志接到文件里。
+
+    原来这些信息只走 stdout：双击 exe 启动时 stdout 无处可看，
+    `service.out.log` 里一个字都没有 —— 用户侧就是「纯静默白屏，无从排查」。
+    """
+    try:
+        import logging
+
+        logger = logging.getLogger("pywebview")
+        logger.setLevel(logging.DEBUG)
+        logs = DATA_ROOT / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(logs / "desktop_webview.log", encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "[%(asctime)s] [%(name)s] %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+    except Exception:
+        _log("attach pywebview logging failed:\n" + traceback.format_exc())
+
+
 def _start_server(port: int, holder: dict) -> threading.Thread:
     def _worker() -> None:
         try:
@@ -168,12 +241,38 @@ def _handle_window_close(window, state: dict) -> bool | None:
         return False
 
 
+def _js_engine_ok(window) -> bool:
+    """窗口里的 JS 引擎能不能跑。`1+1` 只依赖引擎本身，与页面加载进度无关。
+
+    这是判断「内核是不是被降级成 IE/MSHTML」最干净的判据：
+    IE11 下 evaluate_js 要么抛异常，要么返回 None。
+    """
+    try:
+        return window.evaluate_js("1+1") == 2
+    except Exception:
+        return False
+
+
 def _open_native(url: str, own_server: bool, holder: dict) -> int:
     try:
         import webview
     except Exception:
         _log("pywebview import failed:\n" + traceback.format_exc())
         return -1
+
+    _attach_webview_logging()
+
+    # 先把「文件系统里能找到的 WebView2 运行时」交给 pywebview：
+    # 注册表被清理过、但文件还在的机器，靠这一步才走得通 EdgeChromium。
+    rt = _webview2_runtime_dir()
+    if rt:
+        try:
+            webview.settings["WEBVIEW2_RUNTIME_PATH"] = rt
+            _log(f"WebView2 运行时（文件系统探测）: {rt}")
+        except Exception:
+            _log("set WEBVIEW2_RUNTIME_PATH failed:\n" + traceback.format_exc())
+    else:
+        _log("文件系统里没找到 WebView2 运行时目录（将依赖注册表判定）")
 
     try:
         window = webview.create_window(
@@ -189,13 +288,18 @@ def _open_native(url: str, own_server: bool, holder: dict) -> int:
             zoomable=True,
         )
 
-        state = {"force_exit": False, "hidden_to_tray": False, "tray_icon": None}
+        state = {"force_exit": False, "hidden_to_tray": False, "tray_icon": None,
+                 "renderer_failed": False}
 
         def _closing() -> bool | None:
             # pywebview 的 cancellable closing 事件：返回 False = 取消真正关闭。
             return _handle_window_close(window, state)
 
         def _closed() -> None:
+            # 内核自检失败时是我们自己关的窗，后面还要用浏览器接管，
+            # 服务不能跟着停，否则浏览器打开的是个死页面。
+            if state.get("renderer_failed"):
+                return
             icon = state.get("tray_icon")
             if icon is not None:
                 try:
@@ -212,6 +316,37 @@ def _open_native(url: str, own_server: bool, holder: dict) -> int:
             window.events.closing += _closing
             window.events.closed += _closed
 
+        def _probe_renderer() -> None:
+            """窗口起来后验一次 JS 引擎；不可用就关窗转浏览器。
+
+            为什么必须自检：pywebview 在内核判定失败时**不抛异常**，
+            而是成功返回一个 MSHTML(IE11) 窗口 —— 应用以为桌面壳正常，
+            《使用说明》承诺的「初始化失败回退浏览器」永远不会触发。
+            而 web/app.js 有 153 处箭头函数、86 处 fetch，IE11 在语法解析
+            阶段就整体失败，表现就是白窗口 + 所有按钮没反应（2026-10-29
+            另一台 Win10 实机故障）。
+
+            `1+1` 只依赖 JS 引擎本身，跟页面加载进度无关，是干净的判据。
+            """
+            ok = False
+            for i in range(5):
+                time.sleep(0.9 if i == 0 else 0.8)
+                if _js_engine_ok(window):
+                    ok = True
+                    break
+            if ok:
+                _log("渲染内核自检通过（JS 可执行）")
+                return
+            _log("渲染内核自检失败：疑似降级到 MSHTML/IE 内核，关闭窗口改用默认浏览器")
+            state["renderer_failed"] = True
+            try:
+                window.destroy()
+            except Exception:
+                _log("destroy window failed:\n" + traceback.format_exc())
+
+        threading.Thread(target=_probe_renderer, name="RendererProbe",
+                         daemon=True).start()
+
         storage = DATA_ROOT / "webview"
         storage.mkdir(parents=True, exist_ok=True)
         webview.start(
@@ -220,6 +355,9 @@ def _open_native(url: str, own_server: bool, holder: dict) -> int:
             private_mode=False,
             storage_path=str(storage),
         )
+        if state.get("renderer_failed"):
+            # 让 main 走浏览器兜底（那边会打开默认浏览器并保持服务运行）
+            return -1
         return 0
     except Exception:
         _log("native window failed:\n" + traceback.format_exc())
