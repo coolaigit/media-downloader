@@ -383,6 +383,13 @@ def _gallery_dl_once(url: str, *, limit: int, timeout: int, video_only: bool,
         login_required = ("login" in low or "auth" in low or "429" in low
                           or "rate" in low or "require" in low
                           or "could not be found" in low)
+        # 真登录错误（不含 429/限流——那是 IP 风控，不是登录态问题）要
+        # 标记失效，否则平台登录中心一直显示「已登录」，用户不知道要重登。
+        _plat = platform_for_url(url)
+        if (_plat and login_required
+                and platform_login.looks_like_auth_error(err)
+                and platform_login.ready(_plat)):
+            platform_login.mark_invalid(_plat, err[:300])
         first = next((l for l in err.splitlines() if l.strip()), "")[:200]
         return {"ok": False, "items": [], "login_required": login_required,
                 "error": first or "gallery-dl 没有返回任何条目（该页可能为空、需要登录，或地址写错）"}
@@ -2148,6 +2155,11 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                 pass
 
     items = list(found.values())[:target]
+    if verification_required:
+        # 提示里已经让用户去刷新登录态，但登录中心不知道——它只看 cookie
+        # 在不在。不标记失效的话界面一直显示「已登录」（2026-10-31 排查补齐）。
+        platform_login.mark_invalid(
+            "dy", "抖音触发安全验证（登录态已过期或被风控），请到平台登录中心刷新登录态")
     return {
         "ok": bool(items), "items": items, "login_required": False,
         "verification_required": verification_required,
@@ -2409,6 +2421,22 @@ def browser_items(url: str, *, limit: int = 30, on_note=None) -> dict:
             "error": "" if items else "浏览器已打开主页，但没有识别到作品链接或视频地址"}
 
 
+def _relogin_why(platform: str, res: dict) -> str:
+    """统一的「登录态失效/需要登录」用户提示；顺带把失效标记写进登录中心。
+
+    2026-10-31 排查：小红书 code=-100 暴露出的问题在别的平台同样存在——
+    第一跳明确报了需要登录，后面的兜底继续白跑，最终错误信息里登录原因
+    被覆盖掉，用户只看到「没有识别到作品」却不知道该去重新登录。
+    """
+    why = str(res.get("error") or "登录态不可用")
+    st = platform_login.status(platform)
+    name = platform_login.PLATFORMS.get(platform, {}).get("name") or platform
+    if st.get("logged_in"):
+        platform_login.mark_invalid(platform, why)
+        return f"{name} 登录态已失效，请到「平台登录中心」重新登录。 {why}"
+    return f"{name} 当前需要登录，请到「平台登录中心」登录一次。 {why}"
+
+
 def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
                       on_note=None) -> tuple[list[dict], str]:
     platform = platform_for_url(url)
@@ -2478,6 +2506,13 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
         res = ytdlp_items(url, limit=limit, on_note=on_note)
         attempts.append(("yt-dlp", res))
 
+    # 登录态失效就快速失败（2026-10-31 小红书同款教训，此处覆盖
+    # 微博/Instagram/抖音/B站等所有专用来源）：过期登录态下再跑
+    # gallery-dl / yt-dlp / 浏览器渲染只会白耗时，甚至把登录墙页面的
+    # 站点素材当作品返回。如实报「请重新登录」。
+    if not res.get("ok") and res.get("login_required"):
+        return [], _relogin_why(platform, res)
+
     if not res.get("ok") and platform in {"ig", "pin", "wb", "tiktok"}:
         gallery_limit = limit
         # Weibo feed interleaves image and video posts. In image mode scan beyond
@@ -2497,6 +2532,10 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
         attempts.append(("gallery-dl", res))
 
     if not res.get("ok") and platform not in {"xhs", "ks"}:
+        # 知乎/TikTok/Pinterest 等走 yt-dlp 后同样可能报登录失效，
+        # 不能再让浏览器渲染兜底把登录原因盖掉。
+        if res.get("login_required"):
+            return [], _relogin_why(platform, res)
         res = ytdlp_items(url, limit=limit, on_note=on_note)
         attempts.append(("yt-dlp", res))
 
@@ -2525,10 +2564,5 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
             why = (f"{why}｜自动验证窗口没能启动："
                    f"{_bsk_fail.get('error') or '未知原因'}")
     if res.get("login_required"):
-        st = platform_login.status(platform)
-        if st.get("logged_in"):
-            platform_login.mark_invalid(platform, why)
-            why = f"{name} 登录态已失效，请到「平台登录中心」重新登录。 {why}"
-        else:
-            why = f"{name} 当前需要登录，请到「平台登录中心」登录一次。 {why}"
+        return [], _relogin_why(platform, res)
     return [], why
