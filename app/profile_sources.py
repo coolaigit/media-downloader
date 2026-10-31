@@ -468,9 +468,14 @@ def xhs_author_items(url: str, *, limit: int = 30, timeout: int = 90,
         if not data.get("success"):
             code = data.get("code")
             msg = (data.get("msg") or "")[:80]
-            if code == -101:
+            if code in (-100, -101):
+                # -100「登录已过期」/ -101 都代表会话失效。此前只认 -101，
+                # -100 落进通用报错（login_required=False），应用既不提示
+                # 重新登录也不标记失效，还继续拿登录墙页面的演示视频充数。
+                err = f"登录态已失效（{msg}）。请重新扫码登录一次小红书。"
+                platform_login.mark_invalid("xhs", err)
                 return {"ok": False, "items": [], "login_required": True,
-                        "error": f"登录态已失效（{msg}）。请重新扫码登录一次小红书。"}
+                        "error": err}
             return {"ok": False, "items": [], "login_required": False,
                     "error": f"接口报错（code={code}）：{msg}"}
         notes = (data.get("data") or {}).get("notes") or []
@@ -574,9 +579,10 @@ def xhs_detail_images(url: str, *, timeout: int = 60) -> dict:
         code = data.get("code")
         msg = (data.get("msg") or "")[:100]
         err = f"小红书详情接口报错（code={code}）：{msg}"
-        if code == -101 or platform_login.looks_like_auth_error(err):
+        lr = bool(code in (-100, -101) or platform_login.looks_like_auth_error(err))
+        if lr:
             platform_login.mark_invalid("xhs", err)
-        return {"ok": False, "items": [], "error": err}
+        return {"ok": False, "items": [], "error": err, "login_required": lr}
 
     entries = (data.get("data") or {}).get("items") or []
     card = (entries[0].get("note_card")
@@ -768,8 +774,13 @@ def _xhs_signed_detail_item(url: str, *, timeout: int = 60) -> dict:
     if not data.get("success"):
         code = data.get("code")
         msg = (data.get("msg") or "")[:100]
+        lr = bool(code in (-100, -101) or platform_login.looks_like_auth_error(
+            f"code={code}：{msg}"))
+        if lr:
+            platform_login.mark_invalid("xhs", f"小红书详情接口报错（code={code}）：{msg}")
         return {"ok": False, "item": None,
-                "error": f"小红书详情接口报错（code={code}）：{msg}"}
+                "error": f"小红书详情接口报错（code={code}）：{msg}",
+                "login_required": lr}
 
     entries = (data.get("data") or {}).get("items") or []
     card = (entries[0].get("note_card") if entries and isinstance(entries[0], dict) else None) or {}
@@ -944,7 +955,8 @@ def _xhs_api_post(endpoint: str, payload: dict, *, referer: str, cookies: dict,
     if not data.get("success"):
         err = (f"小红书接口报错（code={data.get('code')}）："
                f"{str(data.get('msg') or '')[:100]}")
-        if data.get("code") == -101 or platform_login.looks_like_auth_error(err):
+        if (data.get("code") in (-100, -101)
+                or platform_login.looks_like_auth_error(err)):
             platform_login.mark_invalid("xhs", err)
         return None, err
     return data, ""
@@ -1015,7 +1027,9 @@ def xhs_feed_note_refs(url: str, *, limit: int = 30, timeout: int = 30,
             if not data:
                 if refs:
                     break
-                return {"ok": False, "refs": [], "login_required": False, "error": err}
+                return {"ok": False, "refs": [],
+                        "login_required": platform_login.looks_like_auth_error(err),
+                        "error": err}
             got = _take(((data.get("data") or {}).get("items") or []), "pc_search")
             if not got:
                 break
@@ -1041,7 +1055,9 @@ def xhs_feed_note_refs(url: str, *, limit: int = 30, timeout: int = 30,
             if not data:
                 if refs:
                     break
-                return {"ok": False, "refs": [], "login_required": False, "error": err}
+                return {"ok": False, "refs": [],
+                        "login_required": platform_login.looks_like_auth_error(err),
+                        "error": err}
             body = data.get("data") or {}
             got = _take(body.get("items") or [], "pc_feed")
             cursor = str(body.get("cursor_score") or "")
@@ -2484,7 +2500,10 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
         res = ytdlp_items(url, limit=limit, on_note=on_note)
         attempts.append(("yt-dlp", res))
 
-    if not res.get("ok"):
+    # 小红书不兜底 browser_items（2026-10-31 实测）：登录态过期时主页渲染出的是
+    # 登录墙，页面自带的演示视频（dc.xhscdn.com 的背景视频/钢琴视频等站点素材）
+    # 会被当成「博主作品」返回，用户全选下载全是失败。与其给假结果，不如如实报错。
+    if not res.get("ok") and platform != "xhs":
         res = browser_items(url, limit=limit, on_note=on_note)
         attempts.append(("browser", res))
 
