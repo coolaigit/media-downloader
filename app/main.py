@@ -118,6 +118,48 @@ def _startup_reaper():
         pass
     start_reaper_thread()
 
+
+# ---- /api/status 冷启动预热（故障报告 P2：打包版冷启动首次 >8s）----
+# 慢的根源是几个重操作：import yt_dlp（3~5s）、ffmpeg -version 子进程、
+# 浏览器/登录态/cookies 探测。前端首屏就调 /api/status，超时短就表现为
+# 「打开白卡几秒」。这里在 startup 时开后台线程把这些重操作先跑一遍，
+# 结果存模块级缓存；api_status 里缓存命中直接用，miss 才现场算（行为
+# 与旧版一致）。缓存只在进程启动时填一次 —— ffmpeg/js runtime 版本
+# 进程内不变，浏览器/登录态在预热后各请求仍现场重算，不影响正确性。
+_STATUS_WARM: dict = {}
+
+
+def _warm_status():
+    import threading
+
+    def _run():
+        try:
+            import yt_dlp
+            _STATUS_WARM["ytdlp_version"] = yt_dlp.version.__version__
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _STATUS_WARM["ffmpeg_version"] = ffmpeg_version(find_ffmpeg()) or ""
+        except Exception:  # noqa: BLE001
+            pass
+        for key, fn in (("js_runtime", find_js_runtime),
+                        ("cookies", cookie_store.status),
+                        ("browser_profile", browser_profile.info),
+                        ("browser", browser_runtime.status)):
+            try:
+                _STATUS_WARM[key] = fn()
+            except Exception:  # noqa: BLE001
+                pass
+        print("[startup] /api/status 预热完成", flush=True)
+
+    threading.Thread(target=_run, name="StatusWarmup", daemon=True).start()
+
+
+@app.on_event("startup")
+def _warm_status_on_startup():
+    _warm_status()
+
+
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
             ".avif", ".ico", ".tif", ".tiff", ".jxl"}
 VID_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".flv", ".m4v",
@@ -355,23 +397,23 @@ def api_status():
     return {
         "ffmpeg_available": bool(ff),
         "ffmpeg_path": ff or "",
-        "ffmpeg_version": ffmpeg_version(ff) or "",
+        "ffmpeg_version": _STATUS_WARM.get("ffmpeg_version") or (ffmpeg_version(ff) or ""),
         # 1E：JS runtime 状态如实暴露（yt-dlp 解 YouTube 需要；没有时部分功能降级）
-        "js_runtime": {"name": js[0], "path": js[1]} if js else None,
-        "ytdlp_version": yt_dlp.version.__version__,
+        "js_runtime": _STATUS_WARM.get("js_runtime") or ({"name": js[0], "path": js[1]} if js else None),
+        "ytdlp_version": _STATUS_WARM.get("ytdlp_version") or yt_dlp.version.__version__,
         "downloads_dir": str(DOWNLOADS_DIR),
         "downloads_dir_restart_pending": dd_pending,
         "disk_free_bytes": free,
         "settings": st,
         # 生效中的 cookies（条数/域名）：让用户能一眼看出「配了但没生效」
         # 还是「压根没配」——平台主页抓不到时这一步最常被忽略
-        "cookies": cookie_store.status(),
+        "cookies": _STATUS_WARM.get("cookies") or cookie_store.status(),
         # 登录态浏览器配置：让用户知道「抖音/小红书主页」这条路是否已具备前提
-        "browser_profile": browser_profile.info(),
+        "browser_profile": _STATUS_WARM.get("browser_profile") or browser_profile.info(),
         # V3.0：浏览器内核来源。包内 Chromium / 系统 Chrome/Edge / 无可用内核。
         # 设置页要能直接看出「我这台机器到底靠什么在渲染」——
         # 否则换个电脑抓不到东西时，用户完全无从判断是缺内核还是站点改版。
-        "browser": browser_runtime.status(),
+        "browser": _STATUS_WARM.get("browser") or browser_runtime.status(),
         # V3.0：验证码协助能力（bsk + 扩展 + daemon 是否就绪）。
         # 这条是「遇到验证码时会怎样」的答案，用户不需要去猜装没装。
         "browser_skill": browser_skill.status(),
