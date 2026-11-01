@@ -1682,7 +1682,12 @@ def _expand_via_platform_source(
         if is_video and _want_image:
             _dropped += 1
             continue
-        if (not is_video) and _want_video:
+        # 小红书列表给的是「笔记页条目」：is_page=True、无 kind_hint/type，
+        # 要等下面第 xhs 下钻段逐篇打开才能判出是不是视频。不能在这里按
+        # 「没有 video 标记」丢掉——否则视频模式下小红书条目全军覆没，
+        # 还报「来源拿到了 N 个作品，但其中没有视频」误导用户去调大条数
+        # （2026-11-01 实测：图片模式不受影响，视频模式恒 0）。
+        if (not is_video) and _want_video and not (platform == "xhs" and r.get("is_page")):
             _dropped += 1
             continue
         # m3u8/mpd 是流媒体清单，不能当普通文件下（会得到坏文件）——
