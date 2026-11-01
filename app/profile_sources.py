@@ -2160,6 +2160,17 @@ def douyin_author_items(url: str, *, limit: int = 30, on_note=None) -> dict:
         # 在不在。不标记失效的话界面一直显示「已登录」（2026-10-31 排查补齐）。
         platform_login.mark_invalid(
             "dy", "抖音触发安全验证（登录态已过期或被风控），请到平台登录中心刷新登录态")
+    elif not items and st.get("logged_in") and not platform_login.status("dy").get("relogin_required"):
+        # 用户定死的规则：登录态过期必须提示。抖音登录墙有一种形态页面照常打开、
+        # 没有「登录」字样、也没有验证码，只是作品卡片一条都读不到——此前落进
+        # 通用报错，既不提示重登也不标记失效（2026-11-01 用户实测踩中）。
+        # 已登录状态 + 页面打开 + 0 作品 → 登录态可疑：标记失效并明确提示。
+        _why = ("抖音页面已打开但一条作品都读不到，登录态可能已失效。"
+                "请到「平台登录中心」重新登录一次抖音"
+                "（若确认该账号确实没有作品，可忽略此提示）。")
+        platform_login.mark_invalid("dy", _why)
+        return {"ok": False, "items": [], "login_required": True,
+                "verification_required": False, "error": _why}
     return {
         "ok": bool(items), "items": items, "login_required": False,
         "verification_required": verification_required,
@@ -2416,6 +2427,15 @@ def browser_items(url: str, *, limit: int = 30, on_note=None) -> dict:
         msg = "页面显示登录提示，当前平台登录态不可用。"
         if platform and st.get("logged_in"):
             platform_login.mark_invalid(platform, msg)
+        return {"ok": False, "items": [], "login_required": True, "error": msg}
+    if not items and platform and st.get("logged_in"):
+        # 用户定死的规则：登录态过期必须提示。有的登录墙（如抖音）页面照常打开、
+        # 文本里没有「登录」字样，只是 0 条作品——不能落成普通失败让用户摸不着头脑
+        # （2026-11-01 用户实测踩中）。已登录 + 页面打开 + 0 作品 → 登录态可疑。
+        msg = (f"页面已打开但一条作品都读不到，{platform} 登录态可能已失效。"
+               "请到「平台登录中心」重新登录一次"
+               "（若确认该账号/页面确实没有作品，可忽略此提示）。")
+        platform_login.mark_invalid(platform, msg)
         return {"ok": False, "items": [], "login_required": True, "error": msg}
     return {"ok": bool(items), "items": items, "login_required": False,
             "error": "" if items else "浏览器已打开主页，但没有识别到作品链接或视频地址"}
