@@ -319,6 +319,23 @@ def download_file(
                                 "但文件已不在当前目录，已按记录跳过。"
                                 "需要重新下载请关闭「跳过已存在」。"))
 
+        # ---- 台账身份去重（2026-10-31 pornhao 用户实测）----
+        # 签名直链每次抓取 st/e/host/档位目录都会变，上面的 URL 指纹 marker
+        # 对它们毫无去重能力 —— 用户重抓重下，已下过的片子又从头来。
+        # 台账的 mediaid 身份键（主域 + 站内内容 ID，见 history.video_keys）
+        # 跨签名会话稳定：同一部片换个签名地址来，照样认得。
+        if skip_existing:
+            try:
+                from . import history as _hist
+                if _hist.is_downloaded(target_url):
+                    return DownloadResult(
+                        True, "", 0, skipped=True, url=target_url,
+                        note=("台账里已有同一部片的下载记录（按站内内容 ID 识别 —— "
+                              "签名直链每次抓取都会变，按地址判断会漏）。"
+                              "需要重新下载请关闭「跳过已存在」。"))
+            except Exception:  # noqa: BLE001 —— 台账读失败不阻断下载
+                pass
+
         last_err = ""
         # ---- 断点续传：.part 按 URL 指纹固定命名，重试接着已下的字节继续 ----
         # 为什么必须（2026-09-29 用户实测）：avjoy 的大文件 450~737MB，CDN 会在

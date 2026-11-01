@@ -51,7 +51,7 @@ from .config import DATA_ROOT
 # 台账文件（独立于下载目录，落在 DATA_ROOT）
 DATA_DIR = DATA_ROOT / "data"
 HISTORY_FILE = DATA_DIR / "download_history.json"
-VERSION = 1
+VERSION = 2
 
 _LOCK = threading.RLock()
 
@@ -139,6 +139,26 @@ def video_keys(url: str = "", info: dict | None = None) -> list[str]:
     if ident:
         keys.append("url:" + ident)
 
+    # ---- 媒体直链的稳定身份（2026-10-31 pornhao 用户实测）----
+    # 签名直链每次抓取 st/e/host/档位目录都会变，url: 键毫无去重能力 ——
+    # 用户重抓重下，已下过的片子又从头来。通用启发式（地址形态，无站点名单）：
+    # 路径尾段是「纯数字 ID + 视频扩展名」时，数字就是站内内容 ID；
+    # 主机剥掉 CDN 式数字/字母数字子域前缀（video3./cdn2.…）取主域 ——
+    # 这样跨 CDN 主机、跨档位目录、跨签名会话都稳定。
+    try:
+        from urllib.parse import urlparse as _up
+        _p = _up(url or "")
+        _host = (_p.hostname or "").lower()
+        _tail = (_p.path or "").rstrip("/").rsplit("/", 1)[-1].lower()
+        _m = re.fullmatch(r"(\d{3,})\.(mp4|m4v|webm|mkv|mov|ts|avi|flv)", _tail)
+        if _m:
+            _parts = _host.split(".")
+            while len(_parts) > 2 and re.fullmatch(r"[a-z]+\d+", _parts[0]):
+                _parts = _parts[1:]
+            keys.append(f"mediaid:{'.'.join(_parts)}:{_m.group(1)}")
+    except Exception:  # noqa: BLE001
+        pass
+
     # 去重保序
     seen: set[str] = set()
     out: list[str] = []
@@ -170,9 +190,40 @@ def _load() -> dict:
                 else {"version": VERSION, "records": {}}
         except (json.JSONDecodeError, OSError):
             data = {"version": VERSION, "records": {}}
+    if int(data.get("version") or 1) < VERSION:
+        data = _migrate(data)
     with _LOCK:
         _CACHE["mtime"] = m
         _CACHE["data"] = data
+    return data
+
+
+def _migrate(data: dict) -> dict:
+    """存量台账身份键升级（VERSION 1 → 2）。
+
+    背景（2026-10-31 pornhao 用户实测）：V3.0.1 及之前的台账只记 url: 键，
+    而签名直链每次抓取 st/e/host/档位目录都会变 —— 用户重抓重下时旧记录
+    完全对不上，已下过的片子又被当作新片重下。媒体身份键（mediaid:主域:
+    站内数字 ID）是后补的，存量记录都没有，这里按每条记录的 url 重算一遍
+    把新键补挂上（指向同一条记录，幂等：已有键跳过）。
+    """
+    records = data.get("records") or {}
+    added = 0
+    for _key, meta in list(records.items()):
+        u = str((meta or {}).get("url") or "")
+        if not u:
+            continue
+        for k in video_keys(u):
+            if k not in records:
+                records[k] = meta
+                added += 1
+    data["records"] = records
+    data["version"] = VERSION
+    try:
+        _save(data)
+        print(f"[history] 身份键迁移完成：补挂 {added} 个 mediaid 键", flush=True)
+    except Exception:  # noqa: BLE001 —— 迁移失败不丢数据，下次再试
+        pass
     return data
 
 
