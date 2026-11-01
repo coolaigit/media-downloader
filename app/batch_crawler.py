@@ -1731,39 +1731,75 @@ def _expand_via_platform_source(
         dres = fetch_many(
             [m.url for m in page_items],
             allow_render=False,
-            concurrency=6,
+            # 6 并发连打几百篇笔记页会触发频控：被拦的页面返回 200 但没有视频，
+            # 2026-11-01 用户实测 5 分钟内连抓 4 次，成功率 9→1→0 递减。
+            concurrency=3,
             render_scroll=0,
             on_progress=lambda stage, d, t: on_note(
                 f"正在下钻笔记页（{stage}）{d}/{t}"),
         )
-        drilled: list[MediaItem] = []
-        dropped = 0
-        for m, fr in zip(page_items, dres):
-            if not fr.ok or not fr.html:
-                drilled.append(m)      # 打不开的保留原条目，让下载层给出明确报错
-                continue
-            got = extract_from_html(fr.html, fr.final_url or m.url, m.url)
-            vids = [g for g in got if g.kind == "video"]
-            if not vids:
-                dropped += 1           # 图文笔记：没有视频，丢弃
-                continue
-            best = vids[0]
-            drilled.append(MediaItem(
-                url=best.url, kind="video", source=m.source,
-                title=m.title or "", thumbnail=m.thumbnail or best.thumbnail or "",
-                referer=m.url, origin_page=m.url,
-                extra={
-                    "is_page": False,
-                    "ext": "",
-                    "variants": [v.url for v in vids[1:] if v.url != best.url],
-                    "uploader": m.extra.get("uploader") or "",
-                    "site": m.extra.get("site") or "",
-                    "duration_string": "",
-                },
-            ))
+
+        def _blocked_page(html: str) -> bool:
+            """判定拿到的 200 页面是不是风控/验证拦截页（只看特征词，通用判法）。"""
+            low = (html or "")[:20000].lower()
+            return any(x in low for x in ("安全验证", "请完成验证", "访问异常",
+                                          "captcha", "当前环境异常", "滑动验证"))
+
+        def _drill_zip(pairs: list[tuple[MediaItem, FetchResult]]):
+            drilled: list[MediaItem] = []
+            no_video = 0
+            blocked: list[MediaItem] = []
+            failed: list[MediaItem] = []
+            for m, fr in pairs:
+                if not fr.ok or not fr.html:
+                    failed.append(m)   # 传输失败：保留原条目，让下载层给出明确报错
+                    continue
+                got = extract_from_html(fr.html, fr.final_url or m.url, m.url)
+                vids = [g for g in got if g.kind == "video"]
+                if vids:
+                    best = vids[0]
+                    drilled.append(MediaItem(
+                        url=best.url, kind="video", source=m.source,
+                        title=m.title or "", thumbnail=m.thumbnail or best.thumbnail or "",
+                        referer=m.url, origin_page=m.url,
+                        extra={
+                            "is_page": False,
+                            "ext": "",
+                            "variants": [v.url for v in vids[1:] if v.url != best.url],
+                            "uploader": m.extra.get("uploader") or "",
+                            "site": m.extra.get("site") or "",
+                            "duration_string": "",
+                        },
+                    ))
+                elif _blocked_page(fr.html):
+                    blocked.append(m)  # 风控拦截页：单独计，不冒充图文
+                else:
+                    no_video += 1      # 真图文笔记：没有视频，丢弃
+            return drilled, no_video, blocked, failed
+
+        drilled, no_video, blocked, failed = _drill_zip(
+            list(zip(page_items, dres)))
+        # 被风控拦下的自动补一轮：等 8 秒降速后重抓一次（200 响应走传输层重试没用）
+        if blocked:
+            on_note(f"有 {len(blocked)} 篇笔记被频控拦截，8 秒后自动补抓一轮…")
+            time.sleep(8)
+            retry_res = fetch_many(
+                [m.url for m in blocked],
+                allow_render=False, concurrency=2, render_scroll=0,
+                on_progress=lambda stage, d, t: on_note(
+                    f"补抓被拦截笔记（{stage}）{d}/{t}"),
+            )
+            r_drilled, r_no_video, r_blocked, r_failed = _drill_zip(
+                list(zip(blocked, retry_res)))
+            drilled.extend(r_drilled)
+            no_video += r_no_video
+            blocked = r_blocked
+            failed.extend(r_failed)
         items = [m for m in items if not m.extra.get("is_page")] + drilled
         note = (note + "；" if note else "") + \
-            f"已逐篇下钻 {len(page_items)} 篇笔记（图文笔记 {dropped} 篇已跳过）。"
+            f"已逐篇下钻 {len(page_items)} 篇笔记（图文 {no_video} 篇跳过" + \
+            (f"；{len(blocked)} 篇被频控拦截" if blocked else "") + \
+            (f"；{len(failed)} 篇读取失败" if failed else "") + "）。"
 
     name = profile_sources.PLATFORM_NAMES.get(platform, platform)
     warnings = [
@@ -1776,6 +1812,11 @@ def _expand_via_platform_source(
                         "过一段时间再下需要重新抓一次。")
     if note:
         warnings.append(note)
+    if platform == "xhs" and blocked:
+        warnings.append(
+            f"⚠️ 本次有 {len(blocked)} 篇笔记被平台频控拦截（页面正常返回但不给内容），"
+            "视频结果**可能不完整**。等几分钟后再重抓一次即可补齐；"
+            "连续快速重抓只会拦得更多。")
     return {
         "items": [m.to_dict() for m in items],
         "summary": summarize(items),
