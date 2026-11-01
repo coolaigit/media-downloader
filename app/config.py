@@ -15,7 +15,7 @@ from pathlib import Path
 # 原因（2026-10-22 事故）：两版 config 结构会各自演进，共用同一个 config.json
 # 必然互相覆盖；再加上端口认领问题，用户会看到「装好的客户端被改了」的假象。
 APP_TITLE = "MediaDownloader 3.0"       # 窗口标题 / 任务栏 / 开始菜单（与 V2.5 明确区分）
-APP_VERSION = "3.0.1"
+APP_VERSION = "3.0.2"
 DATA_DIR_NAME = "MediaDownloader3"      # 本版数据目录名
 LEGACY_DATA_DIR_NAME = "MediaDownloader"  # V2.5 的数据目录名（只读，用于首次迁移）
 
