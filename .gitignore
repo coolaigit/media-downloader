@@ -109,3 +109,11 @@ sb/
 remove_page_scan.py
 restructure_html.py
 run_regress.py
+# 第二轮：一次性诊断脚本（diag_kernel.py 是产品排障入口，保留）
+diag_*.py
+!diag_kernel.py
+gen_launcher.py
+RELEASE_WORK_RULES.md
+诊断*.bat
+*排查报告*.md
+*实测报告*.md
