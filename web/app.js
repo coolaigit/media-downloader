@@ -2701,6 +2701,19 @@ function updateFilterSummary() {
   bindEvents();
   updateFilterSummary();
   bindModeSwitches();
+
+  // ---------- 桌面壳自检握手（不要删） ----------
+  // app/desktop_shell.py 会轮询 window.__MD_APP_READY__：
+  //   置位 → 认为「内核是 Chromium 且前端脚本确实跑起来了」；
+  //   一直不置位 → 判定界面不可用，关掉桌面窗口改用默认浏览器。
+  // 放在所有 await 之前：同步的事件绑定做完，界面就已经可以点了。
+  // 这样 IE11（整份脚本在解析阶段就失败）永远不会置位 → 一定触发兜底。
+  window.__MD_APP_READY__ = true;
+  try {
+    const warn = document.getElementById('kernelWarn');
+    if (warn) warn.remove();
+  } catch (e) { /* 提示块不存在也无所谓 */ }
+
   await loadStatus();
   await loadSettings();
   await loadPlatformStatuses();

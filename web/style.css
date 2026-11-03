@@ -833,3 +833,51 @@ select:focus, input[type="text"]:focus, input[type="number"]:focus {
 }
 
 .card.probe-return { outline: 3px solid currentColor; outline-offset: 2px; }
+
+/* ============================================================================
+   内核兜底提示（#kernelWarn）—— 必须是「纯 CSS 就能显示」的
+   ----------------------------------------------------------------------------
+   场景：桌面窗口误用 IE/MSHTML 内核时，app.js 在解析阶段整体失败，
+   页面只剩空白。这段样式不依赖任何 JS / CSS 变量 / flex / grid，
+   IE11 也能正确渲染，让用户看到「怎么办」而不是一个白窗口。
+   显现延迟 1.6s：前端正常时 app.js 早已把节点移除，不会闪一下。
+   ========================================================================== */
+#kernelWarn {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 9999;
+  background: #0f172a;
+  color: #e2e8f0;
+  overflow: auto;
+  opacity: 0;
+  visibility: hidden;
+  animation: kernelWarnIn 0.01s linear 1.6s forwards;
+}
+@keyframes kernelWarnIn {
+  to { opacity: 1; visibility: visible; }
+}
+.kernel-warn-card {
+  max-width: 720px;
+  margin: 10vh auto 40px auto;
+  padding: 30px 34px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  font-size: 15px;
+  line-height: 1.9;
+  text-align: left;
+}
+.kernel-warn-card h2 {
+  margin: 0 0 14px 0;
+  color: #fbbf24;
+  font-size: 22px;
+}
+.kernel-warn-card p { margin: 8px 0; }
+.kernel-warn-card ol { margin: 8px 0; padding-left: 24px; }
+.kernel-warn-card li { margin: 6px 0; }
+.kernel-warn-card b { color: #93c5fd; }
+.kernel-warn-note { margin-top: 18px; color: #94a3b8; font-size: 13px; }
+

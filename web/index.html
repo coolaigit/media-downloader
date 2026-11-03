@@ -5,9 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MediaDownloader 3.0</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="style.css?v=2.5.0-final">
+<link rel="stylesheet" href="style.css?v=3.0.3-kernel">
 </head>
 <body class="dock-collapsed">
+
+<!-- 内核兜底提示：纯 HTML/CSS，不依赖任何 JavaScript。
+     桌面窗口一旦误用 IE/MSHTML 内核，app.js 在**解析阶段**就整体失败，
+     下面的提示块会在 1.6 秒后自动浮现，替代原本的「白窗口」。
+     前端正常启动时 app.js 会立刻把它移除，用户看不到闪烁。
+     （2026-10-29 实机事故：白窗口 + 所有按钮失效，且无任何报错提示） -->
+<div id="kernelWarn">
+  <div class="kernel-warn-card">
+    <h2>界面没能正常启动</h2>
+    <p>当前窗口的渲染内核太旧（IE / MSHTML），界面依赖的脚本无法运行，所以按钮全都没反应。</p>
+    <p><b>请任选一种方式继续使用：</b></p>
+    <ol>
+      <li>双击程序目录里的「<b>以浏览器模式启动.cmd</b>」；</li>
+      <li>或手动在浏览器里访问 <b>http://127.0.0.1:8848</b>（端口以实际启动端口为准）；</li>
+      <li>想让桌面窗口恢复正常：安装 <b>Microsoft Edge WebView2 运行时</b>，再重新打开本程序。</li>
+    </ol>
+    <p class="kernel-warn-note">程序通常会自动改用默认浏览器打开；若没有反应，请按上面第 1、2 步操作。</p>
+  </div>
+</div>
 
 <header class="topbar">
   <div id="deadBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99;background:#b3261e;color:#fff;padding:10px 16px;font-weight:600;text-align:center;">
@@ -1018,6 +1037,6 @@
 
 <div class="toast-wrap" id="toastWrap"></div>
 
-<script src="app.js?v=2.5.0-final"></script>
+<script src="app.js?v=3.0.3-kernel"></script>
 </body>
 </html>
