@@ -67,7 +67,12 @@ try:
     newroot = tmp / "MediaDownloader3"
     check(f"DATA_ROOT={newroot}" in out, "默认数据目录是 MediaDownloader3")
     check("TITLE=MediaDownloader 3.0" in out, "产品名是 MediaDownloader 3.0")
-    check("VERSION=3.0.0" in out, "版本号 3.0.0")
+    # 版本号从 app.config 取，不硬编码 —— 每次定版都要改测试太容易漏
+    # （2026-11-03 实测：这里还写着 3.0.0，定版 3.0.2 后一直红着没人发现）
+    sys.path.insert(0, str(REPO))
+    from app.config import APP_VERSION  # noqa: E402
+
+    check(f"VERSION={APP_VERSION}" in out, f"版本号 {APP_VERSION}")
     check((newroot / "config.json").is_file(), "config.json 已复制")
     check((newroot / "data" / "download_history.json").is_file(), "下载台账已复制")
     check((newroot / "platform_profiles" / "wb" / "cookies_from_profile.txt").is_file(),
