@@ -105,3 +105,7 @@ RELEASE_QA_*.md
 BASELINE_*.md
 # 干净虚机验收包（写死本机路径）
 sb/
+# 漏网的一次性改造脚本（已从索引移除，防止 git add . 又带回去）
+remove_page_scan.py
+restructure_html.py
+run_regress.py
