@@ -1,24 +1,35 @@
 # BUILD_MANIFEST — MediaDownloader Release Candidate
 
 > 每次正式发布前更新本文件。构建必须用隔离 venv，禁止裸 python/pip。
+>
+> ⚠️ **2026-11-03 历史改写**：为把开发期的一次性脚本与内部记录从公开仓库里彻底
+> 移除，整个历史被重写（文件内容未变，提交 SHA 全部改变）。因此**本节之前各版本
+> 段落里引用的 commit SHA 已失效**，按 SHA 找不到属正常；查证请按提交标题搜。
+> 改写前完整备份：`D:\Project\_md_repo_backup_before_rewrite.bundle`。
 
 ## V3.0.3（2026-11-03）
 
 | 项 | 值 |
 |---|---|
 | 版本号 | `app/config.py` `APP_VERSION = "3.0.3"` |
-| 源码分支 | `v3.0-work` @ 217ceec（定版前最后一个是 `a4ffc92`） |
+| 源码分支 | `v3.0-work` @ `99d2eb3`（定版提交 `404dbe4`） |
 | 构建方式 | `.venv-build` 隔离 venv + PyInstaller（MediaDownloader.spec）+ Inno Setup 6 |
-| 安装包 | `MediaDownloader_V3.0.3_Setup.exe`（本版未预构建，按需跑 `构建V3安装包.bat`） |
+| 安装包 | `installer_out/MediaDownloader_V3.0.3_Setup.exe` — 241.2 MB，构建于 2026-11-03 22:08 |
+| SHA256 | `189D59306E57497383ED0087A4DB55BAC81BFCCC3CCED3B71276DEE0B4321DB1` |
 
 ### V3.0.2 → V3.0.3 变更清单
 
 | 提交 | 内容 |
 |---|---|
-| `2e17b0d` | **白屏根因修复**。V3.0.2 那轮「内核自检」判据 `evaluate_js('1+1') == 2` 是无效的：IE11 下 `1+1` 正常返回 2（只用到 eval + JSON.stringify），自检恒真 → 降级到 IE 依然白屏。改用 **UA 指纹 + ES6 语法 + 前端就绪标记 `__MD_APP_READY__`** 三重判据；所有 evaluate_js 探测加超时（pywebview 内部 Semaphore 无超时，内核半死会永久阻塞自检线程）；开窗前按「文件系统 + 注册表」快速判死，没装 WebView2 就不给白窗；转浏览器时弹窗写明原因/URL/下载地址；`index.html` 加纯 HTML/CSS 内核提示块（JS 跑不起来时 1.6s 后浮现）；frozen 版自动生成「以浏览器模式启动.cmd」；新增 `diag_kernel.py` |
-| `86f6d64` | 修掉两个长期红灯的陈旧用例（`test_desktop_close` 托盘异常预期写反、`test_data_migration` 硬编码 3.0.0），回归清单纳入新用例 |
-| `a4ffc92` | 定版 3.0.3；`version_info.txt` 从 3.0.0 跟进到 3.0.3（此前 exe 文件属性与安装包版本对不上） |
-| `217ceec` | 修 `构建V3安装包.bat` 第 5 步写死旧包名导致每次定版都「复制失败」 |
+| `63a55d5` | **白屏根因修复**。V3.0.2 那轮「内核自检」判据 `evaluate_js('1+1') == 2` 是无效的：IE11 下 `1+1` 正常返回 2（只用到 eval + JSON.stringify），自检恒真 → 降级到 IE 依然白屏。改用 **UA 指纹 + ES6 语法 + 前端就绪标记 `__MD_APP_READY__`** 三重判据；所有 evaluate_js 探测加超时（pywebview 内部 Semaphore 无超时，内核半死会永久阻塞自检线程）；开窗前按「文件系统 + 注册表」快速判死，没装 WebView2 就不给白窗；转浏览器时弹窗写明原因/URL/下载地址；`index.html` 加纯 HTML/CSS 内核提示块（JS 跑不起来时 1.6s 后浮现）；frozen 版自动生成「以浏览器模式启动.cmd」；新增 `diag_kernel.py` |
+| `a28873d` | 修掉两个长期红灯的陈旧用例（`test_desktop_close` 托盘异常预期写反、`test_data_migration` 硬编码 3.0.0），回归清单纳入新用例 |
+| `404dbe4` | 定版 3.0.3；`version_info.txt` 从 3.0.0 跟进到 3.0.3（此前 exe 文件属性与安装包版本对不上） |
+| `99d2eb3` | 修 `构建V3安装包.bat` 第 5 步写死旧包名导致每次定版都「复制失败」 |
+| `0563305` | 修 `构建V3安装包.bat` **双击跑不起来**：① 老 bug —— `%ISCC%` 在 `if (...)` 块里展开，值中的 `(x86)` 把块提前闭合，报 `\Inno was unexpected at this time`（该脚本此前从未跑完整过）；② 上一版误存成 UTF-8+LF，cmd 解析错行、exit 255 零输出。现统一 GBK+CRLF + 延迟展开 `!VAR!` + 通配符复制包 |
+| `d313ead` | 开源：定 MIT 许可证（署名 Illumi Tools）、补 LICENSE/DECISIONS D-010/README 三节 |
+| `317f07d`+`7176ef0` | 开源瘦身：179 个开发过程文件移出仓库（本地保留），跟踪文件 390 → 211 |
+| 本轮新增 | **安装包打错源目录**：iss 的 `SrcDir` 是 `..\dist\MediaDownloader`（本地在跑的绿色版），而 bat 把新包构建到 `dist_new` → 打出「Setup 版本号 3.0.3、内容却是 3.0.0」的假包。实测：`dist\...\MediaDownloader.exe` FileVer=3.0.0.0、`app.js` 无 `__MD_APP_READY__`。改为 `SrcDir = ..\dist_new\MediaDownloader`，安装器永远打刚构建的那份 |
+
 
 ### 验证记录（本机）
 
@@ -27,8 +38,15 @@
 - 真实 `launcher.py` 启动：`desktop_webview.log` 出现 `Using custom WebView2 runtime`，`desktop_shell.log` 出现「内核自检通过」「前端自检通过」，`msedgewebview2.exe` 子进程存在、`EBWebView` 生成。
 - 前端未就绪场景（指向 JSON 接口）：19s 内按 15s 期限判失败，未卡死。
 - Playwright 双向验证 `#kernelWarn`：JS 开启时节点被移除；JS 关闭时 `visibility=visible / opacity=1`（截图人工确认）。
-- 回归：`run_regress.py` 28/29 PASS，唯一失败的 `test_data_migration` 已由 `86f6d64` 修好并复跑通过。
-- **仍未覆盖**：故障机（注册表被清理的那台 Win10）无法远程复现，需在真机装 3.0.3 跑 `diag_kernel.py` 确认。
+- 回归：`run_regress.py` 28/29 PASS，唯一失败的 `test_data_migration` 已由 `a28873d` 修好并复跑通过。
+- **打包版实跑（决定性证据）**：`dist_new\MediaDownloader\MediaDownloader.exe` 启动后
+  `desktop_shell.log` 依次出现「已生成浏览器模式启动器」→「WebView2 运行时（文件系统探测）」
+  →「WebView2Loader 目录已前置到 PATH」→「内核自检通过（Chromium）Edg/156」
+  →「前端自检通过（__MD_APP_READY__ 已置位）」，退出后无残留进程。
+  这些日志**只有 3.0.3 才有**，可确认包内是修复后的代码。
+- 安装包与载荷时序核对：载荷 exe（22:05:47，FileVer 3.0.3.0）早于 Setup 生成（22:08:23）。
+- **仍未覆盖**：故障机（注册表被清理的那台 Win10）无法远程复现，需在真机装 3.0.3 跑 `diag_kernel.py` 确认；
+  安装包未在本机做真实安装（会覆盖用户正在用的 3.0.2），最终以目标机安装为准。
 
 ## V3.0.2（2026-11-01）
 

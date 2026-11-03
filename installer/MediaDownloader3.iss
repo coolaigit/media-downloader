@@ -17,7 +17,9 @@
 #define AppVerShort "V3.0.3"
 #define AppPublisher "Illumi Tools"
 #define AppExe "MediaDownloader.exe"
-#define SrcDir "..\dist\MediaDownloader"
+#define SrcDir "..\dist_new\MediaDownloader"
+; 必须指向 dist_new（构建产物）：原先是 ..\dist\MediaDownloader（本地在跑的绿色版），
+; 两者脱节会打出「版本号是新的、文件是旧的」的假包 —— 2026-11-03 实测踩到，务必别改回去。
 
 [Setup]
 AppId={{8F3C2A47-5D61-4B9E-9C2F-7A1D4E6B8C05}

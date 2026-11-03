@@ -93,7 +93,7 @@ echo ============================================================
 echo.
 echo 说明：
 echo  - 安装包不会自动安装到本机，请在目标电脑上运行它。
-echo  - 确认没问题后，把 dist_new\MediaDownloader 覆盖到 dist\MediaDownloader
-echo    （脚本不自动覆盖，避免占用中的文件出问题）。
+echo  - 安装包的源目录就是 dist_new\MediaDownloader（本次刚构建的），
+echo    dist\MediaDownloader 是你本地在跑的绿色版，脚本不会动它。
 echo.
 pause
