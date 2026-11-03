@@ -1,89 +1,99 @@
 @echo off
-chcp 65001 >nul
+setlocal enabledelayedexpansion
+rem ============================================================
+rem  MediaDownloader V3 Ò»¼ü¹¹½¨£¨³ÌĞòÄ¿Â¼ + °²×°°ü£©
+rem
+rem  ±¾ÎÄ¼ş±ØĞë±£´æÎª GBK(ANSI) ±àÂë + CRLF »»ĞĞ ¡ª¡ª Óë¡¸´ò¿ª¹¤¾ß.bat¡¹Ò»ÖÂ¡£
+rem  ×¢Òâ£º´æ³É UTF-8 »ò LF »á³öÁ½ÖÖ²»Í¬¹ÊÕÏ£¨2026-11-03 Êµ²â£©£º
+rem     UTF-8 + LF   -> cmd ½âÎö´íĞĞ£¬exit 255 ÇÒÒ»ĞĞÊä³ö¶¼Ã»ÓĞ£¨Ë«»÷Ïñ"Ò»ÉÁ¶ø¹ı"£©
+rem     UTF-8 + CRLF -> ÄÜÅÜ£¬µ«ÖĞÎÄ¿ÉÄÜÂÒÂë
+rem ============================================================
 cd /d "%~dp0"
 echo ============================================================
-echo   MediaDownloader V3.0  ä¸€é”®æ„å»ºï¼ˆç¨‹åºç›®å½• + å®‰è£…åŒ…ï¼‰
+echo   MediaDownloader V3.0  Ò»¼ü¹¹½¨£¨³ÌĞòÄ¿Â¼ + °²×°°ü£©
 echo ============================================================
 echo.
 
-set PY=%~dp0.venv-build\Scripts\python.exe
-set ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe
-set BUILD_OUT=D:\_md_installer_build
+set "PY=%~dp0.venv-build\Scripts\python.exe"
+set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+set "BUILD_OUT=D:\_md_installer_build"
 
-if not exist "%PY%" (
-  echo [X] æ‰¾ä¸åˆ°æ„å»ºç”¨ Pythonï¼š%PY%
+rem ------------------------------------------------------------
+rem  ×¢Òâ£ºÏÂÃæÕâĞ© if ¿éÀï±ØĞëÓÃ !VAR! ¶ø²»ÊÇ %VAR%¡£
+rem  Ô­Òò£º%ISCC% µÄÖµº¬ "(x86)"£¬ÓÃ %ISCC% »áÔÚ**½âÎö½×¶Î**¾Í°Ñ¿éÀïµÄ
+rem  ÓÒÀ¨ºÅµ±³É¿éµÄ½áÎ²£¬ÓÚÊÇ±¨ "\Inno was unexpected at this time"£¬
+rem  ½Å±¾Ö±½ÓÀÃÔÚµÚ 19 ĞĞ ¡ª¡ª ÕâÊÇÔ­°æÒ»Ö±ÅÜ²»ÆğÀ´µÄÔ­ÒòÖ®Ò»¡£
+rem ------------------------------------------------------------
+if not exist "!PY!" (
+  echo [X] ÕÒ²»µ½¹¹½¨ÓÃ Python
+  echo     Ô¤ÆÚ£º!PY!
   pause & exit /b 1
 )
-if not exist "%ISCC%" (
-  echo [X] æ‰¾ä¸åˆ° Inno Setup ç¼–è¯‘å™¨ï¼š%ISCC%
-  echo     è¯·å®‰è£… Inno Setup 6 åé‡è¯•
+if not exist "!ISCC!" (
+  echo [X] ÕÒ²»µ½ Inno Setup ±àÒëÆ÷
+  echo     Ô¤ÆÚ£º!ISCC!
+  echo     Çë°²×° Inno Setup 6 ºóÖØÊÔ£ºhttps://jrsoftware.org/isdl.php
   pause & exit /b 1
 )
 
-echo [1/5] æ¸…ç†æ—§çš„æ„å»ºè¾“å‡º...
+echo [1/5] ÇåÀí¾ÉµÄ¹¹½¨Êä³ö...
 if exist dist_new rmdir /S /Q dist_new
-if exist "%BUILD_OUT%" rmdir /S /Q "%BUILD_OUT%"
-mkdir "%BUILD_OUT%" 2>nul
+if exist "!BUILD_OUT!" rmdir /S /Q "!BUILD_OUT!"
+mkdir "!BUILD_OUT!" 2>nul
 
-echo [2/5] PyInstaller æ‰“åŒ…ï¼ˆçº¦ 3-5 åˆ†é’Ÿï¼‰...
-"%PY%" -m PyInstaller --noconfirm --distpath dist_new MediaDownloader.spec
+echo [2/5] PyInstaller ´ò°ü£¨Ô¼ 3-5 ·ÖÖÓ£©...
+"!PY!" -m PyInstaller --noconfirm --distpath dist_new MediaDownloader.spec
 if not exist "dist_new\MediaDownloader\MediaDownloader.exe" (
-  echo [X] æ‰“åŒ…å¤±è´¥ï¼Œè§ä¸Šæ–¹é”™è¯¯
+  echo [X] ´ò°üÊ§°Ü£¬¼ûÉÏ·½´íÎó
   pause & exit /b 1
 )
 
 echo.
-echo [3/5] è¡¥é½ C++ è¿è¡Œåº“ï¼ˆç›®æ ‡ç”µè„‘ç¼º msvcp140 ä¼šå¯åŠ¨å¤±è´¥ï¼‰...
+echo [3/5] ²¹Æë C++ ÔËĞĞ¿â£¨Ä¿±êµçÄÔÈ± msvcp140 »áÆô¶¯Ê§°Ü£©...
 for %%D in (msvcp140.dll msvcp140_1.dll msvcp140_2.dll concrt140.dll) do (
-  if exist "%SystemRoot%\System32\%%D" (
-    copy /Y "%SystemRoot%\System32\%%D" "dist_new\MediaDownloader\_internal\%%D" >nul
-    echo     å·²è¡¥ %%D
+  if exist "!SystemRoot!\System32\%%D" (
+    copy /Y "!SystemRoot!\System32\%%D" "dist_new\MediaDownloader\_internal\%%D" >nul
+    echo     ÒÑ²¹ %%D
   ) else (
-    echo     [è·³è¿‡] æœ¬æœºæ²¡æœ‰ %%D
+    echo     [Ìø¹ı] ±¾»úÃ»ÓĞ %%D
   )
 )
 
 echo.
-echo [4/5] ç”Ÿæˆå®‰è£…åŒ…ï¼ˆçº¦ 3-20 åˆ†é’Ÿï¼‰...
-rem è¾“å‡ºç›®å½•åˆ»æ„æ”¾åœ¨é¡¹ç›®å¤–ï¼šåœ¨é¡¹ç›®å†…ç¼–è¯‘æ—¶ï¼Œæ€æ¯’è½¯ä»¶ä¼šé”ä½ Setup.exeï¼Œ
-rem æŠ¥ "Resource update error: EndUpdateResource failed (64)" ç›´æ¥ä¸­æ–­ï¼ˆå®æµ‹ï¼‰ã€‚
-"%ISCC%" installer\MediaDownloader3.iss
+echo [4/5] Éú³É°²×°°ü£¨Ô¼ 3-20 ·ÖÖÓ£©...
+rem Êä³öÄ¿Â¼¿ÌÒâ·ÅÔÚÏîÄ¿Íâ£ºÔÚÏîÄ¿ÄÚ±àÒëÊ±£¬É±¶¾Èí¼ş»áËø×¡ Setup.exe£¬
+rem ±¨ "Resource update error: EndUpdateResource failed (64)" Ö±½ÓÖĞ¶Ï£¨Êµ²â£©¡£
+"!ISCC!" installer\MediaDownloader3.iss
 if errorlevel 1 (
-  echo [X] å®‰è£…åŒ…ç¼–è¯‘å¤±è´¥
+  echo [X] °²×°°ü±àÒëÊ§°Ü
   pause & exit /b 1
 )
 
 echo.
-echo [5/5] å¤åˆ¶å®‰è£…åŒ…åˆ° installer_out...
+echo [5/5] ¸´ÖÆ°²×°°üµ½ installer_out...
 if not exist installer_out mkdir installer_out
-rem ä¸å†å†™æ­»åŒ…åï¼šä»¥å‰è¿™é‡Œå†™çš„æ˜¯ MediaDownloader_V3.0_Setup.exeï¼Œ
-rem è€Œ iss å®é™…æŒ‰ç‰ˆæœ¬å·å‡º MediaDownloader_V3.0.2_Setup.exe â†’ æ¯æ¬¡å®šç‰ˆéƒ½å¤åˆ¶å¤±è´¥ã€‚
-rem ç°åœ¨æŒ‰ã€Œæœ€æ–°ç”Ÿæˆçš„é‚£ä¸ªã€å¤åˆ¶ï¼Œç‰ˆæœ¬å·æ”¹äº†ä¹Ÿä¸ç”¨åŠ¨è¿™é‡Œã€‚
-set "SETUP="
-for /f "delims=" %%F in ('dir /b /o-d "%BUILD_OUT%\MediaDownloader_V*_Setup.exe" 2^>nul') do (
-  if not defined SETUP set "SETUP=%BUILD_OUT%\%%F"
-)
-if not defined SETUP (
-  echo [X] %BUILD_OUT% ä¸‹æ²¡æ‰¾åˆ° MediaDownloader_V*_Setup.exe
+rem ²»Ğ´ËÀ°üÃû£ºiss °´°æ±¾ºÅ³ö MediaDownloader_V3.0.x_Setup.exe£¬¸ÄÁË°æ±¾ºÅÕâÀï²»ÓÃ¶¯
+if not exist "!BUILD_OUT!\MediaDownloader_V*_Setup.exe" (
+  echo [X] ÔÚ !BUILD_OUT! ÏÂÃ»ÕÒµ½ MediaDownloader_V*_Setup.exe
   pause & exit /b 1
 )
-copy /Y "%SETUP%" installer_out\ >nul
+copy /Y "!BUILD_OUT!\MediaDownloader_V*_Setup.exe" installer_out\ >nul
 if errorlevel 1 (
-  echo [X] å¤åˆ¶å¤±è´¥ï¼Œå®‰è£…åŒ…ä»åœ¨ %BUILD_OUT%
+  echo [X] ¸´ÖÆÊ§°Ü£¬°²×°°üÈÔÔÚ !BUILD_OUT!
   pause & exit /b 1
 )
-for %%F in ("%SETUP%") do set "SETUPNAME=%%~nxF"
 
 echo.
 echo ============================================================
-echo   å®Œæˆ
-echo   å®‰è£…åŒ…ï¼š installer_out\%SETUPNAME%
-echo   ç»¿è‰²ç‰ˆï¼š dist_new\MediaDownloader\MediaDownloader.exe
+echo   Íê³É
+echo   °²×°°ü£º installer_out\
+dir /b installer_out\MediaDownloader_V*_Setup.exe
+echo   ÂÌÉ«°æ£º dist_new\MediaDownloader\MediaDownloader.exe
 echo ============================================================
 echo.
-echo è¯´æ˜ï¼š
-echo  - å®‰è£…åŒ…ä¸ä¼šè‡ªåŠ¨å®‰è£…åˆ°æœ¬æœºï¼Œè¯·åœ¨ç›®æ ‡ç”µè„‘ä¸Šè¿è¡Œå®ƒã€‚
-echo  - ç¡®è®¤æ²¡é—®é¢˜åï¼ŒæŠŠ dist_new\MediaDownloader è¦†ç›–åˆ° dist\MediaDownloader
-echo    ï¼ˆè„šæœ¬ä¸è‡ªåŠ¨è¦†ç›–ï¼Œé¿å…å ç”¨ä¸­çš„æ–‡ä»¶å‡ºé—®é¢˜ï¼‰ã€‚
+echo ËµÃ÷£º
+echo  - °²×°°ü²»»á×Ô¶¯°²×°µ½±¾»ú£¬ÇëÔÚÄ¿±êµçÄÔÉÏÔËĞĞËü¡£
+echo  - È·ÈÏÃ»ÎÊÌâºó£¬°Ñ dist_new\MediaDownloader ¸²¸Çµ½ dist\MediaDownloader
+echo    £¨½Å±¾²»×Ô¶¯¸²¸Ç£¬±ÜÃâÕ¼ÓÃÖĞµÄÎÄ¼ş³öÎÊÌâ£©¡£
 echo.
 pause
