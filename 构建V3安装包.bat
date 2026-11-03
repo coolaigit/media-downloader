@@ -56,16 +56,28 @@ if errorlevel 1 (
 echo.
 echo [5/5] 复制安装包到 installer_out...
 if not exist installer_out mkdir installer_out
-copy /Y "%BUILD_OUT%\MediaDownloader_V3.0_Setup.exe" installer_out\ >nul
+rem 不再写死包名：以前这里写的是 MediaDownloader_V3.0_Setup.exe，
+rem 而 iss 实际按版本号出 MediaDownloader_V3.0.2_Setup.exe → 每次定版都复制失败。
+rem 现在按「最新生成的那个」复制，版本号改了也不用动这里。
+set "SETUP="
+for /f "delims=" %%F in ('dir /b /o-d "%BUILD_OUT%\MediaDownloader_V*_Setup.exe" 2^>nul') do (
+  if not defined SETUP set "SETUP=%BUILD_OUT%\%%F"
+)
+if not defined SETUP (
+  echo [X] %BUILD_OUT% 下没找到 MediaDownloader_V*_Setup.exe
+  pause & exit /b 1
+)
+copy /Y "%SETUP%" installer_out\ >nul
 if errorlevel 1 (
   echo [X] 复制失败，安装包仍在 %BUILD_OUT%
   pause & exit /b 1
 )
+for %%F in ("%SETUP%") do set "SETUPNAME=%%~nxF"
 
 echo.
 echo ============================================================
 echo   完成
-echo   安装包： installer_out\MediaDownloader_V3.0_Setup.exe
+echo   安装包： installer_out\%SETUPNAME%
 echo   绿色版： dist_new\MediaDownloader\MediaDownloader.exe
 echo ============================================================
 echo.
