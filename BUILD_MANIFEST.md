@@ -2,6 +2,34 @@
 
 > 每次正式发布前更新本文件。构建必须用隔离 venv，禁止裸 python/pip。
 
+## V3.0.3（2026-11-03）
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `app/config.py` `APP_VERSION = "3.0.3"` |
+| 源码分支 | `v3.0-work` @ 217ceec（定版前最后一个是 `a4ffc92`） |
+| 构建方式 | `.venv-build` 隔离 venv + PyInstaller（MediaDownloader.spec）+ Inno Setup 6 |
+| 安装包 | `MediaDownloader_V3.0.3_Setup.exe`（本版未预构建，按需跑 `构建V3安装包.bat`） |
+
+### V3.0.2 → V3.0.3 变更清单
+
+| 提交 | 内容 |
+|---|---|
+| `2e17b0d` | **白屏根因修复**。V3.0.2 那轮「内核自检」判据 `evaluate_js('1+1') == 2` 是无效的：IE11 下 `1+1` 正常返回 2（只用到 eval + JSON.stringify），自检恒真 → 降级到 IE 依然白屏。改用 **UA 指纹 + ES6 语法 + 前端就绪标记 `__MD_APP_READY__`** 三重判据；所有 evaluate_js 探测加超时（pywebview 内部 Semaphore 无超时，内核半死会永久阻塞自检线程）；开窗前按「文件系统 + 注册表」快速判死，没装 WebView2 就不给白窗；转浏览器时弹窗写明原因/URL/下载地址；`index.html` 加纯 HTML/CSS 内核提示块（JS 跑不起来时 1.6s 后浮现）；frozen 版自动生成「以浏览器模式启动.cmd」；新增 `diag_kernel.py` |
+| `86f6d64` | 修掉两个长期红灯的陈旧用例（`test_desktop_close` 托盘异常预期写反、`test_data_migration` 硬编码 3.0.0），回归清单纳入新用例 |
+| `a4ffc92` | 定版 3.0.3；`version_info.txt` 从 3.0.0 跟进到 3.0.3（此前 exe 文件属性与安装包版本对不上） |
+| `217ceec` | 修 `构建V3安装包.bat` 第 5 步写死旧包名导致每次定版都「复制失败」 |
+
+### 验证记录（本机）
+
+- `gui='mshtml'`：旧判据 `1+1==2` 通过（证明旧自检无效）；新判据 `('legacy','Trident/7.0; rv:11.0')`；`diag_kernel.py --gui mshtml` 退出码 2。
+- `gui='edgechromium'` 连真实页面：`('ok','Edg/156.0.0.0')` + 前端就绪 True。
+- 真实 `launcher.py` 启动：`desktop_webview.log` 出现 `Using custom WebView2 runtime`，`desktop_shell.log` 出现「内核自检通过」「前端自检通过」，`msedgewebview2.exe` 子进程存在、`EBWebView` 生成。
+- 前端未就绪场景（指向 JSON 接口）：19s 内按 15s 期限判失败，未卡死。
+- Playwright 双向验证 `#kernelWarn`：JS 开启时节点被移除；JS 关闭时 `visibility=visible / opacity=1`（截图人工确认）。
+- 回归：`run_regress.py` 28/29 PASS，唯一失败的 `test_data_migration` 已由 `86f6d64` 修好并复跑通过。
+- **仍未覆盖**：故障机（注册表被清理的那台 Win10）无法远程复现，需在真机装 3.0.3 跑 `diag_kernel.py` 确认。
+
 ## V3.0.2（2026-11-01）
 
 | 项 | 值 |

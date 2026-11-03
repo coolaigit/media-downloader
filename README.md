@@ -395,3 +395,45 @@ python probe_site.py "https://目标站点/列表页"
    才会出现的内容，静态渲染拿不到。
 8. **浏览器渲染较慢**：约 10~35 秒/页。这是为了拿到 JS 页面真实内容的代价；
    静态站仍走 HTTP（约 1 秒/页），不会白等。
+
+---
+
+## 十一、从源码运行（开发者）
+
+仓库里**只有源码**，不含下列可再生成的二进制（它们合计 5 GB+，由 `.gitignore` 排除）：
+
+| 目录 | 内容 | 怎么补 |
+|---|---|---|
+| `browsers/` | 内置 Playwright Chromium（约 430 MB） | `set PLAYWRIGHT_BROWSERS_PATH=%CD%\browsers` 然后 `python -m playwright install chromium` |
+| `bin/` | `ffmpeg.exe` 等 | 跑 `python setup_ffmpeg.py`，或放自己的 ffmpeg 进去 |
+| `downloads/` `data/` `_*` | 下载产物、台账、一次性诊断产物 | 运行时自动生成 |
+
+环境要求：**Windows 10/11 x64 + Python 3.13/3.14**。桌面窗口依赖 **Microsoft Edge WebView2 运行时**
+（Win10/11 一般已自带）。
+
+```bat
+python -m pip install -r requirements.lock.txt
+python launcher.py              :: 桌面窗口
+python launcher.py --browser    :: 强制浏览器模式
+python diag_kernel.py           :: 桌面窗口起不来先跑这个（内核判定依据全摊开）
+```
+
+打安装包：双击 `构建V3安装包.bat`（需要 Inno Setup 6 + `.venv-build` 环境）。
+
+跑回归：`python run_regress.py`（约 6 分钟，结果看 `_regress.txt`）。
+
+## 十二、许可证
+
+项目自身代码采用 **MIT License**，见 [LICENSE](LICENSE)。
+
+随包/可选依赖的第三方组件各有自己的许可证（FFmpeg 为 LGPL/GPL、yt-dlp 为 Unlicense、
+Playwright 为 Apache-2.0 等），详见 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)
+与 `licenses/` 目录。**分发含 FFmpeg 的二进制包时请自行复核对应许可证义务。**
+
+## 十三、免责与使用边界
+
+本工具只做「把公开网页上的媒体下载到本机」，不绕过任何登录、付费墙或人机验证。
+
+使用者需自行确保：抓取与下载行为符合目标网站的服务条款与所在地区法律，
+并尊重内容版权。作者不对使用者的具体使用行为负责。
+
