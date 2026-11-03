@@ -75,3 +75,33 @@ dist_new/
 
 # 安装包产物（241MB，不进仓库）
 installer_out/
+
+# ---- 开发过程产物（2026-11-03 开源瘦身）----
+# 一次性探测 / 验证 / 复现脚本：本地开发用，不进公开仓库
+probe_*.py
+!probe_site.py
+verify_*.py
+release_qa_*.py
+repro_*.py
+trace_*.py
+refactor_*.py
+fix_*.py
+check_*.py
+!check_deps.py
+# 测试：只留与产品行为直接相关的几个，其余是开发期一次性用例
+test_*.py
+!test_kernel_probe.py
+!test_desktop_close.py
+!test_port_identity.py
+!test_data_migration.py
+!test_frontend.py
+!test_onboarding_version.py
+# 内部过程文档
+*_ACCEPTANCE.md
+*排查报告*.md
+INCIDENT_*.md
+CLEAN_MACHINE_*.md
+RELEASE_QA_*.md
+BASELINE_*.md
+# 干净虚机验收包（写死本机路径）
+sb/

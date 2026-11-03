@@ -420,7 +420,11 @@ python diag_kernel.py           :: 桌面窗口起不来先跑这个（内核判
 
 打安装包：双击 `构建V3安装包.bat`（需要 Inno Setup 6 + `.venv-build` 环境）。
 
-跑回归：`python run_regress.py`（约 6 分钟，结果看 `_regress.txt`）。
+跑离线用例：`python -m pytest test_kernel_probe.py test_desktop_close.py -q`
+（仓库只保留与产品行为直接相关的少量用例；开发期用过的一次性探测/验证脚本一律不入库。）
+
+> 说明：`browsers/` `bin/` `dist*/` 及根目录大量 `probe_*` `verify_*` `test_*` 等
+> 开发期临时脚本都在 `.gitignore` 里，属「本地开发产物」，不进公开仓库。
 
 ## 十二、许可证
 
