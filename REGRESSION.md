@@ -754,3 +754,34 @@ _venv/Scripts/python.exe _e2e_vip_final.py http://127.0.0.1:<port> \
   交互会话结束），07:35:57 用 `--no-browser` 重启，仍是同一个 exe（SHA 未变），
   `/api/health` 正常。复测直接开 `http://127.0.0.1:18848`；要窗口界面就手动双击 exe。
 - **仍未由 Sam 用户验收**：知乎视频、国外平台（不计 PASS）。
+
+### 2026-11-09 · V3.0.4 发布到 GitHub（含 Release 文件）
+
+- **仓库**：`coolaigit/media-downloader` 的 `main`。本地 68 个提交与远端 main
+  没有共同祖先（2026-11-03 改写历史后重新导入），所以**没有强推**：
+  `publish_release_v304.py` 用 Git Data API 在远端当前树上叠一个提交，
+  远端历史完整保留。发布提交 `e8b4646162af65496f3b1a4edaf1f037fef82758`，
+  共写入 72 个文件（26 改 / 46 新增）。
+- **Tag / Release**：`v3.0.4` → `e8b46461…`；
+  https://github.com/coolaigit/media-downloader/releases/tag/v3.0.4
+  （非 draft、非 prerelease）。
+- **Release 文件**：`MediaDownloader_TEST.exe`，89,083,082 B，
+  SHA256 `e01297988219b52d650b0e10bbbaa17deaaba9e86b378d0fe9e2f9cd8528243c`。
+  从 Release 下载链接重新下载 89,083,082 B 复算 SHA256，与本地产物 **MATCH**
+  （`state=uploaded`，下载直链同页可见）。
+- **Release 正文**：`RELEASE_NOTES_V3.0.4.md`，含 F-01~F-28 摘要、两版全量回归、
+  已知限制，以及 **deepseek harness 会话
+  `session-c4d7b847-0d3a-4922-b659-cde96a34b050` 的更新记录说明**：
+  会话正文不在本仓库，按可查证提交整理出 `2cf97ef` → `05f71d9` → `fe8eaa8`
+  （一键配 Google 官方搜图 API）→ 同日 `531acaf` 因官方对新客户关闭而整体回退
+  → 保留 render/searx 兜底这条完整链，ID 只作溯源，不推测会话内容。
+- **同步范围**：本地索引里的文本文件；有意保留远端的 `.gitignore`、
+  `.gitattributes`（开源瘦身规则）与 `licenses/`（第三方许可证原文），未覆盖。
+- **顺带补了一个入库漏洞**：`test_preview_guard_offline.py`（39 项）与
+  `_e2e_vip_final.py` 一直被 `test_*.py` / `_*` 忽略规则吞掉，`902d6a5` 与
+  `aae5124` 两次提交实际都没把它们带进版本库 —— 台账写着回归入口、仓库里却没有文件。
+  本次放行并随发布一起入库。
+- **发布后复核**：tag 与发布提交一致；Release body 含会话 ID、产物 SHA256、
+  `fe8eaa8` / `531acaf` / F-28；抽查 7 个远端文件的 blob SHA 与本地索引逐一相同
+  （`.gitignore` 为有意保留的远端版）。
+- **仍未由 Sam 用户验收**：知乎视频、国外平台（不计 PASS）。
