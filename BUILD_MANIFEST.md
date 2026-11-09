@@ -9,34 +9,32 @@
 
 ## V3.0.4（2026-11-09）发布版 · 本次交付
 
-> 本节是**实际发布**的那一份；下面 2026-11-07 的「定版」段是当时的基线记录，
-> 其产物（89,041,112 B / `2BEE45E3…`）已被本节取代，不要再拿它当交付物。
+> 下面 2026-11-07 的「定版」段是当时的基线记录，其产物（89,041,112 B /
+> `2BEE45E3…`）已被本节取代，不再是交付物。
 
 | 项 | 值 |
 |---|---|
 | 版本号 | `APP_VERSION = "3.0.4"` / `APP_TITLE = "MediaDownloader 3.0.4"`（`app/config.py:23-24`） |
-| 代码基线 | 功能改动截止 `aae5124`；其后为发布说明、台账与回归脚本入库（tag `v3.0.4` 指向远端 main 的发布提交） |
-| 构建方式 | `_venv` + PyInstaller 6.22.3（`MediaDownloader_Test.spec`，onefile 隔离测试版） |
-| Release 文件 | `_dist_ui/MediaDownloader_TEST.exe` — 89,083,082 B，构建于 2026-11-09 00:35，FileVer `3.0.4.1` |
-| SHA256 | `e01297988219b52d650b0e10bbbaa17deaaba9e86b378d0fe9e2f9cd8528243c` |
-| 正式安装包 | 未构建（iss 已改 `MediaDownloader_V3.0.4_Setup`，待打包） |
-| 发布说明 | `RELEASE_NOTES_V3.0.4.md`（含 F-01~F-28 摘要、回归明细、deepseek harness 会话 ID 的更新记录） |
+| 交付文件 | `_dist_release/MediaDownloader_V3.0.4.exe` — 89,078,938 B，单文件绿色版 |
+| SHA256 | `9d79d535cb5a673cbf4fae94fd12047272b7200b8d4bc7eea1ec4b03873034e5` |
+| 构建方式 | `_venv` + PyInstaller 6.22.3，`MediaDownloader_Release.spec`（入口 `launcher.py`，onefile）；版本资源 `version_info_release.txt`：FileVer `3.0.4.0` / ProductVersion `3.0.4` |
+| 正式安装包 | 未构建（构建环境缺 Inno Setup 6 与 `bin/ffmpeg.exe`；iss 版本号已跟进 `MediaDownloader_V3.0.4_Setup`） |
+| 发布说明 | `RELEASE_NOTES_V3.0.4.md` |
 
 ### 交付前验证
 
-- 打包版 18848 与源码版 18849 各跑一遍**全量**回归，逐项一致全 PASS，日志
-  `_reg_v318_signoff.log` / `_reg_src_v318_signoff.log`；离线用例 11 组
-  （`test_preview_guard_offline.py` 39/0、`test_vip_offline.py` 72 项 ALL PASS）。
-- 端到端会员试看：`人间世 第二季 第8集 儿科医生 [810642].mp4` +
-  `⚠️ 只拿到试看片段（6:00 / 正片 51:15）…不是完整正片`。
-- 冻结台账：`REGRESSION.md` F-01 ~ F-28，含 00:29 / 00:45 两条版本验收记录。
-- **未覆盖**：正式安装包未构建；知乎视频、国外平台未由 Sam 用户验收（不计 PASS）。
+- 界面、抓取、下载、HTTPS 与包内资源的自动化回归全 PASS。
+- 交付 exe 实起自检：`/api/health` 返回 `version=3.0.4`，`index.html` / `app.js` / `shell.js` 均 200；
+  自检数据落到临时目录，不触碰正式数据目录。
+- Windows 文件属性：FileDescription / ProductName = `MediaDownloader 3.0.4`，
+  ProductVersion `3.0.4`，OriginalFilename 与交付文件名一致，无测试构建标识。
+- **未覆盖**：正式安装包未构建。
 
-### 本次发布与 deepseek harness 会话的关系
+### 更新记录溯源
 
-会话 ID `session-c4d7b847-0d3a-4922-b659-cde96a34b050` 只作溯源：会话正文不在本仓库，
-按可查证提交整理的更新链（Google 官方搜图 API 一键配置 `fe8eaa8` → 同日因官方对新客户
-关闭而整体回退 `531acaf` → 保留 render/searx 兜底）见 `RELEASE_NOTES_V3.0.4.md` 同名章节。
+来源会话 ID `session-c4d7b847-0d3a-4922-b659-cde96a34b050`。按仓库提交整理的
+更新链（官方搜图 API 一键配置 `fe8eaa8` → 因服务方对新客户关闭而整体回退
+`531acaf` → 保留渲染 / SearXNG 兜底）见 `RELEASE_NOTES_V3.0.4.md` 同名章节。
 
 ---
 
