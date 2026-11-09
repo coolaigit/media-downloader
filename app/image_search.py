@@ -333,12 +333,19 @@ def _status_text(err: str | None, items: list[dict], rep: dict) -> str:
     if err:
         return err
     n = len(items)
+    # 同一引擎有多条取流通道（Google：api / render / searx:实例），
+    # 把实际生效的那条标出来 —— 用户排查「为什么这条能用那条不能」全靠它。
+    detail = ""
+    if items:
+        d = str(items[0].get("engine_detail") or "")
+        if d:
+            detail = f"·{d}"
     if rep.get("blocked"):
         return f"结果与关键词无关，已拦截 {rep['blocked']} 条"
     hits = rep.get("hits")
     if rep.get("checked") and hits is not None and hits < n:
-        return f"ok:{n}（其中 {hits} 条与关键词相关）"
-    return f"ok:{n}"
+        return f"ok:{n}{detail}（其中 {hits} 条与关键词相关）"
+    return f"ok:{n}{detail}"
 
 
 def search_images(

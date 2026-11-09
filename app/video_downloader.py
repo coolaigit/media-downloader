@@ -10,11 +10,12 @@
 from __future__ import annotations
 
 import re
+import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import yt_dlp
 
@@ -57,6 +58,12 @@ def clear_cancel_event(task_id: str) -> None:
         _CANCEL_EVENTS.pop(task_id, None)
 
 
+def get_cancel_event(task_id: str):
+    """给换源下载用：拿任务已注册的取消标记（没有就返回 None）。"""
+    with _CANCEL_LOCK:
+        return _CANCEL_EVENTS.get(task_id)
+
+
 def _base_ydl_opts(
     task_id: str | None = None,
     quiet: bool = True,
@@ -64,6 +71,7 @@ def _base_ydl_opts(
     cookies_from_browser: str | None = None,
     custom_headers: bool = False,
     include_playlist: bool = False,
+    proxy: str = "",
 ) -> dict:
     """构造 yt-dlp 公共选项。
 
@@ -92,6 +100,9 @@ def _base_ydl_opts(
     }
     if custom_headers:
         opts["http_headers"] = dict(HEADERS)
+    # 海外源（YouTube 等）单独走代理：国内资源站直连，互不影响。
+    if proxy:
+        opts["proxy"] = proxy
     if ffmpeg:
         opts["ffmpeg_location"] = str(Path(ffmpeg).parent)
 
@@ -268,6 +279,61 @@ def _is_media_forbidden(low_msg: str) -> bool:
     return any(k in m for k in markers)
 
 
+# 会把语言放进路径第一段的站点；只列确认过的，别一上来就通配。
+_LANG_PATH_HOSTS = ("bilibili.com",)
+_LANG_PATH_CODES = frozenset({
+    "zh-hans", "zh-hant", "zh-cn", "zh-tw", "zh-hk", "zh-sg",
+    "en", "en-us", "en-gb", "ja", "jp", "ko", "kr",
+})
+
+
+def _strip_lang_path(url: str) -> str:
+    """剥掉站点塞在路径第一段的语言前缀（B 站 /zh-Hans/bangumi/play/ep810642）。
+
+    为什么必须剥：yt-dlp 的 bilibili extractor 正则只认紧贴域名的
+    `/bangumi/play/ep<id>`，带语言段时直接判 `unsupported url`，用户看到的是
+    「该链接不是受支持的视频页面」（2026-11-09 实测：同一条 ep810642，
+    带 `/zh-Hans/` 失败，去掉立刻下到 6 分钟片并给出试看提示）。
+
+    只对白名单站点、且第一段确实在白名单语言码里才剥 —— 不做通用「去掉首段」，
+    那样会把 `/tv/123` 这类真路径改坏。
+    """
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return url
+    host = (p.netloc or "").lower()
+    if not any(host == h or host.endswith("." + h) for h in _LANG_PATH_HOSTS):
+        return url
+    segs = [s for s in (p.path or "").split("/") if s]
+    if len(segs) < 2 or segs[0].lower() not in _LANG_PATH_CODES:
+        return url
+    path = "/" + "/".join(segs[1:])
+    return urlunparse((p.scheme, p.netloc, path, p.params, p.query, p.fragment))
+
+
+def _normalize_media_url(url: str) -> str:
+    """把「同一内容的不同地址形态」换成 yt-dlp 认的那一种。
+
+    2026-11-08 实测（用户报「知乎抓取视频异常」）：
+      https://www.zhihu.com/zvideo/<id>    yt-dlp 有专门 extractor，直接能解析
+      https://www.zhihu.com/video/<id>     302 到 video.zhihu.com/video/<id>?$args，
+                                          只回 1.3KB 的 JS 壳（<title>知乎视频</title>），
+                                          纯 HTTP 拿不到任何内容 —— 走渲染也是空壳
+    两者 id 相同、指向同一条视频（实测 /zvideo/1342930761977176064 标题就是那条）。
+    所以先把 /video/ 形态换成 /zvideo/ 再解析。
+
+    只在识别出这个明确形态时才改写，其它地址原样返回；
+    任何站点都不会因为这条规则被改掉地址。
+    """
+    if not url:
+        return url
+    m = re.match(r"^https?://(?:www\.|video\.)?zhihu\.com/video/(\d+)", url.strip())
+    if m:
+        return f"https://www.zhihu.com/zvideo/{m.group(1)}"
+    return _strip_lang_path(url.strip())
+
+
 def probe_video(
     url: str,
     task_id: str | None = None,
@@ -281,6 +347,8 @@ def probe_video(
     对瞬时网络错误（SSL 中断、超时、连接重置、5xx）自动重试；
     权限类错误（登录、私密、地域限制）不重试，直接返回友好提示。
     """
+    _shown_url = url
+    url = _normalize_media_url(url)
     last_err = ""
     for attempt in range(1, max_attempts + 1):
         opts = _base_ydl_opts(
@@ -530,17 +598,18 @@ def _douyin_real_url_via_bsk(url: str, timeout: int = 45) -> str:
 _dy_profile_lock = threading.Lock()
 
 
-def _douyin_real_url_profiled(url: str, timeout: int = 50) -> str:
-    """内置 Chromium（headless）+ 抖音登录态解析直链，全程无窗口。
+def _douyin_snapshot(url: str, timeout: int = 50) -> dict:
+    """内置 Chromium（headless）+ 抖音登录态打开视频页，拿正片直链与元信息。
 
-    2026-10-25 实测矩阵（当天多轮验证，结论已更新）：
+    返回 {"ok", "direct_url", "title", "cover", "duration", "error"}。
+
+    2026-10-25 / 2026-11-07 实测矩阵：
     - headless + dy登录 → **能拿到正片直链**（zjcdn.com/video/tos/…，8~25s）。
-      前提是登录态健康：用户在 16:46 的可见窗口里过完一次验证后，
-      同一 profile 的 headless 渲染不再弹验证码、<video>.currentSrc 直接有值。
     - headless + 无登录 → <video> 是占位资源 douyinstatic.com/uuu_265.mp4
-    - yt-dlp + dy cookies → 403 Forbidden（extractor 被封）
-    曾经在这里弹「有头窗口兜底」—— 用户明确要求下载时不许弹窗（2026-10-25），
-    已删除。登录态过期时本函数空手而归，由调用方提示去「平台登录」页刷新。
+    - yt-dlp + dy cookies → `Fresh cookies (not necessarily logged in) are needed`
+      （detail 接口要 a_bogus 签名，extractor 里那段是 TODO）。所以**解析也必须走这里**，
+      不能只在下载时走渲染。
+    曾经在这里弹「有头窗口兜底」—— 用户明确要求下载时不许弹窗（2026-10-25），已删除。
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -550,10 +619,14 @@ def _douyin_real_url_profiled(url: str, timeout: int = 50) -> str:
         from .platform_login import profile_dir_for_url
         prof = profile_dir_for_url(url, ready_only=True)
         if not prof:
-            return ""
-    except Exception:  # noqa: BLE001
-        return ""
-    # 同一个 dy profile 同时只能被一个 Chromium 占用：并发下载时在这里串行化，
+            return {"ok": False, "direct_url": "", "title": "", "cover": "",
+                    "duration": 0,
+                    "error": "抖音登录态不可用：请到「平台登录」页重新登录抖音后再解析。"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "direct_url": "", "title": "", "cover": "",
+                "duration": 0, "error": f"{type(e).__name__}: {e}"}
+
+    # 同一个 dy profile 同时只能被一个 Chromium 占用：并发时在这里串行化，
     # 抢不到锁的请求等前一个关完再开（每次只占几秒到几十秒）。
     with _dy_profile_lock:
         try:
@@ -563,10 +636,44 @@ def _douyin_real_url_profiled(url: str, timeout: int = 50) -> str:
                         user_data_dir=str(prof), headless=True, locale="zh-CN",
                         user_agent=DEFAULT_UA, viewport={"width": 1150, "height": 880},
                         args=list(_LAUNCH_ARGS), **browser_runtime.launch_kwargs())
-                except Exception:  # noqa: BLE001 —— profile 打不开（比如被占用）
-                    return ""
+                except Exception as e:  # noqa: BLE001 —— profile 打不开（被占用等）
+                    return {"ok": False, "direct_url": "", "title": "", "cover": "",
+                            "duration": 0, "error": f"打开抖音登录态失败：{e}"}
                 try:
                     page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                    # 抖音现在用 MSE 播放：<video>.currentSrc 是
+                    # `blob:https://www.douyin.com/<uuid>`，拿它下载只会得到
+                    # 一个打不开的 blob。真实地址要从网络请求里捡。
+                    # （2026-11-07 实测：页面渲染正常、标题拿得到，currentSrc 是 blob。）
+                    media_urls: list[tuple[str, int]] = []   # (url, content-length)
+                    cover_urls: list[str] = []               # 抖音封面（douyinpic CDN）
+
+                    def _on_resp(resp):
+                        try:
+                            u = str(resp.url or "")
+                            low = u.lower()
+                            # 静态域的 uuu_265.mp4 是播放器 UI 占位，不是正片
+                            if "douyinstatic.com" in low or "/obj/douyin-pc-web/" in low:
+                                return
+                            ct = str((resp.headers or {}).get("content-type") or "").lower()
+                            # 封面：douyinpic CDN 的 tplv 裁切图，排掉 aweme-avatar（头像）
+                            if ("douyinpic.com" in low and "aweme-avatar" not in low
+                                    and "tplv" in low):
+                                if u not in cover_urls:
+                                    cover_urls.append(u)
+                                return
+                            if "douyinvod.com" not in low and not ct.startswith("video/"):
+                                return
+                            try:
+                                size = int((resp.headers or {}).get("content-length") or 0)
+                            except (TypeError, ValueError):
+                                size = 0
+                            if all(u != x for x, _ in media_urls):
+                                media_urls.append((u, size))
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                    page.on("response", _on_resp)
                     try:
                         page.goto(url, wait_until="domcontentloaded", timeout=25000)
                     except Exception:  # noqa: BLE001
@@ -580,8 +687,65 @@ def _douyin_real_url_profiled(url: str, timeout: int = 50) -> str:
                                 ".filter(s => s && s.indexOf('douyinstatic.com') < 0)")
                         except Exception:  # noqa: BLE001
                             srcs = []
-                        if srcs:
-                            return str(srcs[-1])
+                        real = [(u, sz) for u, sz in media_urls if u.startswith("http")]
+                        direct = ""
+                        if real:
+                            # 优先 .mp4 直链；m3u8 交给下载侧的分片合并。
+                            # 同一页抖音会先吐低码率预览再吐正片，**取体积最大的那条**，
+                            # 否则 235 秒的视频会下到 1.5 MB 的低清小样。
+                            mp4 = [t for t in real if ".mp4" in t[0].lower().split("?")[0]]
+                            direct = max(mp4 or real, key=lambda t: t[1])[0]
+                        elif srcs and not str(srcs[-1]).startswith("blob:"):
+                            direct = str(srcs[-1])
+                        if direct:
+                            meta = {}
+                            try:
+                                meta = page.evaluate(
+                                    # async：直链往往比元数据先就绪 —— <video> 挂上 src
+                                    # 时 duration 还是 NaN、poster 还是空（实测 API 返回
+                                    # duration=0 / thumbnail 空，而单独直调有值）。
+                                    # 最多等 2.5s 的 loadedmetadata，再读一次。
+                                    "async () => {"
+                                    "  const v = document.querySelector('video');"
+                                    "  if (v && v.readyState < 1) {"
+                                    "    await new Promise(r => {"
+                                    "      v.addEventListener('loadedmetadata', r, {once: true});"
+                                    "      setTimeout(r, 2500);"
+                                    "    });"
+                                    "  }"
+                                    "  const c = s => { const n = document.querySelector(s);"
+                                    "    return n ? (n.getAttribute('content') || '') : ''; };"
+                                    "  let cover = c('meta[property=\"og:image\"]') || '';"
+                                    "  if (!cover && v) cover = v.getAttribute('poster') || '';"
+                                    "  if (!cover) {"
+                                    # 抖音详情页的 og:image 经常是空的；封面实际来自
+                                    # douyinpic.com 的 <img>。必须排掉 aweme-avatar
+                                    # （那是作者头像，100x100），否则卡片上显示的是头像。
+                                    "    const imgs = Array.from(document.querySelectorAll('img'))"
+                                    "      .map(n => n.currentSrc || n.src || '')"
+                                    "      .filter(s => s && s.indexOf('douyinpic.com') >= 0"
+                                    "                     && s.indexOf('aweme-avatar') < 0);"
+                                    "    cover = imgs[0] || '';"
+                                    "  }"
+                                    "  return {"
+                                    "    title: c('meta[property=\"og:title\"]') || document.title || '',"
+                                    "    cover: cover,"
+                                    "    duration: (v && isFinite(v.duration)) ? Math.round(v.duration) : 0,"
+                                    "  }; }") or {}
+                            except Exception:  # noqa: BLE001
+                                meta = {}
+                            title = str(meta.get("title") or "").strip()
+                            # 封面兜底：DOM 里没渲染出来时，用网络层捡到的 CDN 封面图。
+                            cover = str(meta.get("cover") or "") or (cover_urls[0] if cover_urls else "")
+                            # 抖音的 og:title 形如「作品标题 - 抖音」，后缀没用还占宽度
+                            for suffix in (" - 抖音", "-抖音", "_抖音"):
+                                if title.endswith(suffix):
+                                    title = title[: -len(suffix)].strip()
+                            return {"ok": True, "direct_url": direct,
+                                    "title": title,
+                                    "cover": cover,
+                                    "duration": int(meta.get("duration") or 0),
+                                    "error": ""}
                         # 还没挂上地址：补一次播放（有的播放器要用户手势才加载）
                         try:
                             page.evaluate(
@@ -590,14 +754,46 @@ def _douyin_real_url_profiled(url: str, timeout: int = 50) -> str:
                         except Exception:  # noqa: BLE001
                             pass
                         time.sleep(2.5)
-                    return ""
+                    return {"ok": False, "direct_url": "", "title": "", "cover": "",
+                            "duration": 0,
+                            "error": "这个视频页没有吐出可下载的媒体地址；"
+                                     "可能是登录态过期或站点要求验证，请在「平台登录」"
+                                     "重新登录抖音后重试。"}
                 finally:
                     try:
                         ctx.close()
                     except Exception:  # noqa: BLE001
                         pass
-        except Exception:  # noqa: BLE001
-            return ""
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "direct_url": "", "title": "", "cover": "",
+                    "duration": 0, "error": f"{type(e).__name__}: {e}"}
+
+
+def _douyin_real_url_profiled(url: str, timeout: int = 50) -> str:
+    """只要正片直链（下载侧沿用这个签名）。"""
+    return str(_douyin_snapshot(url, timeout).get("direct_url") or "")
+
+
+def douyin_item_probe(url: str, timeout: int = 50) -> dict:
+    """抖音单条视频的「解析清晰度」入口：渲染拿直链，包成 probe 结果。
+
+    为什么不再让 yt-dlp 解析抖音（2026-11-07 用户报错）：
+      yt-dlp 的 DouyinIE 直接请求 /aweme/v1/web/aweme/detail/，该接口现在要
+      a_bogus 签名（页面 JS 生成）。拿到空响应时它抛
+      `Fresh cookies (not necessarily logged in) are needed` —— 与登录态无关，
+      换成新导出的 cookies 也一样。同一份登录态走渲染能拿到 zjcdn 直链。
+    """
+    snap = _douyin_snapshot(url, timeout)
+    if not snap.get("ok"):
+        return {"ok": False, "error": snap.get("error") or "抖音解析失败", "url": url}
+    item = {
+        "direct_url": snap.get("direct_url") or "",
+        "title": snap.get("title") or "",
+        "cover": snap.get("cover") or "",
+        "duration": snap.get("duration") or 0,
+        "uploader": "",
+    }
+    return {"ok": True, "item": item, "source": "profiled", "url": url}
     return ""
 
 
@@ -859,10 +1055,212 @@ _PROBE_SEG_JS = """async (u) => {
 }"""
 
 
+def _hls_seg_entry(u: str) -> tuple[tuple[str, str], int] | None:
+    """把分片 URL 归成 ((目录, 前缀), 序号)。只认 <prefix>_<数字>.txt/.ts。"""
+    m = re.match(r"^(https?://[^/]+(/.*/))([^/]*?)_(\d{1,4})\.(?:txt|ts)(?:\?|$)",
+                 u or "", re.I)
+    if not m:
+        return None
+    return (m.group(2), m.group(3)), int(m.group(4))
+
+
+def _parse_hls_master(text: str, base: str) -> list[dict]:
+    """解析 HLS master playlist 的变体列表（分辨率 / 带宽 / 子清单地址）。"""
+    out: list[dict] = []
+    height = bandwidth = 0
+    name = ""
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#EXT-X-STREAM-INF"):
+            height = bandwidth = 0
+            name = ""
+            m = re.search(r"RESOLUTION=\d+x(\d+)", line, re.I)
+            if m:
+                height = int(m.group(1))
+            m = re.search(r"BANDWIDTH=(\d+)", line, re.I)
+            if m:
+                bandwidth = int(m.group(1))
+            m = re.search(r'NAME="([^"]+)"', line, re.I)
+            if m:
+                name = m.group(1)
+            continue
+        if line.startswith("#"):
+            continue
+        if height or bandwidth:
+            out.append({"height": height, "bandwidth": bandwidth,
+                        "name": name, "url": urljoin(base, line)})
+            height = bandwidth = 0
+    return out
+
+
+def _parse_hls_segments(text: str, base: str) -> list[str]:
+    """解析 HLS 子清单里的分片地址（非 # 行，按顺序）。"""
+    return [urljoin(base, line.strip()) for line in (text or "").splitlines()
+            if line.strip() and not line.strip().startswith("#")]
+
+
+def _group_height(key: tuple[str, str]) -> int:
+    """从分片组 key（目录 + 前缀）里读分辨率高度，如 1080p / 720p。"""
+    text = "/".join(str(x or "") for x in key)
+    m = re.search(r"(?<!\d)(\d{3,4})p(?!\d)", text, re.I)
+    return int(m.group(1)) if m else 0
+
+
+def _choose_ts_group(seg_map: dict, prefer_quality: str = "",
+                     meta: dict | None = None) -> dict | None:
+    """按清晰度偏好选分片组：默认最高，支持 lowest / 具体高度。
+
+    为什么不能按「分片数量最多」选：同一部片的 480P 分片更短、数量更多，
+    按数量选恰好选到最低档（实测 hornyleak：480P 5 段、1080P 4 段）。
+    meta 来自 HLS master 的变体声明，站点分片路径不带 1080p 字样时也能选对档。
+    """
+    items = list((seg_map or {}).items())
+    if not items:
+        return None
+    pq = (prefer_quality or "").strip().lower()
+
+    def _height(key):
+        from_meta = int(((meta or {}).get(key) or {}).get("height") or 0)
+        return from_meta or _group_height(key)
+
+    def _rank(kv):
+        h = _height(kv[0])
+        n = len(kv[1])
+        if pq == "lowest":
+            return (h if h else 10 ** 6, n)
+        if pq.isdigit():
+            return (abs((h or 0) - int(pq)), -n)
+        return (-h, -n)          # highest：有高度的优先，再按分片数兜底
+
+    (dir_path, prefix), segs = min(items, key=_rank)
+    return {"dir": dir_path, "prefix": prefix, "segs": segs,
+            "meta": (meta or {}).get((dir_path, prefix)) or {}}
+
+
+def _index_ts_playlist(txt: str, base: str, seg_map: dict,
+                       group_meta: dict, variant: dict | None = None) -> int:
+    """把一份 HLS 子清单登记为分片组：按清单顺序存地址、总段数与总时长。
+
+    纯函数，可离线验收。清单是唯一权威：段数 / 时长 / 顺序都不靠播放器
+    实际请求到哪一片来推断（分片按需加载时会只播前几片）。
+    """
+    if "#EXTM3U" not in (txt or ""):
+        return 0
+    seg_urls = _parse_hls_segments(txt, base)
+    if not seg_urls:
+        return 0
+    vm = variant or {}
+    durs = [float(x) for x in re.findall(r"#EXTINF:([\d.]+)", txt)]
+    total_dur = sum(durs)
+    for su in seg_urls:
+        ent = _hls_seg_entry(su)
+        if not ent:
+            continue
+        key, n = ent
+        seg_map.setdefault(key, {}).setdefault(n, []).append(su)
+        g = group_meta.setdefault(key, {
+            "height": 0, "bandwidth": 0, "duration": 0.0,
+            "expected": 0, "order": {}})
+        g["order"].setdefault(n, su)
+        # 分片路径里的 1080p 才是实际档位；master 声明只作兜底。
+        g["height"] = _group_height(key) or int(vm.get("height") or 0)
+        g["bandwidth"] = int(vm.get("bandwidth") or 0)
+        g["duration"] = max(g["duration"], total_dur)
+        g["expected"] = max(g["expected"], len(seg_urls))
+    return len(seg_urls)
+
+
+def _ts_plan(meta: dict, segs: dict) -> list[str]:
+    """按清单顺序给出所选档位的分片地址（无清单时退回编号顺序）。"""
+    order_map = dict((meta or {}).get("order") or {})
+    if order_map:
+        return [order_map[k] for k in sorted(order_map)]
+    return [u for n in sorted(segs or {}) for u in (segs[n] or [])]
+
+
+def _ts_integrity_error(ok_seg: int, expected: int, *,
+                        actual_dur: float = 0.0,
+                        expected_dur: float = 0.0,
+                        partial: bool = False) -> str:
+    """完整性闸门：段数不足或时长明显短于清单，一律判失败，不交付半部片。"""
+    if ok_seg < 2:
+        return "分片下载中断（只拿到 0~1 片）"
+    if not partial and ok_seg < expected:
+        return f"分片不完整（{ok_seg}/{expected} 段），已保留分片，重试可续传。"
+    if not partial and expected_dur > 0 and actual_dur \
+            and actual_dur < expected_dur * 0.9:
+        return (f"下载不完整：实际 {actual_dur:.0f} 秒，"
+                f"清单标注 {expected_dur:.0f} 秒；已保留分片供续传。")
+    return ""
+
+
+def _cleanup_parts(parts_dir: Path) -> None:
+    """尽力清理临时分片：清理失败只留残留，不能把一次成功的下载判成失败。"""
+    try:
+        shutil.rmtree(parts_dir, ignore_errors=True)
+    except BaseException:  # noqa: BLE001  某些运行环境会拦截批量删除
+        pass
+
+
+def _ffprobe_duration(path: Path) -> float:
+    """读合成文件的实际时长，用于「下到一半却报成功」的通用闸门。"""
+    from .subproc import run_external
+    ff = find_ffmpeg()
+    if not ff:
+        return 0.0
+    probe = Path(ff).with_name("ffprobe" + Path(ff).suffix)
+    if probe.exists():
+        probe = str(probe)
+    else:
+        import shutil
+        probe = shutil.which("ffprobe") or ""
+    if not probe:
+        return 0.0
+    try:
+        r = run_external(
+            [probe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nk=1:nw=1", str(path)],
+            capture_output=True, text=True, timeout=90)
+        return float((r.stdout or "").strip().splitlines()[0])
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _http_fetch_ts(url: str, referer: str, timeout: int = 35) -> bytes | None:
+    """普通 HTTP 取一个 TS 分片。
+
+    2026-11-07 实测：CDN 分片在浏览器会话之外同样返回 200（curl / requests
+    均可），旧实现全部经 Playwright evaluate 回传 base64，1080P 单片 5MB 时
+    CDP 传输会中断 —— 表现就是「只下了前 9 段却报成功」。保留双通道兜底：
+    环境代理失败时改直连。
+    """
+    import requests
+    from .config import DEFAULT_UA
+    headers = {"User-Agent": DEFAULT_UA, "Referer": referer or ""}
+    for direct in (False, True):
+        try:
+            if direct:
+                with requests.Session() as s:
+                    s.trust_env = False      # 绕开发生故障的环境代理
+                    r = s.get(url, headers=headers, timeout=(8, timeout))
+            else:
+                r = requests.get(url, headers=headers, timeout=(8, timeout))
+            if r.status_code == 200 and r.content[:1] == b"\x47":
+                return r.content
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 def _download_ts_via_browser(page_url: str, output_dir: Path, *,
                              title: str = "", url: str = "",
                              cancel_event=None, on_progress=None,
-                             timeout: int = 40) -> dict:
+                             timeout: int = 40,
+                             prefer_quality: str = "",
+                             probe_only: bool = False,
+                             max_segments: int = 0) -> dict:
     """浏览器会话一体式下载「txt 分片流」正片。
 
     为什么解析和下载必须在**同一个浏览器会话**里（2026-10-30 hornyleak.tv
@@ -887,6 +1285,13 @@ def _download_ts_via_browser(page_url: str, output_dir: Path, *,
 
     fetched: list = []
     seg_map: dict = {}
+    # 每个分片组的清单元数据：总段数 / 总时长 / 分辨率 / 按清单顺序的分片地址。
+    # 权威来源是 HLS 子清单本身，不能靠「播放器实际播到哪一片」推断片尾。
+    group_meta: dict = {}
+    # HLS master / 子清单：content-type 常是 text/plain（不是 mpegurl），
+    # 只能靠正文的 #EXTM3U 认。捕获后从里面解析出全部清晰度，
+    # 不依赖播放器当前实际在播哪一档。
+    playlists: list[tuple[str, str]] = []
 
     def _on_resp(resp):
         try:
@@ -912,14 +1317,68 @@ def _download_ts_via_browser(page_url: str, output_dir: Path, *,
                     key = (m.group(2), m.group(3))
                     seg_map.setdefault(key, {}).setdefault(
                         int(m.group(4)), []).append(u)
+            # 播放器清单（text/plain + #EXTM3U）也收下：里面才有 1080P 等全部档位。
+            # 只读 2MB 以内的文本，避免把大文件正文拖进内存。
+            if ct.startswith("text/plain"):
+                # 伪 txt 分片是二进制 MPEG-TS，只是 CDN 标了 text/plain。
+                # 不读它的正文：多浏览器并发时 resp.text() 会把整段搬进内存。
+                if re.search(r"_\d{1,4}\.txt$", low.split("?")[0]):
+                    return
+                cl = str((resp.headers or {}).get("content-length") or "")
+                if cl.isdigit() and int(cl) > 2_000_000:
+                    return
+                try:
+                    body = resp.text()
+                except Exception:  # noqa: BLE001
+                    body = ""
+                if body.lstrip().startswith("#EXTM3U"):
+                    playlists.append((u, body))
         except Exception:  # noqa: BLE001
             pass
 
     def _pick_group():
-        if not seg_map:
-            return None
-        (dir_path, prefix), segs = max(seg_map.items(), key=lambda kv: len(kv[1]))
-        return {"dir": dir_path, "prefix": prefix, "segs": segs}
+        # 默认按分辨率挑最高档，而不是「分片最多」——低码率分片更短、数量更多。
+        return _choose_ts_group(seg_map, prefer_quality, group_meta)
+
+    seeded_playlists: set[str] = set()
+    seeded_variants: set[str] = set()
+
+    def _seed_from_playlists(page):
+        """从捕获到的 HLS master / 子清单里补齐全部清晰度的分片地址。
+
+        播放器默认自适应，往往只请求 480P；只靠它实际请求的分片，最高档
+        永远不会出现在 seg_map 里。master 清单里写了全部变体，直接读出来
+        就能拿到 1080P 的子清单与分片（同一浏览器会话里 fetch，带同一指纹）。
+        """
+        for pu, body in list(playlists):
+            if pu in seeded_playlists:
+                continue
+            seeded_playlists.add(pu)
+            variants = _parse_hls_master(body, pu)
+            # 带上变体声明的分辨率/带宽；子清单本身没有变体时声明为空。
+            targets = [(v["url"], v) for v in variants] if variants else [(pu, {})]
+            for vu, vm in targets:
+                if vu in seeded_variants:
+                    continue
+                seeded_variants.add(vu)
+                txt = ""
+                try:
+                    txt = page.evaluate(
+                        "async (u) => { const r = await fetch(u); return await r.text(); }",
+                        vu)
+                except Exception:  # noqa: BLE001
+                    txt = ""
+                if not txt:
+                    # 跨域/CSP 挡住浏览器 fetch 时，用普通请求补一次。
+                    # 清单本身不校验指纹（分片才校验），Referer 带上即可。
+                    try:
+                        import requests as _rq
+                        txt = _rq.get(vu, headers={"User-Agent": DEFAULT_UA,
+                                                   "Referer": str(page.url or "")},
+                                      timeout=20).text
+                    except Exception:  # noqa: BLE001
+                        txt = ""
+                _index_ts_playlist(txt, vu, seg_map, group_meta, vm)
 
     stem = ""
     if title:
@@ -934,6 +1393,29 @@ def _download_ts_via_browser(page_url: str, output_dir: Path, *,
     base_name = f"{stem} [{fp}]" if fp else stem
     parts_dir = output_dir / f".{hashlib.md5(url.encode('utf-8')).hexdigest()[:12]}.tsseg"
     parts_dir.mkdir(parents=True, exist_ok=True)
+
+    def _emit(percent: float, done: int, total: int, speed: float,
+              label: str):
+        """统一进度上报：percent 必须给，否则界面任务条在完成前永远是 0%。
+
+        2026-11-07 实测：旧回调只给 progressed_bytes + note，
+        task_manager 的 `percent = info.get("percent") or t.percent` 拿不到值，
+        于是进度条只在任务结束瞬间从 0 跳到 100。
+        """
+        if not on_progress:
+            return
+        try:
+            on_progress({
+                "status": "downloading",
+                "percent": round(min(99.0, max(0.0, percent)), 1),
+                "progressed_bytes": int(done), "total_bytes": int(total),
+                "speed": float(speed), "eta": None,
+                "filename": label, "note": label,
+            })
+        except Exception:  # noqa: BLE001  进度回调不能反过来打断下载
+            pass
+
+    _emit(0.0, 0, 0, 0.0, "正在解析播放清单…")
 
     try:
         with sync_playwright() as p:
@@ -969,6 +1451,8 @@ def _download_ts_via_browser(page_url: str, output_dir: Path, *,
             except Exception:  # noqa: BLE001
                 pass
             page.wait_for_timeout(4000)
+            # 播放器已请求 master 清单：先解析出全部清晰度，避免只拿到 480P
+            _seed_from_playlists(page)
 
             # HTTP 剥链失败时兜底：从 frames 里找 /embed/ 逐层导航
             for _round in range(2):
@@ -1005,6 +1489,7 @@ def _download_ts_via_browser(page_url: str, output_dir: Path, *,
                 if cancel_event is not None and cancel_event.is_set():
                     b.close()
                     return {"ok": False, "error": "已取消"}
+                _seed_from_playlists(page)   # 后续才到的清单也补进来
                 grp = _pick_group()
                 if grp and len(grp.get("segs") or {}) >= 2:
                     break
@@ -1018,74 +1503,139 @@ def _download_ts_via_browser(page_url: str, output_dir: Path, *,
                 return {"ok": False, "error": "未在播放器页捕获到分片流"}
 
             dir_path, prefix, segs = grp["dir"], grp["prefix"], grp["segs"]
-            # 目录的各域变体（播放器把相邻分片分散在不同 CDN 域，
-            # 但同一片在任一域都存在 —— 逐域轮询兜底）
-            dir_variants: list[str] = []
-            for urls in segs.values():
-                for u in urls:
-                    p_ = _up(u)
-                    d = f"{p_.scheme}://{p_.netloc}{dir_path}"
-                    if d not in dir_variants:
-                        dir_variants.append(d)
+            meta = grp.get("meta") or {}
+            if probe_only:
+                # 验收/诊断用：只回报选中的档位，不下载（避免为测 1080P 拉整部片）
+                b.close()
+                return {"ok": True, "probe_only": True, "prefix": prefix,
+                        "height": int(meta.get("height") or 0)
+                        or _group_height((dir_path, prefix)),
+                        "segments": len(segs),
+                        "expected": int(meta.get("expected") or len(segs)),
+                        "duration": float(meta.get("duration") or 0),
+                        "groups": sorted({k[1] for k in seg_map})}
 
-            def _cand_urls(n: int) -> list[str]:
-                if n in segs:
-                    return list(segs[n])
-                return [f"{d}{prefix}_{n}.txt" for d in dir_variants]
+            # 清单顺序即拼接顺序；不再用「取到 404 就是片尾」的试探式循环。
+            # 实测 2026-11-07：Playwright evaluate 回传 5MB 的 1080P 分片会中断，
+            # 旧循环在第 9 段 break，65.8 秒的片被当成全片交付（片源 911.8 秒）。
+            ordered = _ts_plan(meta, segs)
+            if max_segments:
+                ordered = ordered[:max_segments]
+            expected = len(ordered)
+            if expected < 2:
+                b.close()
+                return {"ok": False, "error": "清单里没有可下载的分片"}
 
-            done_bytes = 0
-            ok_seg = 0
-            n = 0
-            _prog_t = [0.0]
-            while True:
-                if cancel_event is not None and cancel_event.is_set():
-                    b.close()
-                    return {"ok": False, "error": "已取消"}
-                body = None
-                for cu in _cand_urls(n):
-                    try:
-                        b64 = page.evaluate(_FETCH_SEG_JS, cu)
-                    except Exception:  # noqa: BLE001  页面挂了就到此为止
-                        break
-                    if not b64 or b64.startswith("ERR:"):
+            q_label = (f"{int(meta.get('height') or 0)}P"
+                       if int(meta.get('height') or 0) else str(prefix))
+            _emit(0.5, 0, 0, 0.0, f"已选 {q_label} · 共 {expected} 段")
+            hosts: list[str] = []
+            for u in ordered:
+                p_ = _up(u)
+                h = f"{p_.scheme}://{p_.netloc}"
+                if h not in hosts:
+                    hosts.append(h)
+
+            def _candidates(i: int) -> list[str]:
+                u = ordered[i]
+                out = [u]
+                ent = _hls_seg_entry(u)
+                if ent:
+                    out.extend(segs.get(ent[1]) or [])
+                p_ = _up(u)
+                for h in hosts:                       # 同一片在相邻 CDN 域都有副本
+                    out.append(f"{h}{p_.path}" + (f"?{p_.query}" if p_.query else ""))
+                return list(dict.fromkeys(out))
+
+            referer = str(page.url or "") or page_url
+
+            def _grab(i: int) -> tuple[int, int]:
+                pf = parts_dir / f"seg_{i:05d}.ts"
+                if pf.exists() and pf.stat().st_size > 0:
+                    return i, pf.stat().st_size      # 断点续传：已落盘的不重下
+                for cu in _candidates(i):
+                    body = _http_fetch_ts(cu, referer)
+                    if not body:
                         continue
-                    body = base64.b64decode(b64)
-                    break
-                if body is None:
-                    break                      # 404/取不到：分片序列结束
-                if n == 0 and body[:1] != b"\x47":
-                    b.close()
-                    return {"ok": False,
-                            "error": "分片内容不是 MPEG-TS（首字节不是 0x47），判据不成立"}
-                pf = parts_dir / f"seg_{n:05d}.ts"
-                tmp = pf.with_suffix(".dl")
-                tmp.write_bytes(body)
-                tmp.replace(pf)
-                done_bytes += len(body)
-                ok_seg += 1
-                if on_progress:
+                    tmp = pf.with_suffix(".dl")
+                    tmp.write_bytes(body)
+                    tmp.replace(pf)
+                    return i, len(body)
+                return i, 0
+
+            from concurrent.futures import ThreadPoolExecutor
+
+            missing: list[int] = []
+            done_bytes = 0
+            t_start = time.time()
+            t_last = t_start
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                # ex.map 按输入序返回结果，所以 i 单调递增，可直接算完成百分比。
+                for i, sz in ex.map(_grab, range(expected)):
+                    if cancel_event is not None and cancel_event.is_set():
+                        b.close()
+                        return {"ok": False, "error": "已取消"}
+                    done_bytes += sz
+                    if not sz:
+                        missing.append(i)
                     now = time.time()
-                    if now - _prog_t[0] > 0.5:
-                        _prog_t[0] = now
+                    # 最后一片必须上报，否则短片源的进度会永远停在 0.4 秒节流前
+                    if now - t_last > 0.4 or i + 1 == expected:
+                        # 用累计平均速度，不用「与上一条回调的差值」：
+                        # 最后一片强制上报时两次回调可能只隔几毫秒，瞬时差速
+                        # 会算出几 GB/s 的假数字（2026-11-07 实测 4.8GB/s）。
+                        speed = done_bytes / max(now - t_start, 0.2)
+                        t_last = now
+                        _emit((i + 1) * 100.0 / expected, done_bytes,
+                              int(done_bytes * expected / max(i + 1, 1)),
+                              speed, f"{q_label} · 分片 {i + 1}/{expected}")
+
+            # 部分 CDN 只认播放器会话指纹：HTTP 失败的片用同一浏览器会话补。
+            if missing:
+                for i in list(missing):
+                    for cu in _candidates(i):
                         try:
-                            on_progress({"status": "downloading",
-                                         "progressed_bytes": done_bytes,
-                                         "note": f"分片 {ok_seg}"})
+                            b64 = page.evaluate(_FETCH_SEG_JS, cu)
                         except Exception:  # noqa: BLE001
-                            pass
-                n += 1
-                if n > 9000:
-                    break
+                            continue
+                        if not b64 or b64.startswith("ERR:"):
+                            continue
+                        body = base64.b64decode(b64)
+                        if body[:1] != b"\x47":
+                            continue
+                        pf = parts_dir / f"seg_{i:05d}.ts"
+                        tmp = pf.with_suffix(".dl")
+                        tmp.write_bytes(body)
+                        tmp.replace(pf)
+                        done_bytes += len(body)
+                        missing.remove(i)
+                        break
+            if missing:                               # 再给一轮 HTTP（换时刻/换域）
+                with ThreadPoolExecutor(max_workers=4) as ex:
+                    for i, sz in ex.map(_grab, missing):
+                        if sz:
+                            done_bytes += sz
+                missing = [i for i in missing
+                           if not (parts_dir / f"seg_{i:05d}.ts").exists()]
             b.close()
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:100]}"}
 
-    if ok_seg < 2:
-        return {"ok": False, "error": "分片下载中断（只拿到 0~1 片）"}
+    # 拼接 + ffmpeg 转封装可能耗时数秒，明确给一个「合并中」的终态前进度，
+    # 不让任务条在最后一段下载完后突然失去反馈。
+    _emit(99.0, done_bytes, max(done_bytes, 1), 0.0, "正在合并分片并转封装…")
+    ok_seg = sum(1 for i in range(expected)
+                 if (parts_dir / f"seg_{i:05d}.ts").exists()
+                 and (parts_dir / f"seg_{i:05d}.ts").stat().st_size > 0)
+    # 完整性闸门：清单说有 N 段就必须拿到 N 段。缺一片就报失败、保留分片供续传，
+    # 绝不把半部片写成 mp4 并标记成功（hornyleak 实测 9/115 段的旧行为）。
+    gate = _ts_integrity_error(ok_seg, expected, partial=bool(max_segments))
+    if gate:
+        return {"ok": False, "truncated": True, "error": gate}
 
     joined = parts_dir / "full.ts"
     with open(joined, "wb") as out:
-        for i in range(ok_seg):
+        for i in range(expected):
             pf = parts_dir / f"seg_{i:05d}.ts"
             if pf.exists():
                 out.write(pf.read_bytes())
@@ -1094,9 +1644,9 @@ def _download_ts_via_browser(page_url: str, output_dir: Path, *,
     ff = find_ffmpeg()
     converted = False
     if ff:
-        import subprocess
+        from .subproc import run_external
         try:
-            r = subprocess.run(
+            r = run_external(
                 [ff, "-hide_banner", "-loglevel", "error", "-y",
                  "-i", str(joined), "-c", "copy", "-bsf:a", "aac_adtstoasc",
                  str(final)],
@@ -1106,22 +1656,34 @@ def _download_ts_via_browser(page_url: str, output_dir: Path, *,
         except Exception:  # noqa: BLE001
             converted = False
 
-    if converted:
-        size = final.stat().st_size
+    out_path = final if converted else output_dir / f"{base_name}.ts"
+    if not converted:
+        joined.replace(out_path)
+
+    # 第二道闸门：用实际时长对账清单 EXTINF 总和。任何站点只要出现「小样 /
+    # 截断」，这里就拦下，避免旧文件 + skip_existing 把错误固化下来。
+    expected_dur = float(meta.get("duration") or 0)
+    actual_dur = _ffprobe_duration(out_path) if expected_dur > 0 else 0.0
+    gate = _ts_integrity_error(ok_seg, expected, actual_dur=actual_dur,
+                               expected_dur=expected_dur,
+                               partial=bool(max_segments))
+    if gate:
         try:
-            shutil.rmtree(parts_dir, ignore_errors=True)
-        except Exception:  # noqa: BLE001
+            out_path.unlink(missing_ok=True)
+        except OSError:
             pass
-        return {"ok": True, "path": str(final), "size": size,
-                "note": f"该站正片为分片流（{ok_seg} 段），已拼接并转封装为 MP4。"}
-    target = output_dir / f"{base_name}.ts"
-    joined.replace(target)
-    try:
-        shutil.rmtree(parts_dir, ignore_errors=True)
-    except Exception:  # noqa: BLE001
-        pass
-    return {"ok": True, "path": str(target), "size": target.stat().st_size,
-            "note": "该站正片为 MPEG-TS 分片流，已按序拼接交付 .ts（未转封装 MP4）。"}
+        return {"ok": False, "truncated": True, "error": gate}
+
+    size = out_path.stat().st_size
+    _cleanup_parts(parts_dir)
+    height = int(meta.get("height") or 0)
+    label = f"{height}P" if height else prefix
+    return {"ok": True, "path": str(out_path), "size": size,
+            "height": height, "segments": ok_seg,
+            "note": (f"该站正片为分片流（{label}，{ok_seg} 段"
+                     + (f" / {expected_dur:.0f} 秒" if expected_dur else "")
+                     + ("），已拼接并转封装为 MP4。" if converted
+                        else "），已按序拼接交付 .ts（未转封装 MP4）。"))}
 
 
 def _download_ts_stream(ts_info: dict, output_dir: Path, *,
@@ -1287,9 +1849,9 @@ def _download_ts_stream(ts_info: dict, output_dir: Path, *,
     final = output_dir / f"{base_name}.mp4"
     ff = find_ffmpeg()
     if ff:
-        import subprocess
+        from .subproc import run_external
         try:
-            r = subprocess.run(
+            r = run_external(
                 [ff, "-hide_banner", "-loglevel", "error", "-y",
                  "-i", str(joined), "-c", "copy", "-bsf:a", "aac_adtstoasc",
                  str(final)],
@@ -1305,18 +1867,12 @@ def _download_ts_stream(ts_info: dict, output_dir: Path, *,
         # 转封装失败/无 ffmpeg：交付 .ts（主流播放器都能播），说明里写清楚
         target = output_dir / f"{base_name}.ts"
         joined.replace(target)
-        try:
-            shutil.rmtree(parts_dir, ignore_errors=True)
-        except Exception:  # noqa: BLE001
-            pass
+        _cleanup_parts(parts_dir)
         return {"ok": True, "path": str(target), "size": target.stat().st_size,
                 "note": "该站正片是 MPEG-TS 分片流，本机未转封装成 MP4（无 ffmpeg 或转封装失败），已交付 .ts 原始流。"}
 
     size = final.stat().st_size
-    try:
-        shutil.rmtree(parts_dir, ignore_errors=True)
-    except Exception:  # noqa: BLE001
-        pass
+    _cleanup_parts(parts_dir)
     return {"ok": True, "path": str(final), "size": size, "note": "分段流已转封装为 MP4"}
 
 
@@ -1723,6 +2279,238 @@ def build_search_query(keyword: str, platform: str = "youtube", count: int = 10)
     return f"{prefix}{n}:{keyword}"
 
 
+# ---- 会员试看兜底（2026-11）----
+# 症状：B 站大会员番剧 / 优酷爱奇艺会员片，下载「成功」但文件只有 6 分钟。
+# 原因：播放地址本身就是按游客权限裁剪过的，改参数拿不到完整流。
+# 这里的做法是「下完核对时长 → 判定试看 → 换源重下完整版」，
+# 具体链路见 app/vip_unlock.py（会员 Cookie → 资源站换源 → 解析网关）。
+_VIP_NO_FALLBACK_HINTS = (
+    "404", "not found", "unsupported url", "is not a valid url",
+    "private video", "video unavailable", "incomplete youtube id",
+    "已删除", "不存在", "no video formats found",
+)
+
+
+def _vip_auto_enabled() -> bool:
+    try:
+        from . import store
+        return bool(store.load().get("vip_auto_unlock", True))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _vip_should_try(url: str, error_text: str = "") -> bool:
+    """只有「会员平台」才折腾兜底，普通站点多一次探测纯属浪费。"""
+    if not _vip_auto_enabled():
+        return False
+    try:
+        from . import vip_unlock
+        if not vip_unlock.platform_of(url):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    if error_text:
+        low = error_text.lower()
+        if any(h in low for h in _VIP_NO_FALLBACK_HINTS):
+            return False
+    return True
+
+
+def _unlock_with_budget(url: str, output_dir: Path, *, title: str, meta,
+                        on_progress, task_id: str) -> dict:
+    """带时间预算的换源：超预算就收手，把控制权交回调用方。
+
+    为什么需要（2026-11-08 实测）：番剧换源连着试 3 个资源站，其中一条 CDN
+    拉到 29MB 后彻底停住，ffmpeg 进程还活着、流下载的看门狗也没掐掉它，
+    整个任务在界面上一直显示「running」，33 分钟没有任何进展说明。
+    用户看到的是「点下载没反应」。这里给整段换源一个总预算，到点就置
+    cancel_event（unlock 内部会顺着它中止 ffmpeg），然后按失败处理 ——
+    调用方会把已下到的试看片段连同「这是试看段」的说明一起交回去。
+    """
+    import os
+    import threading
+
+    from . import vip_unlock
+
+    try:
+        budget = float(os.environ.get("MEDIA_DOWNLOADER_VIP_BUDGET") or 900)
+    except ValueError:
+        budget = 900.0
+
+    ev = threading.Event()
+    box: dict = {}
+
+    def _work():
+        try:
+            box["r"] = vip_unlock.unlock(
+                url, output_dir, title=title, meta=meta,
+                on_progress=on_progress, task_id=task_id, cancel_event=ev)
+        except Exception as e:  # noqa: BLE001
+            box["e"] = e
+
+    th = threading.Thread(target=_work, daemon=True)
+    th.start()
+    th.join(budget)
+    if th.is_alive():
+        ev.set()                      # 让 unlock 里的下载层中止 ffmpeg
+        th.join(30)                   # 给它收尾的时间（删半截文件）
+        return {"ok": False, "error": f"换源超过 {int(budget)} 秒仍未拿到完整版，已中止"}
+    if "e" in box:
+        raise box["e"]
+    return box.get("r") or {"ok": False, "error": "换源没有返回结果"}
+
+
+def _vip_replace_with_full(url: str, output_dir: Path, *, task_id: str | None,
+                           title: str, info=None, old_files=None,
+                           on_progress=None) -> dict | None:
+    """尝试换源拿完整版；成功返回最终结果摘要，不满足条件返回 None。"""
+    from . import vip_unlock
+
+    meta = {}
+    expected, actual = 0.0, 0.0
+    if old_files:
+        # B 站普通投稿（UGC）不存在「试看」：非会员只是最高清晰度受限，
+        # 文件本身是完整的。真正会裁剪的只有番剧/影视/课堂（bangumi/cheese）。
+        # 这里先做廉价预判，避免给每条普通 B 站视频都多花一次元数据请求。
+        if "bilibili.com" in url and not any(k in url for k in
+                                             ("/bangumi/", "/cheese/", "ep_id=")):
+            return None
+        # 已下完但可能只是试看：拿「页面标称时长」和「实际文件时长」比
+        try:
+            meta = vip_unlock.extract_meta(url)
+        except Exception:  # noqa: BLE001
+            meta = {}
+        expected = max(float((info or {}).get("duration") or 0),
+                       float(meta.get("duration") or 0))
+        actual = max((vip_unlock.probe_duration(f.get("path") or "") for f in old_files),
+                     default=0.0)
+        if not vip_unlock.detect_preview(expected, actual):
+            return None
+
+    if on_progress:
+        on_progress({
+            "status": "retrying", "percent": 0.0, "progressed_bytes": 0,
+            "total_bytes": 0, "speed": 0, "eta": None,
+            "filename": (f"检测到试看片段（{int(actual)}s / 正片 {int(expected)}s），"
+                         "正在换源下载完整版…" if old_files else "会员内容解析失败，正在换源下载完整版…"),
+        })
+
+    try:
+        res = _unlock_with_budget(
+            url, output_dir, title=title or str(meta.get("title") or ""),
+            meta=meta or None, on_progress=on_progress, task_id=task_id or "")
+    except Exception as e:  # noqa: BLE001 —— 兜底失败不能把原结果搞坏
+        return None
+    if not res.get("ok"):
+        return None
+
+    # 换源成功：删掉试看片段，避免目录里同时留一个 6 分钟的假正片
+    for f in old_files or []:
+        try:
+            p = Path(f.get("path") or "")
+            if p.is_file() and p.suffix.lower() not in (".part", ".tmp"):
+                p.unlink()
+        except OSError:
+            pass
+
+    fp = Path(res["path"])
+    name = fp.name
+    size = int(res.get("size") or fp.stat().st_size)
+    from .downloader import url_fingerprint as _url_fp
+    try:
+        (output_dir / f".{_url_fp(url)}.done").write_text(name, encoding="utf-8")
+    except OSError:
+        pass
+    try:
+        from . import history as _hist
+        _hist.record(url, {"title": title or name, "kind": "video",
+                           "path": str(fp), "size": size})
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "ok": True, "url": url,
+        "files": [{"path": str(fp), "name": name, "size": size}],
+        "count": 1,
+        "note": res.get("note") or "会员内容已换源下载完整版。",
+        "error": None,
+        "output_dir": str(output_dir),
+    }
+
+
+# 界面/任务层在没有标题时会塞进来的占位名。它们不是真标题：
+# 拿它命名只会得到「视频下载 [指纹].mp4」，用户分不清下的是哪一集。
+_PLACEHOLDER_TITLES = frozenset({
+    "视频下载", "视频", "download", "video", "Video", "未命名",
+    "untitled", "Untitled",
+})
+
+
+def _dur_text(seconds: float) -> str:
+    """秒数 → 人能读的时长（6:00 / 51:15 / 1:02:03）。"""
+    s = max(0, int(round(float(seconds or 0))))
+    if s >= 3600:
+        return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def _preview_scope(url: str) -> bool:
+    """这个地址下完之后要不要核对「是不是只有试看段」。
+
+    跟「要不要自动换源」分开：换源是动作，可以由用户开关；核对是判断，
+    必须一直做。返回 False 的只有两种：
+    - 平台拿不到正片信息（vip_unlock.platform_of 为空），没法比对时长；
+    - B 站普通投稿（UGC）不裁剪，非会员只是最高清晰度受限，文件本身完整。
+    """
+    try:
+        from . import vip_unlock
+        if not vip_unlock.platform_of(url):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    # 真正会裁剪的只有番剧/影视/课堂，先用这个廉价判据挡掉，避免每条普通
+    # B 站视频都多花一次元数据请求。
+    if "bilibili.com" in url and not any(k in url for k in
+                                         ("/bangumi/", "/cheese/", "ep_id=")):
+        return False
+    return True
+
+
+def _preview_guard(url: str, output_dir: Path, files: list[dict], *, task_id,
+                   title: str, info, on_progress) -> tuple[dict | None, str]:
+    """下完核对时长：这一份是不是只有试看段。
+
+    为什么必须在这里做：会员平台的页面播放地址本身就被账号权限裁剪过，
+    浏览器解析出来的「真实播放地址」同样是 6 分钟试看段 —— 下载会「成功」。
+    这条早返回的分支此前完全跳过了 2871 行的试看核对，用户拿到的
+    15MB 文件被当成整集交付（2026-11-08 实测：人间世 第二季第 8 集
+    标称 51:15，实际 6:00）。
+    """
+    if not files:
+        return None, ""
+    if not _preview_scope(url):
+        return None, ""
+    from . import vip_unlock
+    try:
+        meta = vip_unlock.extract_meta(url)
+    except Exception:  # noqa: BLE001
+        meta = {}
+    expected = max(float((info or {}).get("duration") or 0)
+                   if isinstance(info, dict) else 0.0,
+                   float(meta.get("duration") or 0))
+    actual = max((vip_unlock.probe_duration(f.get("path") or "") for f in files),
+                 default=0.0)
+    if not vip_unlock.detect_preview(expected, actual):
+        return None, ""
+    # 关掉「自动换源」的用户也仍然要知道这是试看段，所以判定在前、换源在后。
+    if _vip_should_try(url):
+        full = _vip_replace_with_full(url, output_dir, task_id=task_id, title=title,
+                                      info=info, old_files=files, on_progress=on_progress)
+        if full:
+            return full, ""
+    return None, (f"⚠️ 只拿到试看片段（{_dur_text(actual)} / 正片 {_dur_text(expected)}），"
+                  "换源也没拿到完整版；这个文件不是完整正片。")
+
+
 def download_video(
     url: str,
     output_dir: str | Path,
@@ -1742,6 +2530,7 @@ def download_video(
     format_id: str = "",
     skip_existing: bool = True,
     title: str = "",
+    proxy: str = "",
 ) -> dict:
     """下载单个视频（或播放列表），返回结果摘要。
 
@@ -1752,6 +2541,36 @@ def download_video(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # 同一内容的不同地址形态先归一（见 _normalize_media_url）。
+    # 不归一的话 /video/<id> 会先去 302 到 video.zhihu.com 的 JS 壳，
+    # 渲染拿不到东西，最后报「解析不出真实播放地址」。
+    url = _normalize_media_url(url)
+    # 标题为空时先向会员平台的官方接口要一次标题。不补的话，落盘名只能是
+    # 「视频下载 [指纹]」—— 用户下完一整季，文件夹里全是同一个名字，
+    # 分不清哪一集（2026-11-08 实测：人间世 第二季第 8 集落成「视频下载 [2eb6bd8e].mp4」）。
+    if not title or title.strip() in _PLACEHOLDER_TITLES:
+        try:
+            from . import vip_unlock as _vu_t
+            if _vu_t.platform_of(url):
+                _m = _vu_t.extract_meta(url) or {}
+                _t = str(_m.get("title") or "").strip()
+                _ep = _m.get("episode")
+                _epn = str(_m.get("episode_title") or "").strip()
+                if _t and _ep:
+                    _t = f"{_t} 第{_ep}集" + (f" {_epn}" if _epn else "")
+                title = _t or title
+        except Exception:  # noqa: BLE001 —— 补标题失败不影响下载
+            pass
+    if on_progress:
+        # 渲染解析（resolve_media_render_full）可能跑十几秒且没有任何回调，
+        # 先给界面一条明确状态，避免任务条在整个前置阶段都是空白的。
+        try:
+            on_progress({"status": "downloading", "percent": 0.0,
+                         "progressed_bytes": 0, "total_bytes": 0, "speed": 0,
+                         "eta": None, "filename": "正在解析视频页面…",
+                         "note": "正在解析视频页面…"})
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---- 去重标记（V3.0 统一）----
     # 实测（2026-10-24，用户报告）：TikTok / pornhub 走 yt-dlp 下载时**完全没写 .done**，
@@ -1842,10 +2661,14 @@ def download_video(
         # 分片下载失败才回退 direct（kind=both 时），kind=ts 时没有直链可回退。
         if _parsed and _parsed.get("kind") in ("ts", "both"):
             ev = register_cancel_event(task_id) if task_id else None
+            _pq_ts = (str(max_height) if max_height
+                      else "highest" if quality in ("best", "")
+                      else "lowest" if quality == "worst" else str(quality))
             _ts = _download_ts_via_browser(
                 page_url=url, output_dir=Path(output_dir),
                 title=title or "", url=url,
-                cancel_event=ev, on_progress=on_progress)
+                cancel_event=ev, on_progress=on_progress,
+                prefer_quality=_pq_ts)
             if _ts.get("ok") and _ts.get("path"):
                 _name = Path(_ts["path"]).name
                 _sz = int(_ts.get("size") or 0)
@@ -1864,10 +2687,61 @@ def download_video(
                     "files": [{"path": _ts["path"], "name": _name, "size": _sz}],
                     "note": _ts.get("note") or "已解析播放器分片流并下载正片。",
                 }
-            if _parsed.get("kind") == "ts":
-                return {"ok": False, "url": url,
+            if _parsed.get("kind") == "ts" or _ts.get("truncated"):
+                # 分片已解析成功但下不完整时，绝不回退到预览直链：那会交付
+                # 几十 MB 的小样并报成功（2026-11-07 用户实测的三条视频）。
+                return {"ok": False, "url": url, "truncated": True,
                         "error": _ts.get("error") or "分片流下载失败"}
-            # kind=both 且分片失败 → 落回下面的 direct 路径继续
+            # 分片完全没解析出来才落回下面的 direct 路径继续
+
+        if _real and _real.lower().split("?")[0].endswith((".m3u8", ".mpd")):
+            # 渲染解析拿到的可能是 HLS/DASH 清单：当普通文件下只会存下几百字节
+            # 的文本（实测 xvideos 310B 的 master playlist），任务却显示成功。
+            # 改走流下载，由 ffmpeg 合并分片；prefer_quality=highest 取最高档。
+            try:
+                from .stream_downloader import download_stream as _dl_stream
+                # 用户选的档位要带进流下载：best→最高、worst→最低、数字→该高度
+                _pq = ("highest" if quality in ("best", "")
+                       else "lowest" if quality == "worst" else str(quality))
+                _pq_label = {"highest": "最高档", "lowest": "最低档"}.get(
+                    _pq, f"{_pq}p")
+                _sr = _dl_stream(
+                    _real, output_dir, referer=url, title=title or "",
+                    skip_existing=False, on_progress=on_progress,
+                    prefer_quality=_pq,
+                )
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "url": url,
+                        "error": f"流媒体下载失败: {type(e).__name__}: {str(e)[:160]}"}
+            if _sr.ok and _sr.path:
+                _name = Path(_sr.path).name
+                try:
+                    (output_dir / f".{_url_fp(url)}.done").write_text(_name, encoding="utf-8")
+                except OSError:
+                    pass
+                try:
+                    from . import history as _hist_s
+                    _hist_s.record(url, {"title": title or _name, "kind": "video",
+                                         "path": _sr.path, "size": _sr.size})
+                except Exception:  # noqa: BLE001
+                    pass
+                _files = [{"path": _sr.path, "name": _name, "size": _sr.size}]
+                _full, _pnote = _preview_guard(
+                    url, output_dir, _files, task_id=task_id, title=title,
+                    info=info, on_progress=on_progress)
+                if _full:
+                    _full["note"] = "；".join(
+                        x for x in (_full.get("note") or "",
+                                    "换源拿到了完整版") if x)
+                    return _full
+                return {
+                    "ok": True, "url": url,
+                    "files": _files,
+                    "note": f"解析到 HLS 清单，已按{_pq_label}合并下载。"
+                            + (f" {_pnote}" if _pnote else ""),
+                }
+            return {"ok": False, "url": url,
+                    "error": _sr.error or "HLS 流下载失败"}
 
         if _real:
             try:
@@ -1902,11 +2776,21 @@ def download_video(
                                            "path": _r.path, "size": _r.size})
                     except Exception:  # noqa: BLE001
                         pass
+                    _files = [{"path": _r.path, "name": _name, "size": _r.size}]
+                    _full, _pnote = _preview_guard(
+                        url, output_dir, _files, task_id=task_id, title=title,
+                        info=info, on_progress=on_progress)
+                    if _full:
+                        _full["note"] = "；".join(
+                            x for x in (_full.get("note") or "",
+                                        "换源拿到了完整版") if x)
+                        return _full
                     return {
                         "ok": True, "url": url,
-                        "files": [{"path": _r.path, "name": _name, "size": _r.size}],
-                        "note": "已用内置浏览器解析出真实播放地址"
-                                "（绕开了 yt-dlp 对这类页面的限制）。",
+                        "files": _files,
+                        "note": ("已用内置浏览器解析出真实播放地址"
+                                 "（绕开了 yt-dlp 对这类页面的限制）。"
+                                 + (f" {_pnote}" if _pnote else "")),
                     }
             except Exception:  # noqa: BLE001 —— 失败就回到原流程
                 pass
@@ -1914,14 +2798,47 @@ def download_video(
             # 解析不到真实播放器时**明确失败**，绝不退回 yt-dlp ——
             # 那条路会把这个站的 728x90 广告位当成视频下下来，
             # 用户拿到一个"能播放的假文件"比报错更糟（2026-10-24 实测）。
+            # 前置渲染解析拿不到播放器时，再用「一体式分片流」兜底：它自己
+            # 剥 iframe 链、抓 HLS master / 子清单，不依赖上面的渲染结果。
+            # 2026-11-07 实测：并发下 resolve_media_render_full 偶发返回 none，
+            # 但同一个视频页的清单解析是稳定的，不该因此整条判失败。
+            _fb = None
+            if not _dy_page:
+                _pq_fb = (str(max_height) if max_height
+                          else "highest" if quality in ("best", "")
+                          else "lowest" if quality == "worst" else str(quality))
+                _fb = _download_ts_via_browser(
+                    page_url=url, output_dir=Path(output_dir),
+                    title=title or "", url=url,
+                    cancel_event=register_cancel_event(task_id) if task_id else None,
+                    on_progress=on_progress, prefer_quality=_pq_fb)
+                if _fb.get("ok") and _fb.get("path"):
+                    _name = Path(_fb["path"]).name
+                    _sz = int(_fb.get("size") or 0)
+                    try:
+                        (output_dir / f".{_url_fp(url)}.done").write_text(
+                            _name, encoding="utf-8")
+                    except OSError:
+                        pass
+                    try:
+                        from . import history as _hist_fb
+                        _hist_fb.record(url, {"title": _name, "kind": "video",
+                                              "path": _fb["path"], "size": _sz})
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return {"ok": True, "url": url,
+                            "files": [{"path": _fb["path"], "name": _name,
+                                       "size": _sz}],
+                            "note": _fb.get("note") or "已解析播放器分片流并下载正片。"}
             if _dy_page:
                 _err = ("没能解析出这条抖音视频的真实播放地址（全程后台、没有弹窗）。"
                         "最常见原因是抖音登录态过期或触发风控："
                         "请到「平台登录」页重新登录/刷新抖音，然后重试这批任务。")
             else:
                 _err = ("这个站点的视频由第三方播放器承载（iframe / 无扩展名地址），"
-                        "暂时无法稳定解析出真实视频地址。为避免把页面上的广告位"
-                        "当成视频下载，这里直接报失败而不是给你一个假文件。")
+                        "暂时无法稳定解析出真实视频地址"
+                        + (f"（{_fb.get('error')}）" if _fb and _fb.get("error") else "")
+                        + "。为避免把页面上的广告位当成视频下载，这里直接报失败而不是给你一个假文件。")
             return {
                 "ok": False, "url": url, "files": [],
                 "error": _err,
@@ -1944,11 +2861,31 @@ def download_video(
         cookies_file=cookies_file,
         cookies_from_browser=cookies_from_browser,
         include_playlist=include_playlist,
+        proxy=proxy,
     )
+    # 抓取阶段已经知道作品名时，直接拿它当文件名主干。
+    #
+    # 为什么必须覆盖（2026-11-08 用户报「下载下来的名字是随机字符」）：
+    #   `outtmpl` 里的 `%(title)s` 是 **yt-dlp 自己解析出来的** 标题，不是调用方
+    #   传进来的 `title`。小红书、微博这类走直链或 Generic 提取器的地址，
+    #   yt-dlp 只能把 URL 最后一段当标题 —— 那是 CDN 哈希，落盘就是随机字符。
+    #   而调用方（抓取结果）明明已经有正确作品名了。
+    #   截断 id 保留前 16 位：既能在同名时区分，又不至于让文件名变回一串乱码。
+    _tmpl = filename_template
+    _want_title = (title or "").strip()
+    if _want_title and "%(title)" in _tmpl:
+        try:
+            from .downloader import sanitize_filename as _sn_t
+            _stem = _sn_t(_want_title)[:110].strip()
+        except Exception:  # noqa: BLE001
+            _stem = ""
+        # 别把占位标题（提交时没带真实标题）当成作品名写进文件名
+        if _stem and _stem not in ("视频下载", "视频", "download", "video", "Video", "未命名"):
+            _tmpl = _stem + " [%(id).16s].%(ext)s"
     opts.update(
         {
             "format": fmt,
-            "outtmpl": str(output_dir / filename_template),
+            "outtmpl": str(output_dir / _tmpl),
             "merge_output_format": container if container in ("mp4", "mkv", "webm", "mov") else None,
             "noprogress": True,
         }
@@ -2089,7 +3026,20 @@ def download_video(
         attempt += 1
 
     if last_err:
-        return {"ok": False, "error": _friendly_error(last_err), "url": url, "files": [],
+        full = None
+        tried_vip = _vip_should_try(url, last_err)
+        if tried_vip:
+            full = _vip_replace_with_full(
+                url, output_dir, task_id=task_id, title=title, info=info,
+                old_files=None, on_progress=on_progress)
+        if full:
+            full["note"] = "；".join(x for x in (full.get("note") or "",
+                                                 fallback_note) if x)
+            return full
+        msg = _friendly_error(last_err)
+        if tried_vip:
+            msg += "（已自动尝试换源兜底，但没拿到完整版；可用 probe_vip.py 单独诊断）"
+        return {"ok": False, "error": msg, "url": url, "files": [],
                 "note": fallback_note}
 
     # 核对真实落盘文件（合并后扩展名可能变化）
@@ -2104,6 +3054,17 @@ def download_video(
                 if cand.exists() and cand.suffix.lower() not in (".part", ".ytdl", ".tmp"):
                     real_files.append({"path": str(cand), "name": cand.name, "size": cand.stat().st_size})
                     break
+
+    # ---- 会员试看兜底：下完先核对时长，明显短于正片就换源重下 ----
+    preview_note = ""
+    if real_files and not (isinstance(info, dict) and info.get("entries")):
+        full, preview_note = _preview_guard(
+            url, output_dir, real_files, task_id=task_id, title=title,
+            info=info, on_progress=on_progress)
+        if full:
+            full["note"] = "；".join(x for x in (full.get("note") or "",
+                                                 fallback_note) if x)
+            return full
 
     # ---- 写去重标记（和直链下载保持一致）----
     # 成功落盘后写 .done，内容为实际文件名。这样用户把文件转移走之后，
@@ -2145,7 +3106,9 @@ def download_video(
         "count": len(real_files),
         # 说明性备注（如「已自动改用 mweb 客户端，清晰度受限」）。
         # 必须往上传到界面，不允许静默降级。
-        "note": fallback_note,
+        # preview_note：这一份只有试看段且换源没成 —— 不给说明的话，
+        # 用户会以为拿到了整集（2026-11-08 实测：51:15 的剧交付了 6:00 的片段）。
+        "note": "；".join(x for x in (fallback_note, preview_note) if x),
         "error": None if real_files else "下载完成但未找到落盘文件",
         "output_dir": str(output_dir),
     }

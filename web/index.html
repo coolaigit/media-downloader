@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MediaDownloader 3.0</title>
+<title>MediaDownloader 3.0.4</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="style.css?v=3.0.3-kernel">
+<link rel="stylesheet" href="style.css?v=3.0.4-kernel">
 </head>
 <body class="dock-collapsed">
 
@@ -35,19 +35,44 @@
   <div class="brand">
     <span class="logo">⬇</span>
     <div>
-      <h1>媒体下载工具 <span style="opacity:.55;font-size:.62em;font-weight:500">3.0</span></h1>
+      <h1>媒体下载工具 <span style="opacity:.55;font-size:.62em;font-weight:500">3.0.4</span></h1>
       <p class="sub">抓取图片 · 抓取视频（各支持关键词搜索与粘贴链接）</p>
     </div>
   </div>
+    <button class="cmd-trigger" id="cmdTrigger" type="button" aria-label="打开命令面板">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    <span>搜索功能、历史记录或粘贴链接…</span><kbd>⌘ K</kbd>
+  </button>
   <div class="env" id="envBar">
     <span class="env-item" id="envFfmpeg" title="ffmpeg 用于合并音视频流">ffmpeg 检测中…</span>
     <span class="env-item" id="envYtdlp">yt-dlp …</span>
-    <span class="env-item" id="envDisk">磁盘 …</span>
+    <span class="env-item" id="envDisk">可用 —</span>
   </div>
 </header>
 
+<aside class="sidebar" id="sidebar" aria-label="主导航">
+  <div class="side-grp">工作台</div>
+  <button class="nav-item" type="button" data-tab="home"><svg viewBox="0 0 24 24"><path d="M3 10.5L12 3l9 7.5"/><path d="M5.5 9.5V20h13V9.5"/><path d="M9.5 20v-5.5h5V20"/></svg><span>首页</span></button>
+  <button class="nav-item" type="button" data-tab="image"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="M21 15l-5-5L5 20"/></svg><span>抓取图片</span></button>
+  <button class="nav-item" type="button" data-tab="video"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="M17 10l4-3v10l-4-3"/></svg><span>抓取视频</span></button>
+  <button class="nav-item" type="button" data-tab="library"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg><span>已下载</span><i class="nav-count" id="sideLibCount"></i></button>
+  <button class="nav-item" type="button" data-tab="login"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9 2 2-2 2 1 1-2 2-1-1-2 2"/></svg><span>平台登录</span></button>
+  <div class="side-sep"></div>
+  <div class="side-grp">系统</div>
+  <button class="nav-item" type="button" data-tab="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg><span>设置</span></button>
+  <button class="nav-item" type="button" data-tab="help"><svg viewBox="0 0 24 24"><path d="M4 4.5A2.5 2.5 0 016.5 2H20v18H6.5A2.5 2.5 0 004 22z"/><path d="M4 17.5A2.5 2.5 0 016.5 15H20"/></svg><span>使用说明</span></button>
+  <div class="side-foot">
+    <div class="side-taskcard">
+      <div class="stc-row"><div><b>下载任务</b><span class="stc-num" id="sideTaskCount">0</span></div><div class="stc-ring" id="sideRing" style="--p:0"><i id="sideRingNum">0%</i></div></div>
+      <div class="stc-sub"><span id="sideSpeed">暂无进行中任务</span> · <span id="sideDisk">存储检测中…</span></div>
+      <button type="button" id="sideTasksBtn">查看全部 <span>→</span></button>
+    </div>
+  </div>
+</aside>
+
 <nav class="tabs" id="tabs">
-  <button class="tab active" data-tab="image">抓取图片</button>
+  <button class="tab active" data-tab="home">首页</button>
+  <button class="tab" data-tab="image">抓取图片</button>
   <button class="tab" data-tab="video">抓取视频</button>
   <button class="tab" data-tab="library">已下载</button>
   <button class="tab" data-tab="login">平台登录</button>
@@ -58,17 +83,108 @@
 
 <main>
 
-<!-- ============ 抓取图片 ============ -->
-<section class="panel active" id="panel-image">
-  <div class="modeswitch" id="imageModeSwitch">
-    <button class="mode-btn active" data-mode="kw">关键词搜图</button>
-    <button class="mode-btn" data-mode="link">粘贴链接抓取</button>
-    <div class="spacer"></div>
-    <span class="hint" id="imageModeSwitchHint">按关键词在搜索引擎里搜图</span>
+<!-- ============ 首页 ============
+     首次打开落在这里（没有任何本地记忆时）；之后恢复上次所在的页面。
+     设计目标：一屏之内看清「能干什么 / 现在去哪」，不摆控件墙。 -->
+<section class="panel active" id="panel-home">
+  <div class="home-wrap">
+    <p class="home-kicker">MEDIA DOWNLOADER 3.0.4</p>
+    <h1 class="home-title">把网上的图片和视频<br>干净地收进本地</h1>
+    <p class="home-sub">粘贴一个链接，或者输入关键词。自动识别来源、挑清晰度、跳过重复项。</p>
+
+    <div class="home-search" id="homeSearch">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input type="text" id="homeInput" autocomplete="off" spellcheck="false"
+             placeholder="粘贴链接，或输入关键词">
+      <!-- 抓取通道：首页是唯一入口，必须先说清「抓什么」。
+           默认图片；粘贴视频站链接时自动切到视频，用户点过就以手选为准。 -->
+      <div class="chan-seg" id="homeChan" role="group" aria-label="抓取通道">
+        <button type="button" class="on" data-chan="image" title="搜图片 / 从网页抓图">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="M21 15l-5-5L5 20"/></svg>图片</button>
+        <button type="button" data-chan="video" title="搜视频 / 解析并下载视频">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="M17 10l4-3v10l-4-3"/></svg>视频</button>
+      </div>
+      <button class="home-go" type="button" id="homeGo">开始抓取 <span>→</span></button>
+    </div>
+    <!-- 识别结果单占一行、和站点提示并排：
+         塞进搜索框会把输入区压到只剩二三十个字符，长链接根本看不全。 -->
+    <div class="home-meta">
+      <span class="home-intent" id="homeIntent" hidden>等待输入</span>
+      <p class="home-sites">图片：Pexels · Unsplash · 花瓣 · 站酷 · 任意网页 &nbsp;·&nbsp;
+        视频：B站 · 抖音 · 快手 · 小红书 · 微博 · 知乎 · YouTube</p>
+    </div>
+
+    <div class="home-cards">
+      <button class="home-card" type="button" data-home-go="image">
+        <span class="hc-top">
+          <span class="hc-icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="M21 15l-5-5L5 20"/></svg></span>
+          <span class="hc-badge" id="homeImgCount">已存 —</span>
+        </span>
+        <b>抓取图片</b>
+        <small>列表页、相册、博主主页、整站，批量取原图</small>
+        <span class="hc-go">进入图片工作台 <i>→</i></span>
+      </button>
+      <button class="home-card" type="button" data-home-go="video">
+        <span class="hc-top">
+          <span class="hc-icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="M17 10l4-3v10l-4-3"/></svg></span>
+          <span class="hc-badge" id="homeVidCount">已存 —</span>
+        </span>
+        <b>抓取视频</b>
+        <small>单个视频解析清晰度，或整页批量下载全片</small>
+        <span class="hc-go">进入视频工作台 <i>→</i></span>
+      </button>
+    </div>
+
+    <div class="home-foot">
+      <div class="hf-item"><span>平台登录</span><b id="homeLogin">读取中…</b></div>
+      <div class="hf-item"><span>进行中任务</span><b id="homeTasks">0</b></div>
+      <div class="hf-item"><span>存储</span><b id="homeDisk">检测中…</b></div>
+      <span class="hf-spacer"></span>
+      <button class="hf-link" type="button" data-home-go="library">查看已下载 <i>→</i></button>
+    </div>
   </div>
+</section>
+
+<!-- ============ 抓取图片 ============ -->
+<section class="panel" id="panel-image">
+  <section class="hero-shell" aria-label="工作台快捷入口">
+    <div class="crumb">工作台 <span>/</span> <b>抓取图片</b></div>
+    <div class="hero-head">
+      <h1>找素材，一步到位</h1>
+      <p>粘贴链接或输入关键词，自动识别来源、清晰度与重复项</p>
+    </div>
+    <div class="omnibox" id="omniBox">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input type="text" id="omniInput" placeholder="粘贴图片页 / 相册链接，或输入关键词（如 风景 壁纸）" autocomplete="off" spellcheck="false">
+      <span class="intent" id="omniIntent">等待输入</span>
+      <kbd class="kbd-enter">↵</kbd>
+      <button class="omni-go" type="button" id="omniGo"><svg viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></svg>开始抓取</button>
+    </div>
+    <div class="opt-row">
+      <div class="seg" id="omniSeg">
+        <button type="button" class="on" data-mode="kw">关键词搜图</button>
+        <button type="button" data-mode="link">粘贴链接抓取</button>
+      </div>
+      <button class="chip-btn" type="button" id="btnFilterDrawer"><svg viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg><span id="filterLabel">筛选设置</span> <b id="filterCount">15</b></button>
+      <div class="chips" id="activeChips"></div>
+      <button class="chip-btn" type="button" id="btnDensity"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span id="densLabel">标准</span></button>
+      <span class="spacer"></span>
+      <span class="engine-hint" id="engineHint"></span>
+    </div>
+    <div class="hero-stats">
+      <div class="hstat"><span class="lbl">本次结果</span><b class="num" id="statResult">—</b><small>去重后可用</small><i class="edge"></i></div>
+      <div class="hstat"><span class="lbl">已选</span><b class="num" id="statSel">0</b><small>张待下载</small><i class="edge"></i></div>
+      <div class="hstat"><span class="lbl">下载中</span><b class="num" id="statTasks">0</b><small>个任务</small><i class="edge cy"></i></div>
+      <div class="hstat"><span class="lbl">资源库</span><b class="num" id="statLib">—</b><small>已下载文件</small><i class="edge"></i></div>
+    </div>
+  </section>
+
+  <!-- 关键词搜图 / 粘贴链接抓取 的切换只在上面 omnibox 的 #omniSeg 里有一份。
+       这里原本还叠了一条同样的模式条（#imageModeSwitch），两套按钮改的是同一个
+       hidden，纯属重复占高；删掉后切换仍由 #omniSeg → applyImageMode() 驱动。 -->
 
   <!-- 方式一：关键词搜图 -->
-  <div id="imageKwMode">
+  <div id="imageKwMode" class="workpane">
   <div class="searchbar">
     <input type="text" id="kwInput" placeholder="输入关键词，如：风景 壁纸 / cat / 城市夜景" autofocus>
     <button class="btn primary" id="btnSearch">搜索图片</button>
@@ -208,18 +324,20 @@
       <label>搜索引擎
         <select id="fEngines">
           <option value="bing" selected>Bing（推荐）</option>
+          <option value="google">Google（API / 渲染 / SearXNG 自动降级）</option>
+          <option value="bing,google">Bing + Google</option>
           <option value="bing,ddg">Bing + DuckDuckGo</option>
           <option value="ddg">DuckDuckGo</option>
-          <option value="google">Google</option>
           <option value="bing,google,ddg">全部（Bing + Google + DDG）</option>
         </select>
       </label>
     </div>
     <div class="filter-actions">
       <button class="btn tiny ghost" id="btnResetFilters">重置筛选</button>
-      <label class="chk"><input type="checkbox" id="fSkipExisting" checked> 跳过已下载的相同图片</label>
+      <label class="chk"><input type="checkbox" id="fSkipExisting" checked> 不重复下载同一张图</label>
       <span class="hint">清晰度筛选会逐个探测原图真实分辨率，条件越严格耗时越长。
-        Google 的结果自带真实宽高，可跳过探测（更快），但需要干净的出口 IP，可能触发人机验证。</span>
+        Google 的结果自带真实宽高，可跳过探测（更快）；被判定异常流量时会自动改用 API / SearXNG，
+        三条都失败会把原因写进搜索结果上方。</span>
     </div>
   </details>
 
@@ -237,95 +355,70 @@
   </div><!-- /imageKwMode -->
 
   <!-- 方式二：粘贴链接抓取（只要图片） -->
-  <div id="imgLinkMode" hidden>
+  <div id="imgLinkMode" class="workpane" hidden>
 <div class="searchbar">
     <input type="text" id="imgCrawlInput"
-      placeholder="粘贴图片列表页 / 相册 / 官网链接，例：https://www.pexels.com/search/led/">
+      placeholder="粘贴图片列表页 / 相册 / 任意网页链接">
     <button class="btn primary" id="imgBtnCrawl">开始抓取图片</button>
   </div>
 
-  <details class="filters" id="imgCrawlOptions" open>
-    <summary>抓取选项 <span class="hint" id="imgCrawlOptSummary">（页数 / 下钻 / 已下载 …）</span></summary>
-    <div class="filter-grid">
-      <label>抓取模式
-        <select id="imgCMode">
-          <option value="list" selected>列表页 / 博主页 → 逐条抓取</option>
-          <option value="site">全站抓取（独立站：整站走一遍）</option>
-        </select>
-      </label>
-      <label id="imgCPagesLabelList">抓取页数
-        <select id="imgCPageCount">
-          <option value="1" selected>1 页</option>
-          <option value="2">2 页</option>
-          <option value="3">3 页</option>
-          <option value="5">5 页</option>
-          <option value="10">10 页</option>
-          <option value="20">20 页</option>
-          <option value="50">50 页</option>
-          <option value="100">100 页</option>
-          <option value="300">300 页</option>
-          <option value="500">500 页</option>
-          <option value="1000">1000 页</option>
-          <option value="2000">2000 页</option>
-        </select>
-      </label>
-      <label id="imgCPagesLabelSite" hidden>抓取页数（整站）
-        <select id="imgCSitePages">
-          <option value="10">10 页</option>
-          <option value="30" selected>30 页</option>
-          <option value="60">60 页</option>
-          <option value="120">120 页</option>
-          <option value="300">300 页</option>
-          <option value="500">500 页</option>
-          <option value="1000">1000 页</option>
-          <option value="2000">2000 页</option>
-        </select>
-      </label>
-      <label id="imgCDepthLabel" hidden>跟随链接层数
-        <select id="imgCDepth">
-          <option value="1">1 层（只抓首页直达的页面）</option>
-          <option value="2" selected>2 层（推荐）</option>
-          <option value="3">3 层（抓得更深，更慢）</option>
-        </select>
-      </label>
-      <label id="imgCSitemapLabel" class="chk wide" hidden><input type="checkbox" id="imgCUseSitemap" checked>
-        用站点地图（sitemap.xml / robots.txt 声明）当起点 —— 站点自己给出的完整页面清单，覆盖最全</label>
-      <label id="imgCDrillLabel">详情页下钻
-        <select id="imgCDrill">
-          <option value="auto" selected>智能判断（推荐）</option>
-          <option value="always">总是下钻（取高清原图）</option>
-          <option value="never">不下钻（只要列表页）</option>
-        </select>
-      </label>
-      <label id="imgCMaxItemsLabel">最多作品 / 详情页
-        <select id="imgCMaxItems">
-          <option value="10">10 个</option>
-          <option value="30" selected>30 个</option>
-          <option value="60">60 个</option>
-          <option value="120">120 个</option>
-          <option value="300">300 个</option>
-          <option value="500">500 个</option>
-          <option value="1000">1000 个</option>
-          <option value="2000">2000 个</option>
-        </select>
-      </label>
-      <label>结果处理
-        <select id="imgCOriginals">
-          <option value="0" selected>保留全部（含缩略图）</option>
-          <option value="1">只留原图（去掉缩略图）</option>
-        </select>
-      </label>
-      <label class="chk wide"><input type="checkbox" id="imgCRender" checked>
-        允许浏览器渲染 JS 页面（阿里 / 1688 / 大部分现代站点必需；会明显变慢）</label>
-    </div>
-    <div class="filter-actions">
-      <span class="hint"><b>两种模式是两件事</b>：<b>列表页 / 博主页 → 逐条抓取</b>
-        用于「一个页面列着一批内容」的站（商品列表、搜索结果页、博主主页、频道页）；
-        <b>全站抓取</b>用于独立站（公司官网、博客、作品站）——不假设任何列表结构，
-        从你给的地址出发把同域页面走一遍，汇总全站素材（列表页常只有缩略图，
-        原图在详情页里，所以逐条抓取时「下钻」决定能不能拿到高清原图）。</span>
-    </div>
-  </details>
+  <!-- 图片抓取参数：一行内联，不再用视频页那种大面板（用户 2026-11-07 反馈红框整块该去掉）。
+       只留图片真正会调的 4 项；整站 / 链接层级 / sitemap / 渲染 等视频式字段这里不展示，
+       但对应控件以 hidden 保留 —— createCrawler() 是图片/视频共用的，
+       读取函数仍要拿到这些 id，删掉会空引用。 -->
+  <div class="opt-row crawl-opts" id="imgCrawlOptions">
+    <label id="imgCPagesLabelList" class="inline-opt">抓取页数
+      <select id="imgCPageCount">
+        <option value="1" selected>1 页</option>
+        <option value="2">2 页</option>
+        <option value="3">3 页</option>
+        <option value="5">5 页</option>
+        <option value="10">10 页</option>
+        <option value="20">20 页</option>
+        <option value="50">50 页</option>
+        <option value="100">100 页</option>
+        <option value="300">300 页</option>
+        <option value="500">500 页</option>
+        <option value="1000">1000 页</option>
+        <option value="2000">2000 页</option>
+      </select>
+    </label>
+    <label id="imgCMaxItemsLabel" class="inline-opt">最多图片
+      <select id="imgCMaxItems">
+        <option value="10">10 张</option>
+        <option value="30" selected>30 张</option>
+        <option value="60">60 张</option>
+        <option value="120">120 张</option>
+        <option value="300">300 张</option>
+        <option value="500">500 张</option>
+        <option value="1000">1000 张</option>
+        <option value="2000">2000 张</option>
+      </select>
+    </label>
+    <label id="imgCDrillLabel" class="inline-opt">详情页原图
+      <select id="imgCDrill">
+        <option value="auto" selected>智能判断（推荐）</option>
+        <option value="always">总是进详情页取原图</option>
+        <option value="never">只用列表页的图</option>
+      </select>
+    </label>
+    <label class="inline-opt">结果处理
+      <select id="imgCOriginals">
+        <option value="0" selected>保留全部（含缩略图）</option>
+        <option value="1">只留原图（去掉缩略图）</option>
+      </select>
+    </label>
+    <span class="hint" id="imgCrawlHint">默认值一般够用；图片多时调高「最多图片」</span>
+    <!-- 共用抓取器需要、但图片页不展示的字段 -->
+    <select id="imgCMode" hidden><option value="list" selected>列表页</option></select>
+    <select id="imgCSitePages" hidden><option value="30" selected>30 页</option></select>
+    <select id="imgCDepth" hidden><option value="2" selected>2 层</option></select>
+    <input type="checkbox" id="imgCUseSitemap" hidden checked>
+    <input type="checkbox" id="imgCRender" hidden checked>
+    <label id="imgCPagesLabelSite" hidden></label>
+    <label id="imgCDepthLabel" hidden></label>
+    <label id="imgCSitemapLabel" hidden></label>
+  </div>
 
   <div id="imgCrawlProgress" hidden>
     <div class="crawlprog">
@@ -344,7 +437,7 @@
     <!-- 批量下载前的设置：原来只能吃全局默认值，现在可当场调整 -->
     <div class="dlopts">
       <label>并发 <input type="number" id="imgDlConcurrency" min="1" max="16" value="6"></label>
-      <label class="chk"><input type="checkbox" id="imgDlSkip" checked> 跳过已存在</label>
+      <label class="chk"><input type="checkbox" id="imgDlSkip" checked> 跳过同名文件</label>
     </div>
     <div class="spacer"></div>
     <button class="btn tiny" id="imgBtnCrawlSelAll">全选</button>
@@ -368,6 +461,13 @@
 
 <!-- ============ 抓取视频 ============ -->
 <section class="panel" id="panel-video">
+  <div class="hero-shell">
+    <div class="crumb">工作台 <span>/</span> <b>抓取视频</b></div>
+    <div class="hero-head">
+      <h1>找视频，一步到位</h1>
+      <p>单个视频挑清晰度，博主主页整批下；粘贴链接会自动判断该走哪条路</p>
+    </div>
+  </div>
   <div class="modeswitch" id="videoModeSwitch">
     <button class="mode-btn active" data-mode="kw">关键词搜视频</button>
     <button class="mode-btn" data-mode="link">粘贴链接抓取</button>
@@ -376,7 +476,7 @@
   </div>
 
   <!-- 方式一：关键词搜视频 -->
-  <div id="videoKwMode">
+  <div id="videoKwMode" class="workpane">
   <div class="video-search">
     <input type="text" id="videoKw" placeholder="用关键词搜视频，如：风景 航拍 4K / product demo">
     <!-- 视频源：**搜索开始前**就能选定。分两类，界面上如实区分：
@@ -422,23 +522,27 @@
     </select>
     <button class="btn" id="btnVideoSearch">搜索视频</button>
   </div>
-  <p class="hint" style="margin:-4px 0 12px">
-    <b>先选视频源再搜索</b>：只想在 YouTube 上搜，就把来源选成 YouTube（B 站同理）。
-    「全网」会一次查多个来源并合并去重，某个来源返回的内容与关键词无关时会自动丢弃并如实说明。
-    <br>「国内主流 / 国外主流」= 多来源结果里的该地区站点 + 该地区主力站的定向检索
-    + 该地区有官方搜索接口的站点（国内并 B 站、国外并 YouTube 与 Dailymotion）。
-    <br>「单站 · 按站点检索」会<b>主动针对该站点检索</b>——用检索语法限定域名，
-    并把站点名拼进关键词（如「科比 抖音」），两条手段并施后再按域名核准。
-    该站内容少时会如实告诉你找到几条。
-    极少数站点（优酷 / 快手 / 小红书 / Vimeo / X / Facebook）的视频只在自家 App 内，
-    公开网页里检索不到，选中时会直接说明原因。
-    <br><b>成人向关键词</b>（如「angela white anal」）会自动<b>优先返回成人站点</b>的结果
-    （Pornhub / Eporner）——通用搜索引擎对这类内容只给 YouTube 的采访花絮，
-    拿不到成人站的内容，所以这里单独去成人站检索。
-    <br><b>兜底不限于上面罗列的站点</b>：某个源结果不够时，会自动从<b>全网</b>补充，
-    并如实标注哪些是兜底来的。
-    搜到后可逐条「解析」确认，也可<b>勾选多条批量下载</b>。
-  </p>
+  <!-- 视频源选择规则：原来 6 行裸灰字直接铺在搜索框下面，占掉半个首屏、
+       把结果区顶到看不见的地方。内容一字未删，收进折叠，默认只占一行。 -->
+  <details class="pane-note">
+    <summary>视频源怎么选、哪些站点搜不到</summary>
+    <div class="pane-note-body">
+      <p><b>先选视频源再搜索</b>：只想在 YouTube 上搜，就把来源选成 YouTube（B 站同理）。
+        「全网」会一次查多个来源并合并去重，某个来源返回的内容与关键词无关时会自动丢弃并如实说明。</p>
+      <p>「国内主流 / 国外主流」= 多来源结果里的该地区站点 + 该地区主力站的定向检索
+        + 该地区有官方搜索接口的站点（国内并 B 站、国外并 YouTube 与 Dailymotion）。</p>
+      <p>「单站 · 按站点检索」会<b>主动针对该站点检索</b>——用检索语法限定域名，
+        并把站点名拼进关键词（如「科比 抖音」），两条手段并施后再按域名核准。
+        该站内容少时会如实告诉你找到几条。
+        极少数站点（优酷 / 快手 / 小红书 / Vimeo / X / Facebook）的视频只在自家 App 内，
+        公开网页里检索不到，选中时会直接说明原因。</p>
+      <p><b>成人向关键词</b>（如「angela white anal」）会自动<b>优先返回成人站点</b>的结果
+        （Pornhub / Eporner）——通用搜索引擎对这类内容只给 YouTube 的采访花絮，
+        拿不到成人站的内容，所以这里单独去成人站检索。</p>
+      <p><b>兜底不限于上面罗列的站点</b>：某个源结果不够时，会自动从<b>全网</b>补充，
+        并如实标注哪些是兜底来的。搜到后可逐条「解析」确认，也可<b>勾选多条批量下载</b>。</p>
+    </div>
+  </details>
 
   <!-- 搜索结果的操作栏：勾选 / 批量下载设置。搜索结果大多还要走 yt-dlp 逐条解析，
        不像「复制直链」那样秒下，所以并发默认收在 3，避免一批同时开跑把带宽抢死。 -->
@@ -512,12 +616,14 @@
     </div>
   </details>
 
-  <div id="videoSearchResult" class="vlist" hidden></div>
+  <!-- 初始不 hidden：没结果时由种子空态占位。doVideoSearch 一开始会 hidden 并清空，
+       拿到结果后 applyVideoSearchFilter 再显示，所以不会和列表打架。 -->
+  <div id="videoSearchResult" class="vlist"></div>
 
   </div><!-- /videoKwMode -->
 
   <!-- 方式二：粘贴链接抓取（只要视频） -->
-  <div id="vidLinkMode" hidden>
+  <div id="vidLinkMode" class="workpane" hidden>
   <!-- 单个视频链接：解析清晰度后下载（走 yt-dlp，可选清晰度 / 容器 / 字幕） -->
   <div class="subsec-title">单个视频 —— 解析清晰度后下载</div>
   <div class="searchbar">
@@ -532,8 +638,8 @@
     <button class="btn primary" id="vidBtnCrawl">开始抓取视频</button>
   </div>
 
-  <details class="filters" id="vidCrawlOptions" open>
-    <summary>抓取选项 <span class="hint" id="vidCrawlOptSummary">（页数 / 下钻 / 已下载 …）</span></summary>
+  <details class="filters" id="vidCrawlOptions">
+    <summary>抓取参数 <span class="hint" id="vidCrawlOptSummary">（页数 / 下钻 / 清晰度 / 渲染 · 点开可调整）</span></summary>
     <div class="filter-grid">
       <label>抓取模式
         <select id="vidCMode">
@@ -638,7 +744,7 @@
         </select>
       </label>
       <label>并发 <input type="number" id="vidDlConcurrency" min="1" max="16" value="4"></label>
-      <label class="chk"><input type="checkbox" id="vidDlSkip" checked> 跳过已存在</label>
+      <label class="chk"><input type="checkbox" id="vidDlSkip" checked> 跳过同名文件</label>
     </div>
     <div class="spacer"></div>
     <button class="btn tiny" id="vidBtnCrawlSelAll">全选</button>
@@ -835,28 +941,85 @@
       请使用独立的「平台登录」页，不要在这里共用 Cookies。这里仅保留给普通网站或特殊兼容场景。</p>
   </div>
 
+  <h3 class="sec-title">Google 搜图接入</h3>
+  <div class="settings">
+    <label>渲染通道代理（可选）
+      <input type="text" id="sGoogleProxy" placeholder="http://127.0.0.1:7890 ；留空=直连">
+    </label>
+    <label>通道选择
+      <select id="sGoogleTransport">
+        <option value="auto">自动（浏览器渲染 → SearXNG）</option>
+        <option value="render">只用浏览器渲染</option>
+        <option value="searx">只用 SearXNG 实例</option>
+      </select>
+    </label>
+    <label>SearXNG 实例（可选）
+      <input type="text" id="sGoogleSearx" placeholder="https://searx.example.com，多个用逗号分隔；留空=不启用">
+    </label>
+    <div class="kv" style="grid-column:1/-1"><span>当前通道</span><b id="sGoogleStat">检测中…</b></div>
+    <p class="hint" style="grid-column:1/-1">
+      Google 官方 Custom Search API 已于 2026 年对新客户关闭，无法再申请 key，故不提供 API 配置。
+      本机渲染通道被 Google 判为异常流量时，配一个渲染代理或自建 SearXNG 实例即可。</p>
+    <p class="hint" style="grid-column:1/-1">
+      Google 现在有三条通道，按上面的顺序自动降级：<b>官方 JSON API</b>（免费 100 次/天，
+      不受出口 IP 影响）→ <b>浏览器渲染</b>（住家 IP 可用；被 Google 判定异常流量时可给这条通道单独配代理）
+      → <b>SearXNG 实例</b>（由实例服务器代抓）。三条都失败时，搜索结果栏会把每条的失败原因摊开，
+      不再只给一句「Google 不可用」。
+    </p>
+  </div>
+
+  <h3 class="sec-title">会员视频兜底（试看 → 完整版）</h3>
+  <div class="settings">
+    <label class="chk wide"><input type="checkbox" id="sVipAuto">
+      下载完成发现是试看片段（时长明显短于正片）时，自动换源重下完整版</label>
+    <label>大会员 Cookie 目录
+      <input type="text" id="sVipCookieDir" placeholder="留空 = 数据目录\vip_cookies（每个 *.txt 一份）">
+    </label>
+    <label>解析网关（可选）
+      <input type="text" id="sVipParse" placeholder="https://xxx/?url={url}，多个用逗号分隔">
+    </label>
+    <label>资源站白名单（可选）
+      <input type="text" id="sVipResourceSites" placeholder="留空 = 内置 12 个实测可用资源站；填 key 则只用这些">
+    </label>
+    <label class="chk wide"><input type="checkbox" id="sVipOverseas">
+      国内资源站找不到时，从 <b>YouTube</b> 等海外免费源找同片（需要代理）</label>
+    <label>海外源下载代理
+      <input type="text" id="sDownloadProxy" placeholder="http://127.0.0.1:7890；只作用于 YouTube 等海外源，国内站仍直连">
+    </label>
+    <div class="kv" style="grid-column:1/-1"><span>兜底状态</span><b id="sVipStat">检测中…</b></div>
+    <div class="filter-actions" style="grid-column:1/-1">
+      <button class="btn tiny" id="btnVipCheck">校验会员 Cookie</button>
+      <span class="hint" id="vipStatMsg">B 站大会员 Cookie 放一份进去即可解锁 1080P+/4K；没有会员号也能靠资源站换源拿到完整版。</span>
+    </div>
+  </div>
+
   <h3 class="sec-title">界面外观</h3>
   <div class="settings appearance-settings">
     <div class="appearance-group wide">
-      <div class="appearance-label">基础外观</div>
+      <div class="appearance-label">基础外观 <span class="hint" style="font-weight:400">（4 套 × 8 种强调色 = 32 种组合）</span></div>
       <div class="base-theme-grid" id="baseThemeGrid" aria-label="基础外观选择">
-        <button type="button" class="base-theme-card" data-mode="gray">
-          <span class="theme-preview preview-gray"><i></i><b></b><em></em></span>
-          <span class="theme-copy"><strong>灰色</strong><small>中性灰，层级清晰</small></span>
+        <button type="button" class="base-theme-card" data-mode="obsidian">
+          <span class="theme-preview preview-obsidian"><i></i><b></b><em></em></span>
+          <span class="theme-copy"><strong>曜石 · 推荐</strong><small>紫调深色，层次最耐看</small></span>
         </button>
-        <button type="button" class="base-theme-card" data-mode="black">
-          <span class="theme-preview preview-black"><i></i><b></b><em></em></span>
-          <span class="theme-copy"><strong>纯黑</strong><small>OLED 风格，高对比</small></span>
+        <button type="button" class="base-theme-card" data-mode="slate">
+          <span class="theme-preview preview-slate"><i></i><b></b><em></em></span>
+          <span class="theme-copy"><strong>雾灰</strong><small>中性灰，不带色调</small></span>
         </button>
-        <button type="button" class="base-theme-card" data-mode="light">
-          <span class="theme-preview preview-light"><i></i><b></b><em></em></span>
+        <button type="button" class="base-theme-card" data-mode="ivory">
+          <span class="theme-preview preview-ivory"><i></i><b></b><em></em></span>
           <span class="theme-copy"><strong>纯白</strong><small>白底，高亮清爽</small></span>
+        </button>
+        <button type="button" class="base-theme-card" data-mode="midnight">
+          <span class="theme-preview preview-midnight"><i></i><b></b><em></em></span>
+          <span class="theme-copy"><strong>深海</strong><small>蓝调深色，冷峻</small></span>
         </button>
       </div>
       <select id="sUiMode" class="appearance-hidden-select" aria-label="基础外观">
-        <option value="gray">灰色</option>
-        <option value="black">纯黑</option>
-        <option value="light">纯白</option>
+        <option value="obsidian">曜石</option>
+        <option value="slate">雾灰</option>
+        <option value="ivory">纯白</option>
+        <option value="midnight">深海</option>
       </select>
     </div>
 
@@ -868,7 +1031,9 @@
         <button type="button" class="theme-swatch" data-theme="violet" title="紫色"><i></i><span>紫</span></button>
         <button type="button" class="theme-swatch" data-theme="green" title="绿色"><i></i><span>绿</span></button>
         <button type="button" class="theme-swatch" data-theme="orange" title="橙色"><i></i><span>橙</span></button>
-        <button type="button" class="theme-swatch" data-theme="rose" title="玫红"><i></i><span>红</span></button>
+        <button type="button" class="theme-swatch" data-theme="rose" title="玫红"><i></i><span>玫红</span></button>
+        <button type="button" class="theme-swatch" data-theme="indigo" title="靛蓝"><i></i><span>靛蓝</span></button>
+        <button type="button" class="theme-swatch" data-theme="teal" title="石墨青"><i></i><span>石墨青</span></button>
       </div>
       <select id="sAccent" class="appearance-hidden-select" aria-label="强调色">
         <option value="blue">蓝色</option>
@@ -877,9 +1042,11 @@
         <option value="green">绿色</option>
         <option value="orange">橙色</option>
         <option value="rose">玫红</option>
+        <option value="indigo">靛蓝</option>
+        <option value="teal">石墨青</option>
       </select>
     </div>
-    <p class="hint wide">基础外观会联动页面背景、顶部栏、卡片、输入框、表格、任务区、弹窗和文字层级；强调色只控制重点按钮、选中态和进度。切换后立即预览，保存后下次启动继续使用。</p>
+    <p class="hint wide">基础外观会联动背景、顶栏、卡片、输入框、表格、任务区、弹窗和文字层级；强调色只控制重点按钮、选中态和进度。切换后立即预览，保存后下次启动继续使用。表面分层、边缘高光、层叠柔影与骨架微光已默认启用。</p>
   </div>
 
   <h3 class="sec-title">桌面程序</h3>
@@ -983,7 +1150,52 @@
   </div>
 </section>
 
+
+<!-- ============ P1 交互层：命令面板 / 筛选抽屉（复用现有 DOM，不复制控件） ============ -->
+<div class="shell-overlay" id="drawerOverlay"></div>
+<aside class="filter-drawer" id="filterDrawer" aria-label="筛选抽屉">
+  <div class="drawer-head">
+    <div><h3 id="drawerTitle">图片筛选设置</h3><p id="drawerSub">15 项参数 · 原控件直接搬入，设置与结果完全同步</p></div>
+    <button type="button" class="drawer-close" id="drawerClose" aria-label="关闭">×</button>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+  <div class="drawer-foot">
+    <button type="button" class="omni-go" id="drawerDone">完成 <kbd>Esc</kbd></button>
+    <span class="spacer"></span>
+    <button type="button" class="chip-btn" id="drawerReset">重置全部</button>
+  </div>
+</aside>
+
+<div class="shell-overlay" id="cmdOverlay"></div>
+<div class="cmd-pal" id="cmdPal" role="dialog" aria-label="命令面板">
+  <div class="cmd-input-row">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    <input type="text" id="cmdInput" placeholder="输入命令或搜索功能…" autocomplete="off">
+    <kbd>Esc</kbd>
+  </div>
+  <div class="cmd-list" id="cmdList"></div>
+</div>
+<div class="sr-only" id="shellLive" aria-live="polite"></div>
 </main>
+
+<!-- 首屏落点：在任何脚本加载前就把「上次所在的页面」点亮。
+     否则会先渲染首页、再被 shell.js 切走，用户看到一次闪动。 -->
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('md_last_tab');
+    if (!t || !document.getElementById('panel-' + t)) return;
+    document.querySelectorAll('.panel').forEach(function (p) { p.classList.remove('active'); });
+    document.getElementById('panel-' + t).classList.add('active');
+    document.querySelectorAll('.tab').forEach(function (b) {
+      b.classList.toggle('active', b.dataset.tab === t);
+    });
+    document.querySelectorAll('.sidebar .nav-item').forEach(function (b) {
+      b.classList.toggle('on', b.dataset.tab === t);
+    });
+  } catch (e) {}
+})();
+</script>
 
 
 <!-- ============ 首次使用向导 ============ -->
@@ -1037,6 +1249,7 @@
 
 <div class="toast-wrap" id="toastWrap"></div>
 
-<script src="app.js?v=3.0.3-kernel"></script>
+<script src="app.js?v=3.0.4-kernel"></script>
+<script src="shell.js?v=3.0.4-shell"></script>
 </body>
 </html>

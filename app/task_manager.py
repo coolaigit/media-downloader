@@ -284,6 +284,33 @@ class Task:
         }
 
 
+def apply_video_progress(t: Task, info: dict) -> None:
+    """把下载器的进度回调映射到任务对象（调用方需持有 manager 锁）。
+
+    以前这里是 `t.percent = info.get("percent") or t.percent`：分片下载回调
+    没带 percent，任务条就一直 0%，直到结束瞬间跳 100%。现在统一走这里，
+    并把 filename / note 都映射到 current，让「分片 x/N」在界面上可见。
+    """
+    p = info.get("percent")
+    if p is not None:
+        try:
+            # 完成前最高 99.9%，100% 只由任务真正结束时设置
+            t.percent = min(99.9, max(0.0, float(p or 0)))
+        except (TypeError, ValueError):
+            pass
+    try:
+        t.speed = float(info.get("speed") or 0)
+    except (TypeError, ValueError):
+        t.speed = 0.0
+    label = str(info.get("filename") or info.get("note") or "")
+    if label:
+        t.current = label[:80]
+    if info.get("status") == "downloading":
+        t.done = 0
+        if info.get("total_bytes"):
+            t.total = 1
+
+
 class TaskManager:
     def __init__(self, max_tasks: int = 2000):
         self._tasks: dict[str, Task] = {}
@@ -827,17 +854,7 @@ class TaskManager:
             if self._cancelled(task_id):
                 raise DownloadCancelled("用户已取消下载")
             with self._lock:
-                t.percent = info.get("percent") or t.percent
-                t.speed = info.get("speed") or 0
-                if info.get("filename"):
-                    t.current = info["filename"][:80]
-                st = info.get("status")
-                if st == "downloading":
-                    done = info.get("progressed_bytes") or 0
-                    total = info.get("total_bytes") or 0
-                    t.done = 1 if info.get("percent", 0) >= 99.9 else 0
-                    if total:
-                        t.total = 1
+                apply_video_progress(t, info)
 
         try:
             o = t.options
@@ -916,6 +933,11 @@ class TaskManager:
                 t.speed = 0.0
                 if res.get("ok"):
                     t.status = ST_COMPLETED
+                elif self._cancelled(task_id):
+                    # 用户取消要把「取消」和「失败」分开：下载被取消时结果是
+                    # ok=False，旧逻辑直接记 failed，用户以为下载出错了。
+                    t.status = ST_CANCELLED
+                    t.error = "已取消"
                 else:
                     t.status = ST_FAILED
                     t.error = res.get("error") or "下载失败"

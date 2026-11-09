@@ -44,6 +44,33 @@ DEFAULTS = {
     # 但同一版本反复安装不会每次骚扰用户。
     "onboarding_complete": False,
     "onboarding_version": "",
+    # ---------------- Google 搜图接入（2026-11） ----------------
+    # 官方 Custom Search JSON API 已对新客户关闭（官方原文 "closed to new
+    # customers"，存量客户 2027-01-01 停服），新项目拿不到 key，故不提供
+    # API 配置。只剩：浏览器渲染 + 自备 SearXNG 实例。
+    # 浏览器渲染通道的专用出口（http://127.0.0.1:7890 这类）。留空 = 直连。
+    "google_proxy": "",
+    # auto=自动（渲染 → SearXNG）；render/searx=强制单通道
+    "google_transport": "auto",
+    # 自备 SearXNG 实例（逗号分隔），由实例服务器代抓 Google。留空 = 不启用。
+    # 内置公共实例池实测基本都 429/反爬，默认不再白等。
+    "google_searx": "",
+    # ---------------- 会员视频兜底（2026-11） ----------------
+    # 下载完成的文件比页面标称时长短 → 判定为「试看片段」，自动换源下载完整版。
+    "vip_auto_unlock": True,
+    # 额外的大会员 Cookie（多账号轮换）：目录下每个 *.txt 是一份 Netscape cookies
+    # 或一行 SESSDATA=...；留空 = 用 DATA_ROOT/vip_cookies。
+    "vip_cookie_dir": "",
+    # VIP 解析网关（可选，逗号分隔，模板用 {url}）。留空 = 只用内置公共解析池。
+    "vip_parse_endpoints": "",
+    # 资源站换源：留空 = 用内置可用池；填 key 列表（见 resource_sites.SITES）可自定义。
+    "vip_resource_sites": "",
+    # 海外免费替代源（YouTube）：资源站没有的片/集，从 YouTube 找同片。
+    # 需要本机能访问 YouTube（国内用户填 download_proxy）。
+    "vip_overseas": True,
+    # 海外源专用代理（http://127.0.0.1:7890）。只作用于 YouTube 等海外下载，
+    # 国内资源站仍然直连 —— 别把国内下载也绕进代理。
+    "download_proxy": "",
 }
 
 _LOCK = threading.RLock()

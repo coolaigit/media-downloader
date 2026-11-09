@@ -55,6 +55,10 @@ VERSION = 2
 
 _LOCK = threading.RLock()
 
+# 历史记录里的缩略图能活多久（秒）。签名 CDN 地址通常几小时到一天就失效，
+# 过期后继续下发只会让界面裂图并刷出一串 403/502。
+_THUMB_TTL_SEC = 24 * 3600
+
 # 内存缓存：每次搜索结果过滤都要读一遍台账，而批量下载会频繁写入。
 # 不做缓存的话「读整个 JSON + 写整个 JSON」会随记录数增长越来越慢。
 # 用**文件 mtime** 判断是否需要重读 —— 服务与诊断脚本可能同时访问，
@@ -360,12 +364,19 @@ def recent(limit: int = 50) -> list[dict]:
     rows = sorted(_unique_records(records), key=lambda m: -(m.get("ts") or 0))
     out = []
     for m in rows[: max(1, limit)]:
+        # 缩略图多半是带签名的 CDN 地址（小红书 24 小时、B站 2 小时就失效）。
+        # 过期后前端必然会请求失败，界面上就是一片裂图 —— 小红书历史记录
+        # 隔天再看，首页示例区全是 502（2026-11-08 实测）。
+        # 超过一天的记录干脆不下发缩略图，前端直接显示占位。
+        _thumb = m.get("thumbnail") or ""
+        if _thumb and (time.time() - float(m.get("ts") or 0)) > _THUMB_TTL_SEC:
+            _thumb = ""
         out.append({
             "title": m.get("title") or "",
             "kind": m.get("kind") or "video",
             "url": m.get("url") or "",
             "source_url": m.get("source_url") or m.get("url") or "",
-            "thumbnail": m.get("thumbnail") or "",
+            "thumbnail": _thumb,
             "path": m.get("path") or "",
             "size": m.get("size") or 0,
             "ts": m.get("ts") or 0,

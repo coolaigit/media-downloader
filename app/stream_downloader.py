@@ -211,6 +211,23 @@ def _run_ffmpeg(cmd: list[str], duration: float, on_progress, cancel_event,
                 work_dir: Path):
     """跑 ffmpeg 并解析 -progress 输出，返回 (ok, err, produced_size)。"""
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # 诊断日志：设 MD_STREAM_DEBUG=1 时把进度行与输出文件大小写到临时目录。
+    # 为什么需要（2026-11-04）：出现过「服务里 ffmpeg 报进度但 .part 一直 0 字节」，
+    # 不落盘就看不出它到底在等什么。
+    import tempfile
+    _dbg = bool(os.environ.get("MD_STREAM_DEBUG"))
+    _dbg_path = Path(tempfile.gettempdir()) / "md_stream_debug.log"
+    _out_path = Path(cmd[-1]) if cmd else Path()
+
+    def _dbg_log(msg: str) -> None:
+        if not _dbg:
+            return
+        try:
+            size = _out_path.stat().st_size if _out_path.exists() else -1
+            with open(_dbg_path, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')} size={size} {msg}\n")
+        except Exception:  # noqa: BLE001
+            pass
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -219,6 +236,7 @@ def _run_ffmpeg(cmd: list[str], duration: float, on_progress, cancel_event,
         )
     except OSError as e:
         return False, f"无法启动 ffmpeg: {e}", 0
+    _dbg_log(f"start pid={proc.pid} out={_out_path}")
 
     err_tail: list[str] = []
 
@@ -257,22 +275,66 @@ def _run_ffmpeg(cmd: list[str], duration: float, on_progress, cancel_event,
     STALL_SEC = 90
     total_cap = (duration * 4 + 180) if duration and duration > 0 else 1800.0
     last_output = time.time()
-    last_output = time.time()
+    # 进度看门狗：ffmpeg 在「连上了但分片拉不动」时仍会每 0.5 秒吐一行
+    # `progress=continue`，只看「有没有输出」永远判不出卡死（2026-11-04 实测：
+    # 会员换源下载停在 0 字节的 .part 上 3 分钟，进程活着、日志有输出）。
+    # 因此额外看 out_time 有没有前进，120 秒不前进就掐掉换下一条封装。
+    PROGRESS_STALL_SEC = 120
+    last_progress = time.time()
+    progress = {"sec": -1.0}
+    # 输出文件大小看门狗：ffmpeg 在「连上了但一个字节都写不出来」时，
+    # -progress 仍会每 0.5 秒吐一行（out_time 甚至可能前进），
+    # 只看 stdout / out_time 都判不出来（2026-11-04 实测：0 字节 .part 挂了 18 分钟）。
+    # 文件连续 120 秒没有增长就一律判卡死。
+    def _out_size() -> int:
+        try:
+            return _out_path.stat().st_size if _out_path.exists() else 0
+        except OSError:
+            return 0
+    growth = {"size": _out_size(), "t": time.time()}
 
     def _watchdog():
         nonlocal timed_out_reason
         while proc.poll() is None:
             if cancel_event is not None and cancel_event.is_set():
                 return
-            if time.time() - last_output > STALL_SEC:
-                timed_out_reason = f"拉流停摆超 {STALL_SEC} 秒无数据（网络中断？），已中止本次下载"
+            now = time.time()
+            try:
+                sz = _out_size()
+            except Exception:  # noqa: BLE001
+                sz = 0
+            if sz > growth["size"]:
+                growth["size"] = sz
+                growth["t"] = now
+            elif now - growth["t"] > PROGRESS_STALL_SEC:
+                timed_out_reason = (f"输出文件 {PROGRESS_STALL_SEC} 秒没有增长"
+                                    f"（{sz} 字节），判定卡死并中止")
+                _dbg_log("watchdog: file not growing")
                 try:
                     proc.kill()
                 except Exception:
                     pass
                 return
-            if time.time() - t0 > total_cap:
+            if now - last_output > STALL_SEC:
+                timed_out_reason = f"拉流停摆超 {STALL_SEC} 秒无数据（网络中断？），已中止本次下载"
+                _dbg_log("watchdog: no output stall")
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return
+            if now - last_progress > PROGRESS_STALL_SEC:
+                timed_out_reason = (f"拉流 {PROGRESS_STALL_SEC} 秒没有任何进度"
+                                    f"（已下到 {progress['sec']:.0f}s / 共 {duration:.0f}s），已中止")
+                _dbg_log("watchdog: no progress stall")
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return
+            if now - t0 > total_cap:
                 timed_out_reason = f"单条流下载超过总时长上限（{int(total_cap)} 秒），已中止"
+                _dbg_log("watchdog: total cap")
                 try:
                     proc.kill()
                 except Exception:
@@ -301,6 +363,10 @@ def _run_ffmpeg(cmd: list[str], duration: float, on_progress, cancel_event,
                     sec = int(v) / 1_000_000
                 except ValueError:
                     continue
+                if sec > progress["sec"] + 0.4:
+                    progress["sec"] = sec
+                    last_progress = time.time()
+                    _dbg_log(f"progress {sec:.1f}s / {duration:.0f}s")
                 if on_progress:
                     pct = round(sec * 100 / duration, 1) if duration > 0 else 0.0
                     on_progress({"status": "downloading", "percent": min(pct, 99.0),
@@ -334,38 +400,57 @@ def _run_ffmpeg(cmd: list[str], duration: float, on_progress, cancel_event,
         msg = " | ".join(err_tail[-2:])
         return False, (timed_out_reason + (f"（{msg}）" if msg else ""))[:300], 0
     if proc.returncode == 0:
+        _dbg_log("exit rc=0")
         return True, "", 0
     msg = " | ".join(err_tail[-4:]) or f"ffmpeg 退出码 {proc.returncode}"
+    _dbg_log(f"exit rc={proc.returncode} err={msg[:200]}")
     return False, msg[:400], 0
 
 
 def _ffmpeg_download(url: str, target: Path, referer: str, duration: float,
-                     on_progress, cancel_event, work_dir: Path) -> tuple[bool, str, Path]:
-    """用 ffmpeg 下载并封装。三级降级：带 bsf → 不带 bsf → TS 容器。"""
+                     on_progress, cancel_event, work_dir: Path,
+                     limit_sec: int = 0) -> tuple[bool, str, Path]:
+    """用 ffmpeg 下载并封装。三级降级：带 bsf → 不带 bsf → TS 容器。
+
+    limit_sec > 0 时只下前 N 秒（诊断/验证链路用，不产出完整文件）。
+    """
     ff = _ffmpeg_available()
     if not ff:
         return False, "未找到 ffmpeg"
+    # 绝对路径：ffmpeg 以 cwd=work_dir 运行，相对输出路径会被二次拼接
+    target = Path(target).resolve()
+    work_dir = Path(work_dir).resolve()
 
     hdr = _headers_for_ffmpeg(referer)
-    base = [ff, "-hide_banner", "-loglevel", "error", "-y",
+    head = [ff, "-hide_banner", "-loglevel", "error", "-y",
             "-headers", hdr,
             # 断流重连：HLS 分片偶发 5xx 时不要让整个任务失败
             "-reconnect", "1", "-reconnect_streamed", "1",
             "-reconnect_delay_max", "10",
-            "-i", url]
+            # 读写超时（微秒）：死连接最多卡 30 秒就报错，交给下一条源，
+            # 而不是让任务停在 0 字节的 .part 上（2026-11-04 实测踩到）。
+            "-rw_timeout", "30000000"]
+    tail = ["-i", url]
+    limited = ["-t", str(int(limit_sec))] if limit_sec and limit_sec > 0 else []
 
     attempts = [
-        (base + ["-c", "copy", "-bsf:a", "aac_adtstoasc",
-                 "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
-                 str(target)], target),
-        (base + ["-c", "copy", "-movflags", "+faststart",
-                 "-progress", "pipe:1", "-nostats", str(target)], target),
+        (head + tail + ["-c", "copy", "-bsf:a", "aac_adtstoasc",
+                        "-movflags", "+faststart", *limited,
+                        "-progress", "pipe:1", "-nostats",
+                        str(target)], target),
+        (head + tail + ["-c", "copy", "-movflags", "+faststart", *limited,
+                        "-progress", "pipe:1", "-nostats", str(target)], target),
+        # 四级：资源站/盗链 CDN 常见证书链不完整，ffmpeg 的 CA 库不认但内容可下。
+        # 这条只在上面都失败时使用，并且有 rw_timeout 兜底，不会无限挂。
+        (head + ["-tls_verify", "0"] + tail + ["-c", "copy", "-movflags", "+faststart",
+                                               *limited, "-progress", "pipe:1", "-nostats",
+                                               str(target)], target),
     ]
     # 第三级：TS 容器（HLS 的原生封装，几乎不会失败；拿不到 mp4 时至少给个能播的）
     ts_target = target.with_suffix(".ts")
     attempts.append(
-        (base + ["-c", "copy", "-progress", "pipe:1", "-nostats", str(ts_target)],
-         ts_target)
+        (head + tail + ["-c", "copy", *limited, "-progress", "pipe:1", "-nostats",
+                        str(ts_target)], ts_target)
     )
 
     last_err = ""
@@ -475,6 +560,10 @@ def download_stream(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # 统一成绝对路径：ffmpeg 以 cwd=output_dir 运行，相对路径会被二次拼接成
+    # 「<output_dir>/<output_dir>/x.part.mp4」→ "No such file or directory"
+    # （2026-11-04 实测踩到，调用方传相对目录时必错）。
+    output_dir = output_dir.resolve()
 
     fp = url_fingerprint(url)
     marker = output_dir / f".{fp}.done"

@@ -107,22 +107,25 @@ def reap_orphan_ffmpeg(max_age_hours: float = 0.0) -> int:
     """杀掉「父进程已死」的本项目 ffmpeg 进程，返回杀掉的数量。
 
     判据（三条都满足才算孤儿，绝不误杀正在用的）：
-      - 命令行里带本项目的 bin\\ffmpeg.exe 路径
+      - 命令行里带本项目的 ffmpeg.exe 路径（找不到路径时退化为「所有 ffmpeg」）
       - 其父进程 PID 在当前系统里已不存在
       - （可选）进程创建时间早于 max_age_hours 小时前
+
+    ⚠️ 2026-11-04 修复：原来的实现只把「ffmpeg 自己」放进 alive_pids，
+    于是 ffmpeg 的父进程（python.exe）永远不在集合里 —— 每条 ffmpeg 都被判成
+    孤儿，收割线程每 5 分钟把**正在下载的 ffmpeg** 杀掉。表现为 HLS/会员兜底
+    下载永远停在 0 字节的 .part 文件。现在把**全系统进程**都当活进程集合，
+    并且只用命令行匹配本项目的 ffmpeg。
     """
     if os.name != "nt":
         return 0
     killed = 0
     try:
         import subprocess as _sp
-        # ⚠️ 活进程集合必须是**全系统所有进程**，不能只列 ffmpeg ——
-        # ffmpeg 的父进程是 python，只列 ffmpeg 的话父进程永远「不存在」，
-        # 会把正在使用的 ffmpeg 也杀掉（第一版就犯了这个错）。
         out = _sp.run(
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance Win32_Process | "
-             "Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress"],
+             "Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress"],
             capture_output=True, timeout=60,
             # ⚠️ 1E.2：必须显式 mbcs + errors=replace。text=True 默认按 locale/utf-8
             # 解码，系统进程名含中文（GBK 0xd0…）时读取线程直接 UnicodeDecodeError
@@ -135,9 +138,18 @@ def reap_orphan_ffmpeg(max_age_hours: float = 0.0) -> int:
         return 0
     if isinstance(data, dict):
         data = [data]
-    alive_pids = {int(p["ProcessId"]) for p in data
-                  if str(p.get("Name", "")).lower() == "ffmpeg.exe"}
-    ff_pids = [p for p in data if str(p.get("Name", "")).lower() == "ffmpeg.exe"]
+    # 全系统活进程（父进程判定用）—— 不能只放 ffmpeg，见上方修复说明
+    alive_pids = {int(p["ProcessId"]) for p in data if p.get("ProcessId")}
+    ours = (project_ffmpeg_path() or "").lower()
+    ff_pids = []
+    for p in data:
+        if str(p.get("Name", "")).lower() != "ffmpeg.exe":
+            continue
+        cmd = str(p.get("CommandLine") or "").lower()
+        # 只收割本项目的 ffmpeg；找不到项目路径时（PATH 里的 ffmpeg）退化为全部
+        if ours and ours.replace("/", "\\") not in cmd.replace("/", "\\"):
+            continue
+        ff_pids.append(p)
     k32 = ctypes.windll.kernel32
     for p in ff_pids:
         pid = int(p["ProcessId"])

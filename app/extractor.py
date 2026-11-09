@@ -154,6 +154,17 @@ class MediaItem:
             # yt-dlp 下载（见 app.js 的 downloadCrawlSelected）。来自
             # batch_crawler 的 yt-dlp 列表展开。
             "is_page": bool(self.extra.get("is_page")),
+            # 单条解析（挑清晰度）应该打开的页面地址：
+            #   1) 视频页条目直接用自己；
+            #   2) 直链条目用抓取时记录的详情页（detail_page），这是**所有站点**
+            #      通用的回退——批量结果里的直链几乎都来自某个详情页下钻。
+            # 没有详情页（媒体直接挂在列表页）时留空，前端不会再猜一个列表页去解析。
+            "probe_url": (
+                self.extra.get("probe_url", "")
+                or (self.url if self.extra.get("is_page") else "")
+                or (self.extra.get("detail_page", "")
+                    if self.kind in ("video", "stream") else "")
+            ),
             "duration_string": self.extra.get("duration_string", ""),
             "uploader": self.extra.get("uploader", ""),
             "site": self.extra.get("site", ""),
@@ -365,6 +376,17 @@ def strip_thumb_suffix(url: str) -> str | None:
     m = re.match(r"^(.*?)[_\-]w\d{2,4}(?=\.[a-z]{2,5}$)", u, flags=re.I)
     if m:
         return m.group(1) + u[m.end():]
+    # 数字在 w 前面这一类：v2-xxx_1440w.jpg / _720w.jpg（知乎正文图就是这种）。
+    # 同一张图会同时出现多个档位，不归一化就会在结果里出现两三份。
+    m = re.match(r"^(.*?)[_\-]\d{2,4}w(?=\.[a-z]{2,5}$)", u, flags=re.I)
+    if m:
+        return m.group(1) + u[m.end():]
+    # 质量档后缀：_r(raw) / _b(big) / _hd / _qhd / _xl / _xxl。
+    # 知乎同一张图常以 v2-xxx.jpg 与 v2-xxx_r.jpg 两种写法同时出现，
+    # 只差这一个字母，内容完全一样。
+    m = re.match(r"^(.*?)[_\-](?:r|b|hd|qhd|xl|xxl)(?=\.[a-z]{2,5}$)", u, flags=re.I)
+    if m:
+        return m.group(1) + u[m.end():]
     return u if u != url else None
 
 
@@ -498,6 +520,23 @@ def collapse_variants(items: list[MediaItem]) -> list[MediaItem]:
     return out
 
 
+def _path_quality_hint(path: str) -> int:
+    """从路径段里猜清晰度（只在同一部片的多份副本之间排序用）。
+
+    同名副本常被分到 /HD/ /SD/ /hevc/HD/ 这类目录，文件名里没有任何分辨率信息。
+    猜错不影响正确性：它只决定「保留哪一份」，被替换的地址仍记在 variants 里。
+    """
+    p = (path or "").lower()
+    m = re.search(r"/(\d{3,4})p/", p)
+    if m:
+        return int(m.group(1))
+    for word, h in (("uhd", 2160), ("4k", 2160), ("fhd", 1080), ("hd", 1080),
+                    ("sd", 480), ("ld", 360)):
+        if re.search(rf"/{word}/", p):
+            return h
+    return 0
+
+
 def _video_variant_info(url: str) -> tuple[str | None, bool, int]:
     """解析视频地址的「档位信息」。
 
@@ -550,6 +589,28 @@ def _video_variant_info(url: str) -> tuple[str | None, bool, int]:
                 return "uuid:" + um.group(1).lower(), False, h2
             base = path.rsplit("/", 1)[0]
             return "sfx:" + (base + "/" + stem[:sm.start()]).lower(), False, h2
+
+    # 第三种通用形态：<媒体ID>-<轨道号>-<档位号>.mp4（无扩展名外的任何站点标记）
+    # 实测 B站番剧页：同一集在十几个 CDN 镜像上各挂一份，
+    #   upgcxcode/11/83/1401558311/1401558311-1-448.mp4   ← estgcos
+    #   upgcxcode/11/83/1401558311/1401558311-1-416.mp4   ← estgoss
+    # 第一段是媒体 ID、第二段是音轨/分P、第三段是档位号。不认这个形态时，
+    # 同一集会被列成 16 条「不同视频」，用户以为抓到了一整季。
+    # 归并键不含 host：镜像域名正是要合并掉的那一维。
+    tm = re.match(r"^(\d{6,})-(\d{1,3})-(\d{2,4})$", stem)
+    if tm:
+        q = int(tm.group(3))
+        if 100 <= q <= 4320:       # 只认像分辨率的档位号，避免吃掉分片序号
+            return "bid:" + tm.group(1) + "-" + tm.group(2), False, q
+
+    # 第四种：UUID 挂在文件名开头，档位写在目录里
+    #   /HD/f7c761b1-...-zufu-v4_f2_t1_2l0M8F2j.mp4
+    #   /hevc/HD/同一串 UUID-..._f3_t3_pfWAlDoY.mp4
+    # 同一部片在 HD / SD / hevc 三个目录各一份，码率与编码后缀也不同，
+    # 只有开头那段 UUID 稳定。不认它时，一个问题页会把同一部片列成 14 条。
+    um2 = re.match(r"^([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})", stem, re.I)
+    if um2:
+        return "uuid:" + um2.group(1).lower(), False, _path_quality_hint(path)
     return None, False, 0
 
 
@@ -818,6 +879,14 @@ def _clean_title(text: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     if not t:
         return ""
+    # 站点未读角标会被拼进 document.title：「(9 封私信) 身材比例 - 知乎」。
+    # 不剥掉的话，这个角标会跟着页面标题一起被套到每一条媒体上，
+    # 用户看到的每条视频都叫「(9 封私信) …」（2026-11-08 知乎问题页实测）。
+    t = re.sub(r"^[（(\[]\s*\d{1,3}\s*"
+               r"(?:封私信|条私信|条消息|条新闻|条通知|条评论|个通知|条未读|"
+               r"条新消息|未读消息|new messages?)\s*[)）\]]\s*", "", t, flags=re.I)
+    if not t:
+        return ""
     # 纯「HD/4K + 时长」或纯时长：没有信息量
     if re.fullmatch(r"(?:HD|SD|4K|FHD|UHD)?\s*[\d:：]{3,14}", t, re.I):
         return ""
@@ -1047,6 +1116,11 @@ def extract_from_json(data, base_url: str = "", origin_page: str = "",
         if kind == "skip":
             return
         seen_local.add(u)
+        # JSON 里没有 uri/video_id 字段时，退一步用地址本身推出的归并键。
+        # 实测知乎问题页：回答里的视频只给了 14 条裸地址（HD/SD/hevc 各一份），
+        # 没有任何 id 字段，靠 IDENT_KEYS 一条都归并不上，页面上就是 14 条同一部片。
+        if not ident and kind in ("video", "stream"):
+            ident = _video_variant_info(u)[0] or ""
         if ident:
             prev = by_ident.get(ident)
             if prev is not None:
@@ -1536,16 +1610,40 @@ def _walk_links(node, path: str, add, base_url: str, depth: int = 0):
 
 # ---------- 汇总 ----------
 
+def _dedupe_key(it: "MediaItem") -> str:
+    """同一张图的不同尺寸档位算成一张。
+
+    2026-11-08 用户报「知乎抓取图片会有重复图」：一篇回答里同一张图会同时以
+    `v2-xxx_720w.jpg`、`v2-xxx_1440w.jpg`、`v2-xxx_r.jpg` 出现，URL 各不相同
+    但内容是同一张。只按完整 URL 去重，列表里就会有两三份一模一样的图。
+    视频不做归一化 —— 不同清晰度是用户要选的东西，合并会丢档位。
+    """
+    if it.kind != "image":
+        return it.url
+    return strip_thumb_suffix(it.url) or it.url
+
+
 def dedupe(items: list[MediaItem]) -> list[MediaItem]:
-    """按 URL 去重，合并来源信息，优先保留信息更全的那条。"""
+    """按「内容」去重，合并来源信息，优先保留信息更全的那条。
+
+    图片按去掉尺寸后缀后的地址去重（见 _dedupe_key），并且**原图优先于缩略图**：
+    enrich_with_originals 会为缩略图补一条原图记录，两者必须归成一条，
+    否则用户看到的就是「一张图 + 它的原图」两份。
+    """
     best: dict[str, MediaItem] = {}
     for it in items:
         if not it.url:
             continue
-        cur = best.get(it.url)
+        key = _dedupe_key(it)
+        cur = best.get(key)
         if cur is None:
-            best[it.url] = it
+            best[key] = it
             continue
+        # 同一张图的两个版本：原图（is_thumb=False）压过缩略图
+        if cur.is_thumb and not it.is_thumb:
+            it.source = f"{cur.source},{it.source}" if cur.source and cur.source not in it.source else it.source
+            best[key] = it
+            cur = it
         # 合并：补全缺失字段
         if not cur.title and it.title:
             cur.title = it.title

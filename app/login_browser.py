@@ -30,6 +30,41 @@ def _marker_path(profile_dir: str) -> Path:
     return Path(profile_dir).resolve().parent / "login_state.json"
 
 
+# 登录窗口的「去自动化特征」脚本。
+#
+# 为什么必须加（2026-11-07 实测）：小红书在登录前先跑一道环境风险评估，
+# 判定可疑就停在 `risk pass` 中间页，登录界面根本不出来。Playwright 启动的
+# Chromium 默认带着 `navigator.webdriver === true`，这是最容易被识别的一条；
+# 只加 --disable-blink-features=AutomationControlled 并不能改这个属性。
+#
+# 这里只抹「自动化痕迹」，不伪造任何账号信息 —— 页面本身的登录流程、
+# 验证码、滑块全都照常走，用户仍然要自己完成验证。
+_STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+try {
+  Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+} catch (e) {}
+try {
+  if (!window.chrome) window.chrome = {};
+  if (!window.chrome.runtime) window.chrome.runtime = {};
+  // 有头 Chrome 一定有这两个，无头/驱动版常缺，作为一致性补丁
+  window.chrome.app = window.chrome.app || { isInstalled: false };
+  window.chrome.csi = window.chrome.csi || function () { return {}; };
+} catch (e) {}
+try {
+  const q = window.navigator.permissions && window.navigator.permissions.query;
+  if (q) {
+    window.navigator.permissions.query = (p) => (
+      p && p.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : q.call(window.navigator.permissions, p)
+    );
+  }
+} catch (e) {}
+"""
+
+
 def _cookie_path(profile_dir: str) -> Path:
     return Path(profile_dir).resolve().parent / "cookies_from_profile.txt"
 
@@ -129,6 +164,12 @@ def export_from_profile(profile_dir: str, headless: bool = True, warm_url: str =
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "path": "", "count": 0, "domains": {},
                     "error": f"打开 profile 失败（可能窗口还开着）：{e}"}
+        # 导出同样要抹自动化痕迹：风控页下拿到的是一次性匿名 Cookie，
+        # 导出后看着「有 cookie」，实际没有会话。
+        try:
+            ctx.add_init_script(_STEALTH_JS)
+        except Exception:  # noqa: BLE001
+            pass
         if warm_url:
             try:
                 pages = ctx.pages
@@ -190,6 +231,11 @@ def run(url: str, profile_dir: str, seconds: int = 900, headless: bool = False) 
                 ctx = None
         if ctx is None:
             ctx = p.chromium.launch_persistent_context(**kwargs)
+        # 必须在 page.goto 之前挂：init script 只对之后创建的文档生效。
+        try:
+            ctx.add_init_script(_STEALTH_JS)
+        except Exception:  # noqa: BLE001
+            pass
         pages = ctx.pages
         page = pages[0] if pages else ctx.new_page()
         try:

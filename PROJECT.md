@@ -168,10 +168,64 @@ rmdir /s /q browsers\chromium_headless_shell-*  browsers\ffmpeg-*  browsers\winl
 `_*` 规则吃掉，已在 `.gitignore` 里加了 `!bsk-extension/**/_*` 例外。删这个例外会导致
 打包出来的扩展缺文件。
 
-## 9. 本机环境
+## 9. Google 搜图与会员视频兜底（2026-11）
+
+### 9.1 Google 搜图：两条通道
+
+纯 HTTP 路线已被 Google 关闭（`enablejs` 空壳 / `gbv=1` 报浏览器不支持 /
+`images/async` 404）；机房 IP 渲染会 302 到 `/sorry`。官方 Custom Search
+JSON API 2026 年起对新客户关闭，无法再申请 key，所以不再提供 API 配置。
+`app/search_google.py` 保留两通道自动降级，完整实测记录见
+`说明-Google接入与会员换源.md`。
+
+| 通道 | 入口 | 依赖 |
+|---|---|---|
+| `render` | `search_google_render()` | playwright 内核；可从 `google_proxy` 单独走代理 |
+| `searx` | `search_google_searx()` | `google_searx` 实例列表（留空不启用） |
+
+- 渲染通道从 DOM 的 `a[href*="imgurl="]` 取原图 + 来源页，比正则扫 HTML 稳。
+- `renderer.render_page()` 新增 `proxy / extra_cookies / extract_js / scroll_wait_ms`，
+  结果多一个 `RenderResult.js`。
+- 通道全挂时，`engine_status` 会逐条列出真实原因。
+- 前端引擎状态带实际通道：`ok:40·render`。
+
+### 9.2 会员视频：试看 → 完整版
+
+会员内容的播放地址是服务端按账号裁剪的，**没有「改参数拿完整流」的漏洞**。
+`app/vip_unlock.py` 做四层兜底：
+
+| 顺序 | 通道 | 说明 |
+|---|---|---|
+| ① | 会员 Cookie 直取 | `DATA_ROOT/vip_cookies/*.txt` 放大会员 Cookie，B 站走 DASH |
+| ② | 资源站换源（主力） | `app/resource_sites.py`，12 个实测可用 CMS 采集接口，同片名多源备份 |
+| ③ | 海外免费源 | `app/alt_sources.py`，YouTube（yt-dlp 搜索）；需 `download_proxy`，按季/集/时长匹配 |
+| ④ | 解析网关（可选） | 用户自填接口；20 个公共解析站实测全挂，默认不启用 |
+
+触发：下载报会员错误，**或**下完实测时长 < 标称 ×0.85 且差 >90s。
+B 站普通投稿（UGC）不做时长比对——它没有试看，只有清晰度受限。
+
+实测（2026-11-04）：`ep323085`（名侦探柯南 中配 第1话，大会员）→ 元数据 1494s
+→ 极速资源换源 `vv.jisuzyv.com` → 流 1493.12s / 285 分片
+→ 完整下载 76,119,583 字节 / 1493.146s / H.264 720x576 + AAC（603s 跑完）。
+
+2026-11-05 复测用户给的两条链接：B 站 `ep810204`《人间世 第二季》第1集
+→ 命中「人间世第二季」→ 3216.1s / 1594 分片；优酷《谷雨》第2集
+→ 命中「谷雨」第2集 → 2725.1s / 651 分片，两条 30 秒限量下载均出片。
+
+### 9.3 顺带修掉的老问题
+
+- **`win_job.reap_orphan_ffmpeg` 误杀**：活进程集合原来只有 ffmpeg 自己，
+  父进程 python 永远「不存在」，收割线程每 5 分钟把正在下载的 ffmpeg 杀掉，
+  表现是下载停在 0 字节的 `.part`。现改为全系统进程集合 + 项目 ffmpeg 路径匹配。
+- **`stream_downloader` 看门狗失效**：ffmpeg 卡在拉分片时仍会吐 `progress=continue`，
+  只看「有没有输出」永远不触发。现额外跟踪 `out_time`，120 秒不前进即中止；
+- **取消不生效**：换源下载没接 `cancel_event`，取消后还会继续试源、搜 YouTube；
+  视频任务取消又被记成 `failed`。现在取消会删掉分片并在几秒内标成 `cancelled`。
+  另加 `-rw_timeout 30s` 与 TLS 校验兜底（部分资源站 CDN 证书链 ffmpeg 不认）。
+
+## 10. 本机环境
 
 | 项 | 值 |
-|---|---|
 | Python（项目脚本） | `C:\Python314\python.exe`（受管 3.13.12 缺 requests/yt-dlp） |
 | 缺失可选依赖 | `pywebview`、`pystray` 未装在 Python314（只影响桌面壳模式，Web 模式可跑） |
 | Inno Setup | `C:\Program Files (x86)\Inno Setup 6\ISCC.exe` |

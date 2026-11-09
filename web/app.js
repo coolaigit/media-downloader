@@ -68,6 +68,22 @@ function proxyUrl(url, referer = '') {
   return `${API}/proxy?${p.toString()}`;
 }
 
+/** 没有封面时的占位：图标 + 一句说明。
+ *  比一块空白或一行纯文字更容易看懂「这里本该有图，但站点没给」。
+ *  快手这类站点主页只吐直链、不给封面（封面在接口里被风控挡着），
+ *  列表里就会大量走到这里。 */
+function noCoverPh(text) {
+  const ph = document.createElement('div');
+  ph.className = 'ph';
+  ph.innerHTML =
+    '<svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor"' +
+    ' stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<rect x="2.5" y="4.5" width="19" height="15" rx="3"/>' +
+    '<path d="M10 9.6v5.2l4.6-2.6z" fill="currentColor" stroke="none"/></svg>' +
+    '<span>' + esc(text || '暂无预览图') + '</span>';
+  return ph;
+}
+
 async function api(path, options = {}) {
   const opt = { headers: { 'Content-Type': 'application/json' }, ...options };
   if (opt.body && typeof opt.body !== 'string') opt.body = JSON.stringify(opt.body);
@@ -128,6 +144,8 @@ function setBusy(btn, busy, textBusy) {
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
+  // 记住用户最后停在哪个页面：下次打开直接回到这里（首页只在从没来过时出现）
+  try { localStorage.setItem('md_last_tab', name); } catch (e) {}
   if (name === 'library') loadLibrary();
   if (name === 'login') loadPlatformStatuses();
 }
@@ -138,12 +156,27 @@ function switchTab(name) {
  * 两块内容是各自独立的一整块（各自的输入框、结果区、轮询状态），
  * 切换只是整块显隐 —— 不重建 DOM，所以切回来时之前的结果还在。
  */
+/**
+ * 图片页的「关键词搜图 / 粘贴链接抓取」只有一套入口：顶部 omnibox 里的 #omniSeg。
+ * 页面中部原本还叠了一条一模一样的模式条（#imageModeSwitch），两块按钮切的是
+ * 同一对 hidden，纯重复占高，2026-11-07 已删除。这里只负责把面板切过去。
+ */
+function applyImageMode(mode) {
+  const kw = $('imageKwMode'), link = $('imgLinkMode');
+  if (kw) kw.hidden = (mode !== 'kw');
+  if (link) link.hidden = (mode !== 'link');
+  // 顶部 omnibox 是图片页唯一的输入口（页面里那两条 .searchbar 是 sr-only 隐藏的），
+  // 切模式时必须把占位提示换掉，否则用户不知道该往框里放链接还是关键词。
+  const omni = $('omniInput');
+  if (omni) {
+    omni.placeholder = mode === 'link'
+      ? '粘贴图片列表页 / 相册 / 任意网页链接'
+      : '输入关键词搜图，如：风景 壁纸 4K';
+  }
+}
+
 function bindModeSwitches() {
   const configs = [
-    ['imageModeSwitch',
-      { kw: 'imageKwMode', link: 'imgLinkMode' },
-      { kw: '按关键词在搜索引擎里搜图',
-        link: '粘贴网页链接，批量抓出图片（列表页 / 相册 / 整站）' }],
     ['videoModeSwitch',
       { kw: 'videoKwMode', link: 'vidLinkMode' },
       { kw: '按关键词搜视频，或粘贴单个视频链接解析清晰度',
@@ -232,7 +265,36 @@ async function loadStatus() {
   $('sDownloads').textContent = statusInfo.downloads_dir
     + (statusInfo.downloads_dir_restart_pending ? '（已改配置，重启程序后生效）' : '');
   $('sDisk').textContent = free ? humanSize(free) : '未知';
+  renderServiceStatus(statusInfo);
   renderHelpEnv(statusInfo);
+}
+
+// Google 两条通道 / 会员兜底的状态展示（2026-11）
+function renderServiceStatus(st) {
+  if (!st) return;
+  const g = st.google;
+  const gel = $('sGoogleStat');
+  if (g && gel) {
+    const parts = [];
+    if (g.render_available) parts.push('渲染可用');
+    if (g.searx && g.searx.length) parts.push(`SearXNG ${g.searx.length} 个`);
+    const mode = { auto: '自动', render: '仅渲染', searx: '仅 SearXNG' }[g.transport] || g.transport;
+    gel.textContent = parts.length ? `${mode} · ${parts.join(' / ')}` : `${mode} · 两条通道都还没就绪`;
+    gel.style.color = parts.length ? 'var(--ok)' : 'var(--warn, #d80)';
+    gel.title = [g.proxy ? `渲染代理: ${g.proxy}` : '渲染代理: 直连',
+      (g.searx || []).length ? `自备实例: ${(g.searx || []).join(', ')}` : '自备实例: 未配置'].join('\n');
+  }
+  const v = st.vip;
+  const vel = $('sVipStat');
+  if (v && vel) {
+    const bits = [`资源站 ${v.resource_sites || 0} 个`];
+    if (v.gateways) bits.push(`解析网关 ${v.gateways} 个`);
+    bits.push(`海外源${v.overseas ? '开' : '关'}${v.download_proxy ? '（已配代理）' : '（未配代理）'}`);
+    bits.push(`会员 Cookie ${(v.cookie_files || []).length} 份`);
+    vel.textContent = (v.auto_unlock ? '自动兜底开' : '自动兜底关') + ' · ' + bits.join(' / ');
+    vel.style.color = v.auto_unlock ? 'var(--ok)' : 'var(--txt-dim)';
+    vel.title = `Cookie 目录: ${v.cookie_dir || ''}`;
+  }
 }
 
 function renderLoginSummary(items) {
@@ -282,13 +344,20 @@ function activeFilterCount() {
   return Object.values(f).filter(v => v !== '' && v !== 0 && v !== 'moderate' && v !== 'bing').length;
 }
 
+// 骨架微光：搜索发起时先占位，结果回来由 renderSearchResults / renderEmpty 覆盖
+function skeletonCards(n) {
+  return Array.from({ length: n }, () =>
+    '<div class="skeleton-card"><div class="sk-thumb"></div>' +
+    '<div class="sk-line"></div><div class="sk-line short"></div></div>').join('');
+}
+
 async function doSearch() {
   const kw = $('kwInput').value.trim();
   if (!kw) { toast('请先输入关键词', 'warn'); $('kwInput').focus(); return; }
   const btn = $('btnSearch');
   setBusy(btn, true, '搜索中…');
   msg('searchMsg', '<span class="spin"></span>正在搜索并探测原图真实分辨率…（清晰度筛选越严格越慢）');
-  $('searchGrid').innerHTML = '';
+  $('searchGrid').innerHTML = skeletonCards(8);
   $('searchToolbar').hidden = true;
 
   try {
@@ -303,6 +372,9 @@ async function doSearch() {
     renderEmpty('searchGrid', '未获取到结果');
   } finally {
     setBusy(btn, false);
+    // 顶部「开始抓取」的抓取中态在这里收尾：搜索失败/空结果也要恢复，
+    // 不能只靠 15 秒兜底，否则按钮会僵在那儿。
+    if (typeof setOmniBusy === 'function') setOmniBusy(false);
   }
 }
 
@@ -379,11 +451,7 @@ function buildImageCard(it, idx) {
       this.dataset.fallback = '1';
       this.src = proxyUrl(it.url, it.referer || it.origin_page || '');
     } else {
-      const ph = document.createElement('div');
-      ph.className = 'ph';
-      ph.textContent = '预览不可用\n（站点防盗链或需登录）';
-      ph.style.whiteSpace = 'pre-line';
-      this.replaceWith(ph);
+      this.replaceWith(noCoverPh('站点防盗链或需登录，没有预览图'));
     }
   };
   thumb.appendChild(img);
@@ -521,6 +589,8 @@ async function downloadSelectedImages() {
         subdir: sub + '/' + safeSub($('kwInput').value.trim()),
         concurrency: (statusInfo && statusInfo.settings && statusInfo.settings.image_concurrency) || 6,
         skip_existing: $('fSkipExisting').checked,
+        // 图片也默认最高档：同一张图有多个尺寸时挑最大的一份。
+        prefer_quality: 'highest',
         title: `「${$('kwInput').value.trim()}」${items.length} 张`,
       },
     });
@@ -566,7 +636,8 @@ function createCrawler(cfg) {
   };
   /** 把逻辑名映射成本实例的真实元素 ID：crawlGrid -> imgCrawlGrid */
   const E = (name) => P + name.charAt(0).toUpperCase() + name.slice(1);
-  const st = { items: [], sel: new Set(), jobId: null, timer: null };
+  const st = { items: [], sel: new Set(), jobId: null, timer: null,
+               qualityTouched: false };
 
 // ---------- 批量抓取（列表页 → 详情页） ----------
 
@@ -617,9 +688,14 @@ function updateCrawlModeUI() {
   // 用户反馈的「全站抓取根本没有全站抓取的能力」就是这个原因。
   $(E('cRender')).checked = true;
 
-  $(E('crawlOptSummary')).textContent = isSite
-    ? '（全站抓取：独立站整站走一遍，用站点地图 + 同域链接）'
-    : '（列表页 / 博主页逐条下钻：商品列表 / 搜索结果页 / 博主主页用这个）';
+  // 抓取参数默认折叠成一行，摘要里必须写明「可以点开」，否则用户以为只是说明文字。
+  // 图片页已改成一行内联参数、没有 summary，这里必须判空，否则 null.textContent 直接抛错。
+  const sumEl = $(E('crawlOptSummary'));
+  if (sumEl) {
+    sumEl.textContent = isSite
+      ? '（全站抓取：独立站整站走一遍 · 点开可调整）'
+      : '（列表页 / 博主页逐条下钻 · 点开可调整）';
+  }
   // 输入框示例必须按页面类型给（图片页用图片站、视频页用视频站）。
   // 原来是写死的电商链接，导致视频页显示「例：alibaba.com/trade/search…」——
   // 用户看到的示例跟当前页面完全对不上。
@@ -650,6 +726,15 @@ function clearCrawlResults(hideProgress = true) {
 async function doCrawl() {
   const opt = crawlOptions();
   if (!opt.url) { toast('请先粘贴列表页链接', 'err'); return; }
+  // 两个页面各自的输入框（#imgCrawlInput / #vidCrawlInput）也能直接粘裸域名。
+  // omnibox 那条链路在 shell.js 已补协议，这里补同一个兜底，
+  // 免得「明明粘了 weibo.com/u/...」却弹「链接需要以 http:// 开头」。
+  if (!/^https?:\/\//i.test(opt.url) &&
+      /^(?:www\.|(?:[a-z0-9-]+\.)+[a-z]{2,24}(?:[:/?#]|$))/i.test(opt.url)) {
+    opt.url = 'https://' + opt.url;
+    const inp = $(E('crawlInput'));
+    if (inp) inp.value = opt.url;
+  }
   if (!/^https?:\/\//i.test(opt.url)) {
     toast('链接需要以 http:// 或 https:// 开头', 'err');
     return;
@@ -669,6 +754,7 @@ async function doCrawl() {
     startCrawlPoll();
   } catch (e) {
     setBusy($(E('btnCrawl')), false);
+    if (typeof setOmniBusy === 'function') setOmniBusy(false);
     msg(E('crawlMsg'), '提交失败：' + esc(e.message), 'err');
   }
 }
@@ -712,6 +798,7 @@ async function pollCrawl() {
   } catch (e) {
     stopCrawlPoll();
     setBusy($(E('btnCrawl')), false);
+    if (typeof setOmniBusy === 'function') setOmniBusy(false);
     msg(E('crawlMsg'), '查询进度失败：' + esc(e.message), 'err');
     return;
   }
@@ -732,6 +819,7 @@ async function pollCrawl() {
   if (terminal) {
     stopCrawlPoll();
     setBusy($(E('btnCrawl')), false);
+    if (typeof setOmniBusy === 'function') setOmniBusy(false);
     $(E('crawlProgress')).hidden = false;
     $(E('crawlBar')).style.width = '100%';
     setCrawlProgressDone(true);
@@ -758,6 +846,19 @@ async function showCrawlResult(snap) {
 
   renderCrawlDetail(full);
   renderCrawlResults(full);
+
+  // 工具栏左侧摘要：#crawlStat 以前从来没人写入，顶部「本次结果」只能退回去数卡片，
+  // 结果超过 400 条（网格只渲染前 400）就会显示错。这里给它真实总数与分类。
+  const statEl = $(E('crawlStat'));
+  if (statEl) {
+    const s2 = full.summary || {};
+    let brief = `共 ${st.items.length} 个媒体`;
+    if (s2.image) brief += ` · 图片 ${s2.image}`;
+    if (s2.video) brief += ` · 视频 ${s2.video}`;
+    if (s2.stream) brief += ` · 流媒体 ${s2.stream}`;
+    if (s2.thumbs) brief += ` · 缩略图 ${s2.thumbs}`;
+    statEl.textContent = brief;
+  }
 
   if (snap.status === 'failed') {
     msg(E('crawlMsg'), '抓取失败：' + esc(snap.error || '未知错误'), 'err');
@@ -822,6 +923,13 @@ function qualityHeightsOf(it) {
 function rebuildQualityOptions() {
   const sel = $(E('dlQuality'));
   if (!sel) return;
+  // 记住用户有没有手动改过清晰度。没改过就默认「最高」——视频和图片都一样：
+  // 站点在列表/详情页里声明的 og:video 常是 240P 这一档，下拉停在「原样」
+  // 等于默认下载最小清晰度（用户反馈的 V3.0.3 行为回退）。
+  if (!sel.dataset.qBound) {
+    sel.dataset.qBound = '1';
+    sel.addEventListener('change', () => { st.qualityTouched = true; });
+  }
   const hs = new Set();
   st.items.forEach(it => qualityHeightsOf(it).forEach(h => hs.add(h)));
   const heights = [...hs].sort((a, b) => b - a);
@@ -830,8 +938,9 @@ function rebuildQualityOptions() {
     + '<option value="highest">最高</option><option value="lowest">最低</option>';
   heights.forEach(h => { opts += `<option value="${h}">${h}p</option>`; });
   sel.innerHTML = opts;
-  // 尽量保留用户已选的值；这批结果里没有该档位就回落到「原样」
+  // 尽量保留用户已选的值；这批结果里没有该档位就回落到默认档
   sel.value = [...sel.options].some(o => o.value === cur) ? cur : '';
+  if (!st.qualityTouched && sel.value === '') sel.value = 'highest';
 }
 
 function renderCrawlResults(full) {
@@ -876,6 +985,57 @@ function crawlCardTitle(it) {
   try { name = decodeURIComponent(tail); } catch (e) { /* 保持原样 */ }
   if (!name) name = (it.type === 'stream') ? '流媒体' : '媒体文件';
   return name;
+}
+
+/**
+ * 视频直链落盘用的文件名。
+ *
+ * CDN 地址最后一段是签名串 / base64（快手 BMjAy..._B5f9b49955、
+ * 小红书 1040g2sg31...），后端 filename_from_url 只在「纯字母数字占位名」
+ * 时才会改用标题；带下划线和日期的签名串不在那套判据里，于是下载下来
+ * 就是一串随机字符。这里在提交下载时把作品标题显式写进 filename，
+ * 后端的 sanitize_filename 负责清 Windows 非法字符、unique_path 负责重名。
+ */
+function crawlVideoFilename(it) {
+  if (it.type !== 'video') return '';
+  const t = String(it.title || '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  let ext = 'mp4';
+  try {
+    const m = new URL(it.url).pathname.match(/\.([a-z0-9]{2,5})$/i);
+    if (m && !/^(jpg|jpeg|png|gif|webp|avif|bmp|svg|ico|html?|json)$/i.test(m[1])) {
+      ext = m[1].toLowerCase();
+    }
+  } catch (e) { /* 地址无扩展名时用 mp4 */ }
+  return t.slice(0, 80) + '.' + ext;
+}
+
+/**
+ * 这一条批量结果能不能「单独解析」，能的话解析哪个地址。
+ *
+ * - is_page 条目：url 本身就是视频页地址，直接解析。
+ * - 直链条目：若来自详情页下钻（origin_page 与 url 不同、且地址形态像单条
+ *   内容页），解析它的来源视频页。下钻拿到的直链常是站点声明的最低档，
+ *   用户要的是能进「单个视频链接」挑清晰度，而不是只有一条 240P 可下。
+ *
+ * 判据只看地址形态（内容 ID 参数 / 长数字 ID / video.<id> 段），不写站点规则；
+ * 列表页 / 搜索页那种集合地址不会误当成单条视频页。
+ */
+function crawlProbeTarget(it) {
+  // 后端统一给出的解析页地址（视频页条目 = 自己；直链条目 = 下钻到的详情页）。
+  // 这是「所有站点都支持单条解析」的主路径，前端不再靠猜。
+  if (it.probe_url) return it.probe_url;
+  if (it.is_page) return it.url || '';
+  const p = it.origin_page || '';
+  if (!p || p === it.url) return '';
+  try {
+    const u = new URL(p);
+    const segs = u.pathname.split('/').filter(Boolean);
+    const idParam = /[?&](v|id|vid|video_?id|content_?id|media_?id|viewkey|watch)=/i.test(u.search);
+    const idSeg = segs.some(s => /\d{5,}/.test(s) || /^video[.\-_][a-z0-9]{6,}/i.test(s));
+    if (idParam || idSeg) return p;
+  } catch (e) { /* 不是合法 URL，不给入口 */ }
+  return '';
 }
 
 function buildCrawlCard(it, idx) {
@@ -938,10 +1098,7 @@ function buildCrawlCard(it, idx) {
         this.src = cover;
         return;
       }
-      const ph = document.createElement('div');
-      ph.className = 'ph';
-      ph.textContent = '预览不可用';
-      this.replaceWith(ph);
+      this.replaceWith(noCoverPh('暂无预览图'));
     };
     thumb.appendChild(img);
     if (isVideo) {
@@ -1041,22 +1198,22 @@ function buildCrawlCard(it, idx) {
     a2.onclick = (e) => openExternalUrl(sourcePage, e);
     links.appendChild(a2);
   }
-  // 视频页条目（is_page）：给「解析清晰度」入口 —— 跳到「单个视频链接」下载口。
-  //
-  // 为什么补它：用户反馈「以前能跳过去，现在点了没反应」。抓取结果里的视频页条目
-  // 本身没有解析入口（直链条目不需要，它们用「下载选中」即可），而列表里的
-  // 「解析」又把值写进了隐藏的输入框（见 gotoVideoProbe）。这里把入口补回卡片上。
-  if (isPage) {
+  // 「解析清晰度」入口 —— 跳到「单个视频链接」下载口。
+  // 视频页条目解析自身；直链条目若来自详情页下钻，解析它的来源视频页。
+  // 实测回归：站点搜索页退回网页抓取时整批都是 240P 直链（is_page=false），
+  // 旧逻辑只给 is_page 加入口，用户看到的就是「批量抓的视频没法单独解析」。
+  const probeUrl = crawlProbeTarget(it);
+  if (isVideo && probeUrl) {
     const bp = document.createElement('button');
     bp.type = 'button';
-    bp.className = 'btn tiny';
+    bp.className = 'btn tiny probe-btn';
     bp.textContent = '解析清晰度';
     bp.title = '跳到「单个视频链接」下载口，查看可选清晰度，挑好再下载';
     bp.onclick = (e) => {
       e.stopPropagation();
-      crawlProbeOrigin = { prefix: P, idx, url: it.url };
+      crawlProbeOrigin = { prefix: P, idx, url: probeUrl };
       placeVideoProbeAboveBatch();
-      gotoVideoProbe(it.url);
+      gotoVideoProbe(probeUrl);
       doProbe();
     };
     links.appendChild(bp);
@@ -1112,7 +1269,9 @@ async function downloadCrawlSelected() {
   const skip = skipEl ? skipEl.checked : true;
   // 清晰度偏好：抓取结果里同一条媒体可能带多个档位地址（归并时被合并的那些），
   // 选了就在这里主动挑，而不是只能下抓到的第一条（用户反馈的「默认 240P」）。
-  const preferQ = qualEl ? qualEl.value : '';
+  // 图片工具栏没有清晰度下拉（图片本来就没有「档位」概念），但后端支持
+  // 按 URL 里的尺寸标记挑最大的一份。默认给 highest，保证图片也抓最高档。
+  const preferQ = qualEl ? qualEl.value : 'highest';
 
   try {
     if (pages.length) {
@@ -1147,6 +1306,8 @@ async function downloadCrawlSelected() {
               title: i.title || '',
               origin_page: i.origin_page || '',
               thumbnail: i.thumbnail || '',
+              // 有作品标题时按标题落盘，不用 CDN 的签名串当文件名。
+              filename: crawlVideoFilename(i),
               // 同一媒体的其它档位地址：首选地址下不了时后端会自动换用。
               alternates: i.variants || [],
             })),
@@ -1599,6 +1760,23 @@ function applyVideoSearchSelectionUI() {
   updateVideoSearchSelCount();
 }
 
+/**
+ * 搜索结束却没有结果时，把结果区恢复成「有归属的空态」。
+ * 原来 doVideoSearch 一上来就 box.hidden = true，失败或 0 条时再也不打开，
+ * 用户看到的是一整块什么都没有的空白（2026-11-07 版面整改时发现）。
+ */
+function restoreVideoEmpty() {
+  const box = $('videoSearchResult');
+  if (!box || box.querySelector('.vitem')) return;
+  box.hidden = false;
+  box.innerHTML = '';
+  const d = document.createElement('div');
+  d.className = 'empty';
+  d.dataset.seed = '1';
+  d.textContent = '没搜到结果；换个关键词，或把视频源换成「全网（多来源）」再试';
+  box.appendChild(d);
+}
+
 function renderVideoSearchItems(entries) {
   const box = $('videoSearchResult');
   box.innerHTML = '';
@@ -1841,6 +2019,7 @@ async function doVideoSearch() {
     msg('videoMsg', '视频搜索失败：' + esc(e.message), 'err');
   } finally {
     setBusy(btn, false);
+    if (!videoSearchItems.length) restoreVideoEmpty();
   }
 }
 
@@ -1898,10 +2077,7 @@ function renderLibrary() {
       img.loading = 'lazy';
       img.src = API + f.href;
       img.onerror = function () {
-        const ph = document.createElement('div');
-        ph.className = 'ph';
-        ph.textContent = '预览不可用';
-        this.replaceWith(ph);
+        this.replaceWith(noCoverPh('暂无预览图'));
       };
       thumb.appendChild(img);
     } else if (f.thumbnail) {
@@ -2317,7 +2493,12 @@ async function loginPlatform(platform) {
 }
 
 // ---------- 设置 ----------
-const BASE_THEMES = new Set(['gray', 'black', 'light']);
+// ---------- 设置 ----------
+// 4 套基础外观。旧配置里的 gray / dark / black / light 仍能被接受，
+// 通过 BASE_ALIAS 平滑映射到新主题，避免老用户升级后外观跳变。
+const BASE_ALIAS = { black: 'obsidian', gray: 'slate', dark: 'obsidian', light: 'ivory' };
+const BASE_THEMES = new Set(['obsidian', 'slate', 'ivory', 'midnight']);
+const DARK_MODES = new Set(['obsidian', 'slate', 'midnight']);
 
 const ACCENT_THEMES = {
   blue:   { accent: '#4f8cff', hi: '#74a6ff', lightHi: '#2563d9' },
@@ -2326,11 +2507,13 @@ const ACCENT_THEMES = {
   green:  { accent: '#2faa6e', hi: '#58c98f', lightHi: '#16794b' },
   orange: { accent: '#e28735', hi: '#f1a45d', lightHi: '#b85f12' },
   rose:   { accent: '#db5c86', hi: '#ef82a7', lightHi: '#b53e68' },
+  indigo: { accent: '#6366f1', hi: '#9b9dfa', lightHi: '#4338ca' },
+  teal:   { accent: '#4cc9c0', hi: '#8ce0da', lightHi: '#0f8f88' },
 };
 
 function applyBaseTheme(name) {
-  const requested = name === 'dark' ? 'gray' : name;
-  const key = BASE_THEMES.has(requested) ? requested : 'light';
+  const requested = BASE_ALIAS[name] || name;
+  const key = BASE_THEMES.has(requested) ? requested : 'ivory';
   document.documentElement.dataset.mode = key;
   const currentAccent = document.documentElement.dataset.accent || 'blue';
   const sel = $('sUiMode');
@@ -2346,8 +2529,18 @@ function applyAccentTheme(name) {
   const key = ACCENT_THEMES[name] ? name : 'blue';
   const t = ACCENT_THEMES[key];
   const root = document.documentElement.style;
+  // 深色底用亮一档的强调字色，浅色底用深一档，保证 4.5:1 可读
+  const dark = DARK_MODES.has(document.documentElement.dataset.mode);
   root.setProperty('--accent', t.accent);
-  root.setProperty('--accent-hi', document.documentElement.dataset.mode === 'black' ? t.hi : t.lightHi);
+  root.setProperty('--accent-hi', dark ? t.hi : t.lightHi);
+  // 亮强调色（青/绿/橙/石墨青）上白字达不到 3:1，按相对亮度自动切深色字，
+  // 保证 8 种强调色的主按钮文字都过 WCAG AA 大字阈值。
+  const ch = t.accent.slice(1).match(/../g).map(x => parseInt(x, 16) / 255)
+    .map(v => v <= .03928 ? v / 12.92 : Math.pow((v + .055) / 1.055, 2.4));
+  const L = .2126 * ch[0] + .7152 * ch[1] + .0722 * ch[2];
+  const whiteContrast = 1.05 / (L + .05);
+  const darkContrast = (L + .05) / (.012 + .05);
+  root.setProperty('--accent-on', whiteContrast >= darkContrast ? '#ffffff' : '#172033');
   root.setProperty('--accent-soft', `color-mix(in srgb, ${t.accent} 16%, var(--card))`);
   root.setProperty('--accent-border', `color-mix(in srgb, ${t.accent} 48%, var(--line))`);
   document.documentElement.dataset.accent = key;
@@ -2382,9 +2575,20 @@ function fillSettings(s) {
   $('sCookiesBrowser').value = s.cookies_from_browser || '';
   $('sAllowPrivate').checked = !!s.allow_private_network;
   if ($('sCloseBehavior')) $('sCloseBehavior').value = s.close_behavior || 'exit';
+  // 2026-11：Google 搜图接入 / 会员视频兜底
+  if ($('sGoogleProxy')) $('sGoogleProxy').value = s.google_proxy || '';
+  if ($('sGoogleTransport')) $('sGoogleTransport').value = s.google_transport || 'auto';
+  if ($('sGoogleSearx')) $('sGoogleSearx').value = s.google_searx || '';
+  if ($('sVipAuto')) $('sVipAuto').checked = s.vip_auto_unlock !== false;
+  if ($('sVipCookieDir')) $('sVipCookieDir').value = s.vip_cookie_dir || '';
+  if ($('sVipParse')) $('sVipParse').value = s.vip_parse_endpoints || '';
+  if ($('sVipResourceSites')) $('sVipResourceSites').value = s.vip_resource_sites || '';
+  if ($('sVipOverseas')) $('sVipOverseas').checked = s.vip_overseas !== false;
+  if ($('sDownloadProxy')) $('sDownloadProxy').value = s.download_proxy || '';
   applyBaseTheme(s.ui_mode || 'light');
   applyAccentTheme(s.ui_accent || 'blue');
   renderCookiesStat(statusInfo && statusInfo.cookies);
+  renderServiceStatus(statusInfo);
 }
 
 async function loadSettings() {
@@ -2411,6 +2615,16 @@ async function saveSettings() {
     close_behavior: $('sCloseBehavior') ? $('sCloseBehavior').value : 'exit',
     ui_mode: $('sUiMode') ? $('sUiMode').value : 'light',
     ui_accent: $('sAccent') ? $('sAccent').value : 'blue',
+    // 2026-11：Google 搜图接入 / 会员视频兜底
+    google_proxy: $('sGoogleProxy') ? $('sGoogleProxy').value.trim() : '',
+    google_transport: $('sGoogleTransport') ? $('sGoogleTransport').value : 'auto',
+    google_searx: $('sGoogleSearx') ? $('sGoogleSearx').value.trim() : '',
+    vip_auto_unlock: $('sVipAuto') ? $('sVipAuto').checked : true,
+    vip_cookie_dir: $('sVipCookieDir') ? $('sVipCookieDir').value.trim() : '',
+    vip_parse_endpoints: $('sVipParse') ? $('sVipParse').value.trim() : '',
+    vip_resource_sites: $('sVipResourceSites') ? $('sVipResourceSites').value.trim() : '',
+    vip_overseas: $('sVipOverseas') ? $('sVipOverseas').checked : true,
+    download_proxy: $('sDownloadProxy') ? $('sDownloadProxy').value.trim() : '',
   };
   try {
     const r = await api('/api/settings', { method: 'POST', body });
@@ -2588,6 +2802,24 @@ function bindEvents() {
 
   $('btnSaveSettings').onclick = saveSettings;
   $('btnReloadSettings').onclick = loadSettings;
+  // 会员 Cookie 校验：只读本地目录 + 调一次 B 站 nav 接口，不发任何账号信息出去
+  if ($('btnVipCheck')) $('btnVipCheck').onclick = async () => {
+    const lbl = $('vipStatMsg');
+    if (lbl) lbl.textContent = '正在校验…';
+    try {
+      const r = await api('/api/vip/check-cookies', { method: 'POST', body: {} });
+      if (!r.count) {
+        if (lbl) lbl.textContent = '目录里还没有 Cookie 文件（把 .txt 放进 Cookie 目录后重试）。';
+        return;
+      }
+      const lines = (r.items || []).map(it =>
+        `${it.file}: ${it.vip ? '大会员' : (it.vip_label || '普通/未登录')}${it.uname ? ' · ' + it.uname : ''}${it.error ? ' · ' + it.error : ''}`);
+      if (lbl) lbl.innerHTML = lines.join('<br>');
+      toast(`校验完成：${r.vip} / ${r.count} 份是大会员`, r.vip ? 'ok' : 'warn');
+    } catch (e) {
+      if (lbl) lbl.textContent = '校验失败：' + e.message;
+    }
+  };
   if ($('sUiMode')) $('sUiMode').onchange = () => applyBaseTheme($('sUiMode').value);
   document.querySelectorAll('.base-theme-card').forEach(btn => {
     btn.onclick = () => applyBaseTheme(btn.dataset.mode || 'light');
@@ -2683,7 +2915,10 @@ function bindEvents() {
 
   // 全局快捷键
   document.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'a' && $('panel-search').classList.contains('active')
+    // 搜图面板的实际 id 是 panel-image（旧代码写的 panel-search 在 HTML 里不存在，
+    // 一按 Ctrl+A 就 TypeError，布尔短路根本走不到 selectAllSearch）
+    const searchPanel = $('panel-image');
+    if ((e.ctrlKey || e.metaKey) && e.key === 'a' && searchPanel && searchPanel.classList.contains('active')
         && document.activeElement.tagName !== 'INPUT') {
       e.preventDefault(); selectAllSearch();
     }

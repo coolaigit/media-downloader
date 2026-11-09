@@ -14,7 +14,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
@@ -428,7 +428,16 @@ def xhs_author_items(url: str, *, limit: int = 30, timeout: int = 90,
                          "登录态会自动保存并长期复用。"}
     if on_note:
         on_note("正在用签名接口读取该账号的作品列表（官方接口 + 开源签名库 xhshow）…")
+    # 小红书从 2026 起访问**他人主页**必须带主页链接里的 xsec_token。
+    # 不带时接口不报错，而是回 HTTP 461 + `{"success":true,"data":{}}` ——
+    # 看上去是「成功但没有作品」，实际是被拒绝（2026-11-07 实测）。
+    _q = parse_qs(urlparse(url).query)
+    _tok = (_q.get("xsec_token") or [""])[0]
+    _src = (_q.get("xsec_source") or ["pc_user"])[0] or "pc_user"
     params = {"num": 30, "cursor": "", "user_id": uid, "image_formats": "jpg"}
+    if _tok:
+        params["xsec_token"] = _tok
+        params["xsec_source"] = _src
     signer = Xhshow()
     items: list[dict] = []
     cursor = ""
@@ -470,8 +479,17 @@ def xhs_author_items(url: str, *, limit: int = 30, timeout: int = 90,
         try:
             data = resp.json()
         except ValueError:
+            body = (resp.text or "")[:120]
+            # 2026-11-07 实测：小红书对可疑出口 IP 直接回 HTTP 418 + 正文
+            # `risk pass`（9 字节），浏览器打开也只显示这两个词。
+            # 这不是登录态问题，报“请重新登录”会把用户带偏。
+            if resp.status_code == 418 or "risk pass" in body.lower():
+                return {"ok": False, "items": [], "login_required": False,
+                        "error": ("小红书判定当前网络环境有风险（HTTP 418 / risk pass），"
+                                  "与登录态无关。请更换网络后重试：手机热点、其它宽带，"
+                                  "或一个干净的中国大陆代理节点。")}
             return {"ok": False, "items": [], "login_required": False,
-                    "error": f"接口返回非 JSON（HTTP {resp.status_code}）：{resp.text[:120]}"}
+                    "error": f"接口返回非 JSON（HTTP {resp.status_code}）：{body}"}
         if not data.get("success"):
             code = data.get("code")
             msg = (data.get("msg") or "")[:80]
@@ -479,13 +497,51 @@ def xhs_author_items(url: str, *, limit: int = 30, timeout: int = 90,
                 # -100「登录已过期」/ -101 都代表会话失效。此前只认 -101，
                 # -100 落进通用报错（login_required=False），应用既不提示
                 # 重新登录也不标记失效，还继续拿登录墙页面的演示视频充数。
-                err = f"登录态已失效（{msg}）。请重新扫码登录一次小红书。"
+                #
+                # ⚠️ 2026-11-07 补充：出口 IP 被小红书风控时，接口层也用 -100
+                # 来表达「会话不可用」，而页面层直接回 HTTP 418 + `risk pass`。
+                # 两者症状一样、原因不同，所以提示里必须同时给出换网络这条路，
+                # 否则用户会陷进「重新登录 → 还是失败 → 再登录」的死循环。
+                err = (f"登录态已失效（{msg}）。请重新扫码登录一次小红书；"
+                       "若重新登录后仍失败，说明当前网络被小红书风控"
+                       "（页面只显示 risk pass / 接口 418），请换手机热点或其它宽带再试。")
                 platform_login.mark_invalid("xhs", err)
                 return {"ok": False, "items": [], "login_required": True,
                         "error": err}
             return {"ok": False, "items": [], "login_required": False,
                     "error": f"接口报错（code={code}）：{msg}"}
-        notes = (data.get("data") or {}).get("notes") or []
+
+        # ⚠️ 小红书会把「拒绝」包装成 success:true —— 必须按 code / HTTP 状态码
+        # 再判一次，否则用户永远只看到「接口正常但没有可解析的作品」，
+        # 而不是「请重新登录」。2026-11-07 实测的三条：
+        #   HTTP 461 + code=0 + data={}            → 没带 xsec_token，被软拒绝
+        #   HTTP 461 + code=300035                  → 主页令牌失效
+        #   HTTP 200 + code=-100 + msg=登录已过期   → 服务端会话已失效
+        code = data.get("code")
+        if code in (-100, -101):
+            err = (f"小红书登录态已失效（{(data.get('msg') or '')[:60]}）。"
+                   "请到「平台登录」重新扫码登录小红书。")
+            platform_login.mark_invalid("xhs", err)
+            return {"ok": False, "items": [], "login_required": True,
+                    "error": err}
+
+        notes = (data.get("data") or {}).get("notes")
+        if notes is None or resp.status_code == 461:
+            why = str(data.get("msg") or "").strip()
+            if code == 300035 or "无法浏览" in why:
+                err = (f"小红书拒绝了这次请求（{why or '主页令牌失效'}）："
+                       "链接里的 xsec_token 可能已过期。请重新复制一次主页地址"
+                       "（令牌会随链接刷新），或重新登录小红书后再试。")
+            elif not _tok:
+                err = ("小红书拒绝了这次请求（HTTP 461）：访问他人主页需要主页链接里的 "
+                       "xsec_token。请把主页地址原样复制过来（带 ?xsec_token=…），"
+                       "或先在「平台登录」登录小红书。")
+            else:
+                err = (f"小红书拒绝了这次请求（HTTP {resp.status_code}"
+                       f"{('，' + why[:40]) if why else ''}）：通常是登录态或主页令牌失效，"
+                       "请重新登录小红书、并重新复制主页地址后重试。")
+            return {"ok": False, "items": [], "login_required": False, "error": err}
+
         for n in notes:
             nid = n.get("note_id") or ""
             tok = n.get("xsec_token") or ""
@@ -661,6 +717,7 @@ def xhs_author_image_items(url: str, *, limit: int = 30, on_note=None) -> dict:
     failed = 0
     videos = 0
     checked = 0
+    first_err = ""      # 第一条详情失败原因：用来区分「只有视频笔记」和「全部被拒绝」
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         for off in range(0, len(notes), 6):
@@ -679,6 +736,8 @@ def xhs_author_image_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                     continue
                 if not detail.get("ok"):
                     failed += 1
+                    if not first_err:
+                        first_err = str(detail.get("error") or "").strip()
                     continue
                 if detail.get("is_video"):
                     videos += 1
@@ -715,8 +774,33 @@ def xhs_author_image_items(url: str, *, limit: int = 30, on_note=None) -> dict:
             f"\u68c0\u67e5 {checked} \u7bc7\uff0c\u8df3\u8fc7\u89c6\u9891\u7b14\u8bb0 {videos} \u7bc7\uff0c\u8be6\u60c5\u5931\u8d25 {failed} \u7bc7\u3002")
     if note_scan >= 120 and len(out) < max_media:
         note += " \u4e3a\u63a7\u5236\u5e73\u53f0\u8bf7\u6c42\u91cf\uff0c\u672c\u8f6e\u6700\u591a\u626b\u63cf 120 \u7bc7\u4f5c\u54c1\u3002"
-    return {"ok": bool(out), "items": out[:max_media], "login_required": False,
-            "error": "" if out else "\u6ca1\u6709\u627e\u5230\u56fe\u6587\u7b14\u8bb0\u6b63\u6587\u56fe\u7247\u3002", "note": note}
+    if out:
+        return {"ok": True, "items": out[:max_media], "login_required": False,
+                "error": "", "note": note}
+
+    # 一张图都没拿到时，必须分清两种情况 —— 2026-11-07 用户实测：
+    #   ① 这个号确实只有视频笔记（正常，换视频模式即可）
+    #   ② 登录态/主页令牌失效，接口把**每一篇**详情都拒了（旧代码报成
+    #      「没有找到图文笔记正文图片」，用户以为这个号没图，实际是要重新登录）
+    if checked and failed >= checked:
+        why = first_err or "小红书笔记详情接口拒绝了全部请求"
+        low = why.lower()
+        auth_like = (
+            platform_login.looks_like_auth_error(why)
+            or "token" in low or "令牌" in why or "失效" in why or "过期" in why
+        )
+        if auth_like:
+            platform_login.mark_invalid("xhs", why[:300])
+            return {"ok": False, "items": [], "login_required": True,
+                    "error": (f"小红书拒绝了全部 {checked} 篇笔记的详情请求（{why[:140]}）。"
+                              "请到「平台登录」重新扫码登录小红书，"
+                              "并把主页地址重新复制一次（令牌会随链接刷新）后重试。"),
+                    "note": note}
+        return {"ok": False, "items": [], "login_required": False,
+                "error": f"小红书笔记详情全部失败（{checked} 篇）：{why[:160]}",
+                "note": note}
+    return {"ok": False, "items": [], "login_required": False,
+            "error": "\u6ca1\u6709\u627e\u5230\u56fe\u6587\u7b14\u8bb0\u6b63\u6587\u56fe\u7247\u3002", "note": note}
 
 
 def _xhs_signed_detail_item(url: str, *, timeout: int = 60) -> dict:
@@ -958,7 +1042,11 @@ def _xhs_api_post(endpoint: str, payload: dict, *, referer: str, cookies: dict,
     try:
         data = resp.json()
     except Exception:
-        return None, f"小红书接口返回非 JSON（HTTP {resp.status_code}）"
+        body = (resp.text or "")[:120]
+        if resp.status_code == 418 or "risk pass" in body.lower():
+            return None, ("小红书判定当前网络环境有风险（HTTP 418 / risk pass），"
+                          "与登录态无关；请更换网络（手机热点 / 其它宽带 / 干净代理）后重试。")
+        return None, f"小红书接口返回非 JSON（HTTP {resp.status_code}）：{body}"
     if not data.get("success"):
         err = (f"小红书接口报错（code={data.get('code')}）："
                f"{str(data.get('msg') or '')[:100]}")
@@ -1593,6 +1681,237 @@ def ytdlp_items(url: str, *, limit: int = 30, on_note=None) -> dict:
 
 _MEDIA_RE = re.compile(r'https?://[^"\\\s<>]+?\.(?:mp4|webm|m3u8|mov|flv)(?:\?[^"\\\s<>]*)?', re.I)
 _HTTP_RE = re.compile(r'https?://[^"\\\s<>]+', re.I)
+
+
+# ---------- 作品链接质量闸门（纯地址形态 / 字段语义，不含任何站点名） ----------
+#
+# 2026-11-07 实测的通用缺陷：平台主页未登录或撞验证墙时，页面只剩导航、
+# 登录入口与静态资源；browser_items 的兜底会把这些链接全标成 video 返回
+# （快手 16 条导航、知乎 30 条 js/css/png）。用户看到的是「抓到一堆下不了的
+# 东西」，比 0 条更糟。判据只看 Web 通用结构：静态资源后缀、功能子域、
+# 导航/登录路径词、内容段词、长 ID 段。
+_STATIC_SUFFIX_RE = re.compile(
+    r"\.(?:js|mjs|cjs|css|map|json|xml|txt|woff2?|ttf|eot|otf|"
+    r"svg|png|jpe?g|gif|webp|avif|ico|bmp|html?)(?:\?|$)", re.I)
+_VIDEO_SUFFIX_RE = re.compile(
+    r"\.(?:mp4|webm|m3u8|mpd|mov|flv|mkv|m4v)(?:\?|$)", re.I)
+_SITE_ASSET_WORDS = frozenset((
+    "manifest", "favicon", "logo", "banner", "background", "placeholder",
+    "loading", "sprite", "demo", "sample", "share-logo", "apple-touch-icon",
+    "icon", "avatar", "emoji", "qrcode", "web_json",
+))
+_FUNC_SUBDOMAINS = frozenset((
+    "static", "assets", "cdn", "img", "image", "pic", "docs", "doc", "cp",
+    "admin", "api", "id", "passport", "account", "help", "support", "m",
+    "mobile", "live", "apm", "event", "sc", "log", "collector", "stats",
+))
+_NAV_PATH_WORDS = frozenset((
+    "login", "signin", "signup", "register", "logout", "unhuman", "captcha",
+    "verify", "verification", "passport", "account", "help", "about", "policy",
+    "privacy", "terms", "download", "feedback", "contact", "publish", "manage",
+    "settings", "committee", "material-lib", "new-reco", "myfollow", "search",
+    "sc-assets-tracker", "passToken", "api", "appview", "term", "messages",
+    "creator", "report", "assets", "collector", "recommend", "topstory",
+    "hot-lists", "badge_center",
+))
+_WORK_SEG_WORDS = frozenset((
+    "video", "videos", "watch", "view", "short-video", "shot", "reel",
+    "photo", "note", "notes", "post", "posts", "p", "answer", "answers",
+    "question", "status", "detail", "item", "feed", "explore", "clip",
+))
+_LOGIN_WORDS = ("扫码登录", "立即登录", "登录后", "登录即可", "sign in", "log in")
+
+# 「视频模式」专用的作品页判据，比上面的通用作品链接判据严一档。
+# 2026-11-08 实测：知乎问题页渲染出 topic / people / question / answer /
+# zhuanlan 链接共 20 条，通用判据因「带长 ID + answer/question 段」全放行，
+# browser_items 把它们全标成 video 交出去 —— 用户说的「抓到的有些根本不是视频」。
+# 视频页必须有视频段词（video/zvideo/watch/play/short-video/v）或视频文件后缀，
+# 且末段是内容 ID；纯话题/用户/问题/回答/专栏页一律不算。
+_VIDEO_WORK_SEGS = frozenset((
+    "video", "videos", "zvideo", "watch", "play", "short-video",
+    "shot", "reel", "clip", "v",
+))
+_NON_VIDEO_COLLECTION_SEGS = frozenset((
+    "topic", "people", "question", "p", "column", "tag", "collection",
+    "term", "org", "followers", "following", "answers", "search", "feed",
+))
+
+
+def _looks_like_video_work_url(candidate: str) -> bool:
+    """纯函数：这个地址像不像「一条视频」的作品页 / 媒体直链。
+
+    只认两种：带视频扩展名的直链，或「视频段 + 内容 ID」形态的作品页。
+    刻意不认 answer / question / topic，即使它们带长数字 ID —— 那是讨论页，
+    不是视频。没有站点名，换站同样成立。
+    """
+    try:
+        p = urlparse(candidate)
+    except ValueError:
+        return False
+    if not p.scheme.startswith("http") or not p.hostname:
+        return False
+    segs = [s.lower() for s in (p.path or "").strip("/").split("/") if s]
+    if not segs:
+        return False
+    last = segs[-1]
+    if _VIDEO_SUFFIX_RE.search(last):
+        return True
+    if len(segs) < 2:
+        return False
+    head = segs[:-1]
+    if any(s in _NON_VIDEO_COLLECTION_SEGS for s in head):
+        return False
+    # xvideos 这类把 ID 焊在段名里（/video.abc1234567/<slug>），
+    # 视频身份已经在段名上，不再要求 slug 里还有数字。
+    if any(s.startswith("video.") and re.search(r"\d{4,}", s) for s in head):
+        return True
+    if not any(s in _VIDEO_WORK_SEGS for s in head):
+        return False
+    return bool(re.search(r"\d{6,}", last)) or (
+        len(last) >= 8 and any(c.isdigit() for c in last))
+
+
+def _looks_like_work_url(candidate: str, base_url: str = "") -> bool:
+    """这条链接能不能当成「一条作品」：真媒体直链，或带内容 ID 的作品页。
+
+    纯函数、不联网，离线用例可直接喂地址。刻意不含站点名 —— 静态资源后缀、
+    功能子域、导航词、内容段词都是通用 Web 结构，换任何站点同样成立。
+    """
+    try:
+        p = urlparse(candidate)
+        b = urlparse(base_url) if base_url else None
+    except ValueError:
+        return False
+    if not p.scheme.startswith("http") or not p.hostname:
+        return False
+    host = (p.hostname or "").lower()
+    sub = host.split(".")[0] if host.count(".") >= 2 else ""
+    segs = [s for s in (p.path or "").lower().strip("/").split("/") if s]
+    if not segs:
+        return False
+    last = segs[-1]
+    low_path = "/".join(segs)
+    if any(w in low_path for w in _NAV_PATH_WORDS):
+        return False
+    if any(w in last for w in _SITE_ASSET_WORDS):
+        return False
+    # 真视频直链优先放行：内容 CDN 常用 cdn./img. 这类前缀，
+    # 不能在判扩展名之前按子域把它否掉（离线用例 film_1080p.m3u8）。
+    if _VIDEO_SUFFIX_RE.search(last):
+        return True
+    if sub in _FUNC_SUBDOMAINS:
+        return False
+    if _STATIC_SUFFIX_RE.search(last):
+        return False
+    if len(segs) < 2:
+        return False
+    has_long_id = any(len(s) >= 8 and any(c.isdigit() for c in s)
+                      for s in segs)
+    has_work_seg = any(s in _WORK_SEG_WORDS for s in segs)
+    if not (has_long_id or has_work_seg):
+        return False
+    if b and b.path:
+        if segs == [s.lower() for s in (b.path or "").split("/") if s]:
+            return False
+    return True
+
+
+def _wall_from_html(html: str, title: str = "") -> tuple[str, str]:
+    """渲染结果是不是验证墙 / 登录墙，返回 (种类, 页面原话)。
+
+    只看「标题 + 可见文本」，不扫整份 HTML：脚本里普遍带 captcha/verify
+    这类前端功能名，扫全文会把正常页面误报（工程手册 2026-09-22 的坑）。
+    """
+    from bs4 import BeautifulSoup
+    from .page_scanner import BOT_WALL_MARKERS
+
+    try:
+        soup = BeautifulSoup(html or "", "html.parser")
+        if not title and soup.title:
+            title = soup.title.get_text(" ", strip=True)
+        visible = " ".join(soup.get_text(" ", strip=True).split())[:800]
+    except Exception:  # noqa: BLE001
+        visible = ""
+    blob = f"{title} {visible}".lower()
+    # 页面里的中文提示常被排版拆开（「立即 登录」），还可能夹带解码替换符；
+    # 紧凑化后再比一次，否则登录墙会被漏判成「没抓到作品」。
+    compact = re.sub(r"[\s\ufffd]+", "", blob)
+    quote = " ".join(filter(None, (title, visible)))[:180]
+    for marker, msg in BOT_WALL_MARKERS:
+        if marker in blob or re.sub(r"\s+", "", marker) in compact:
+            return "verification", quote or msg
+    if any(w in blob for w in _LOGIN_WORDS) or any(
+            w in compact for w in ("扫码登录", "立即登录", "登录后", "登录即可")):
+        return "login", quote
+    return "", quote
+
+
+# 站点放在路径第一段的语言前缀（B站 /zh-Hans/、YouTube /en/、微博 /ja/）。
+# 只列常见语言码，不做「两三个字母都是语言」的宽判，否则 /tv/123 会被误吞。
+_LANG_SEGS = frozenset({
+    "zh", "zh-hans", "zh-hant", "zh-cn", "zh-tw", "zh-hk", "zh-sg",
+    "en", "en-us", "en-gb", "ja", "jp", "ko", "kr", "fr", "de", "es",
+    "ru", "pt", "it", "ar", "th", "vi", "id", "ms", "tr", "nl", "pl",
+})
+
+
+def is_single_work_url(url: str) -> bool:
+    """这个地址是「单个作品页」（一集番剧 / 一条视频 / 一篇笔记），不是主页。
+
+    只用来选提示文案：番剧播放页被说成「B站主页」会让用户以为工具认错了地址
+    （2026-11-08 实测：/bangumi/play/ep810642 的提示就是「这是一个B站主页」）。
+    """
+    try:
+        p = urlparse(url or "")
+    except ValueError:
+        return False
+    low = f"{(p.path or '').lower()}?{(p.query or '').lower()}"
+    if re.search(r"ep_id=|/ep\d+|aid=|bvid=|/watch\b|/zvideo/|/status/", low):
+        return True
+    # /video/<id>、/play/<id>、/watch/<id>：段后必须还有内容，否则是「/video」列表页
+    return bool(re.search(r"/(?:video|play|watch|p|note|photo|explore|status)/"
+                          r"[a-z0-9_-]{3,}", low))
+
+
+def _same_target_page(requested: str, final: str) -> bool:
+    """渲染后是否还停在请求的那个页面（没被赶到登录页 / 验证页 / 首页）。
+
+    2026-11-07 实测：知乎问题页被赶到 /account/unhuman 后，页面自带的
+    33 个被拦截响应里全是推荐 API、专栏文章与私信链接；browser_items 把
+    这些裸 URL 当作品返回了 25 条。目标页路径必须是最终路径的前缀，
+    这一条判据对任何站点都成立，且不需要站点名。
+    """
+    try:
+        a, b = urlparse(requested), urlparse(final)
+    except ValueError:
+        return True
+    if not (b.hostname or ""):
+        return True                      # 渲染层没给 final_url 时不臆断
+    ah = (a.hostname or "").lower().removeprefix("www.")
+    bh = (b.hostname or "").lower().removeprefix("www.")
+    if ah != bh:
+        return False
+    ap = [s for s in (a.path or "").strip("/").split("/") if s]
+    bp = [s for s in (b.path or "").strip("/").split("/") if s]
+    if not ap:
+        return not bp
+    # 两侧都要折成小写再比：只折一侧时，路径里带大写段的站点
+    # （B站 /zh-Hans/bangumi/…）连「同一个 URL 和自己比」都会判 False，
+    # 于是正常页面被当成「被跳转到登录页」，直接把平台登录态标成失效。
+    ap_l = [s.lower() for s in ap]
+    bp_l = [s.lower() for s in bp]
+    if bp_l[:len(ap_l)] == ap_l:
+        return True
+    # 语言前缀会被站点随手加上或剥掉（/zh-Hans/bangumi/play/ep1 ←→
+    # /bangumi/play/ep1），这不是跳转。只认白名单里的语言段，避免把
+    # /tv/123 这类真路径当成语言前缀吞掉。
+    ap2 = ap_l[1:] if len(ap_l) >= 2 and ap_l[0] in _LANG_SEGS else ap_l
+    bp2 = bp_l[1:] if len(bp_l) >= 2 and bp_l[0] in _LANG_SEGS else bp_l
+    if ap2 is ap_l and bp2 is bp_l:
+        return False
+    if not ap2:
+        return not bp2
+    return bp2[:len(ap2)] == ap2
 
 
 def _same_site_candidate(base_url: str, candidate: str) -> bool:
@@ -2371,25 +2690,448 @@ def browser_skill_author_items(url: str, *, limit: int = 30, on_note=None) -> di
                 pass
 
 
-def browser_items(url: str, *, limit: int = 30, on_note=None) -> dict:
+_ZH_VIDEO_PAGE_RE = re.compile(
+    r"^https?://(?:www\.|video\.)?zhihu\.com/(?:zvideo|video)/(\d+)", re.I)
+_ZH_VIDEO_ID_RE = re.compile(r"(?:zvideo|/video)/(\d{8,})")
+
+
+def _zhihu_video_items(url: str, *, limit: int = 30, on_note=None) -> dict:
+    """知乎抓视频：只交出**真的视频**，且每条都带标题、封面、时长。
+
+    为什么必须单开一条通道（2026-11-08 实测）：
+      1. 粘单条 `/video/<id>` 时通用抓取会去渲染那个 302 后的 JS 空壳
+         （`video.zhihu.com/video/<id>?$args`，1.3KB、标题只有「知乎视频」），
+         最后报「登录态失效」，一条都拿不到；
+      2. 粘问题页 / 用户主页时通用兜底把 topic / people / question /
+         answer / 专栏链接全标成 video（实测 20 条，标题封面全空）——
+         这就是用户说的「抓到的有些根本不是视频」。
+      知乎自己的 zvideo 页 yt-dlp 有专门 extractor，1~2 秒就能给出标题、
+      封面、时长和 4 档清晰度。所以：先从页面里挑出真正的视频 ID，
+      逐条用解析器补齐元数据，再交出去；解析不出的不拿裸链接凑数。
+    """
+    from . import video_downloader
+    from .renderer import render_page
+
+    norm = video_downloader._normalize_media_url(url)
+    m = _ZH_VIDEO_PAGE_RE.match(norm or url)
+    if m:
+        ids = [m.group(1)]
+        landed, wall_kind, wall_quote = norm, "", ""
+    else:
+        if on_note:
+            on_note("正在读取页面里的知乎视频链接（只认 /zvideo/ 与 /video/ 作品）…")
+        rr = render_page(url, timeout_ms=60000, settle_ms=3500,
+                         scroll_rounds=8,
+                         capture_types=("json", "javascript", "text"))
+        if not rr.ok:
+            return {"ok": False, "items": [], "login_required": False,
+                    "error": rr.error or "浏览器渲染失败"}
+        landed = str(getattr(rr, "final_url", "") or "")
+        wall_kind, wall_quote = _wall_from_html(
+            rr.html or "", str(getattr(rr, "title", "") or ""))
+        if not _same_target_page(url, landed) or wall_kind:
+            is_verify = (wall_kind == "verification" or "unhuman" in landed
+                         or "captcha" in landed or "验证" in wall_quote)
+            return {
+                "ok": False, "items": [],
+                "verification_required": bool(is_verify),
+                "login_required": not is_verify,
+                "error": (f"页面停在「{landed[:120]}」"
+                          f"（页面自述「{wall_quote[:160]}」），没有读到视频作品。"
+                          + ("请稍后重试或换网络出口。"
+                             if is_verify else
+                             "请到「平台登录」登录知乎后重抓一次。")),
+            }
+        blob = (rr.html or "") + "\n" + "\n".join(
+            (c.body or "") for c in (getattr(rr, "captured", None) or []))
+        ids = list(dict.fromkeys(_ZH_VIDEO_ID_RE.findall(blob)))[:max(1, int(limit))]
+
+    if not ids:
+        return {"ok": False, "items": [], "login_required": False,
+                "error": "已按知乎视频通道确认：页面没有 /zvideo/ 或 /video/ 作品链接。"
+                         "这个地址可能只有图文内容，或视频是推荐流里带出来的"
+                         "（那种不是本页作品，不会拿来凑数）。"
+                         "想抓某条视频请粘它的 /zvideo/<id> 或 /video/<id> 地址。"}
+
+    if on_note:
+        on_note(f"已找到 {len(ids)} 条知乎视频，正在逐条读取标题、封面与清晰度…")
+    ck = platform_login.cookie_file_for_platform("zhihu") or None
+    probes: dict[str, dict] = {}
+
+    def _probe(vid: str) -> tuple[str, dict]:
+        page = f"https://www.zhihu.com/zvideo/{vid}"
+        try:
+            return vid, video_downloader.probe_video(
+                page, cookies_file=ck, max_attempts=1)
+        except Exception as e:  # noqa: BLE001
+            return vid, {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    with ThreadPoolExecutor(max_workers=min(3, max(1, len(ids)))) as pool:
+        for fut in as_completed([pool.submit(_probe, v) for v in ids]):
+            try:
+                vid, info = fut.result()
+            except Exception:  # noqa: BLE001
+                continue
+            probes[vid] = info
+
+    items: list[dict] = []
+    failed: list[str] = []
+    for vid in ids:
+        info = probes.get(vid) or {}
+        if not info.get("ok"):
+            failed.append(str(info.get("error") or "解析失败")[:80])
+            continue
+        items.append({
+            # 不给 direct_url：让前端把它当视频页交给 yt-dlp 下载，
+            # 文件名用这里的标题，清晰度可选（F-13 / F-15 的行为）。
+            "page_url": f"https://www.zhihu.com/zvideo/{vid}",
+            "direct_url": "",
+            "variants": [],
+            "title": str(info.get("title") or "").strip()[:150],
+            "cover": str(info.get("thumbnail") or "").strip(),
+            "uploader": str(info.get("uploader") or "").strip(),
+            "site": "zhihu.com",
+            "kind_hint": "video",
+            "duration": info.get("duration") or 0,
+            "is_page": True,
+        })
+    if not items:
+        return {"ok": False, "items": [], "login_required": False,
+                "error": "视频链接已找到，但元数据解析失败：" + "；".join(failed[:2])}
+    if on_note:
+        on_note(f"知乎视频 {len(items)} 条已带标题与封面（{len(failed)} 条解析失败已丢弃）。")
+    return {"ok": True, "items": items, "login_required": False,
+            "verification_required": False,
+            "error": (f"另有 {len(failed)} 条视频解析失败，已丢弃不留空壳。"
+                      if failed else "")}
+
+
+def _kuaishou_profile_items(url: str, *, limit: int = 30, on_note=None) -> dict:
+    """快手主页作品：直接解析它自己的 `/rest/v/profile/feed` 响应。
+
+    为什么不能靠 DOM（2026-11-08 实测，决定性）：
+      快手主页的作品卡片是 `div.photo-card > div.cover > div.aspect-div > img.cover-img`，
+      **外层根本没有 <a>** —— 整页只有 8 个链接，全是导航（发现/直播/关注…）。
+      所以 `a[href*="short-video"]` 恒为 0、`video` 元素恒为 0，
+      按链接或按 video 找卡片必然空手。
+      而 feed 接口一次把三样都给全了：
+        `feeds[].photo.caption`   → 标题
+        `feeds[].photo.coverUrl`  → 封面（p*.a.yximgs.com/upic/…jpg）
+        `feeds[].photo.photoUrls` → 直链数组（v*.kwaicdn.com/upic/…mp4）
+        `feeds[].photo.id`        → 可拼 https://www.kuaishou.com/short-video/<id>
+    登录态失效时该接口返回 `{"result":109}`，页面把作品区换成
+    「想看更多视频，快去登录吧」—— 这时必须如实报登录，不能拿别的媒体地址充数。
+    """
+    from playwright.sync_api import sync_playwright
+    from . import browser_runtime
+    from .config import DEFAULT_UA
+    from .renderer import _LAUNCH_ARGS
+
+    platform = platform_for_url(url)
+    if platform not in platform_login.PLATFORMS:
+        return {"ok": False, "items": [], "login_required": False,
+                "error": "不是快手地址"}
+    try:
+        prof = str(platform_login.profile_dir(platform))
+    except Exception:  # noqa: BLE001
+        prof = ""
+    if not prof or not Path(prof).is_dir():
+        return {"ok": False, "items": [], "login_required": True,
+                "error": "没有可用的快手登录态目录，请到「平台登录」登录一次。"}
+    if on_note:
+        on_note("正在用快手登录态读取主页作品列表（解析它自己的 feed 接口）…")
+
+    photos: dict[str, dict] = {}
+    blocked = False
+
+    def _on_resp(r):
+        nonlocal blocked
+        if "/rest/v/profile/feed" not in (r.url or ""):
+            return
+        try:
+            body = r.text() or ""
+        except Exception:  # noqa: BLE001
+            return
+        if '"result":109' in body[:200]:
+            blocked = True
+            return
+        try:
+            d = json.loads(body)
+        except (ValueError, TypeError):
+            return
+        for f in d.get("feeds") or []:
+            ph = (f or {}).get("photo") or {}
+            pid = str(ph.get("id") or "")
+            if pid and pid not in photos:
+                photos[pid] = ph
+
+    with sync_playwright() as p:
+        ctx = p.chromium.launch_persistent_context(
+            user_data_dir=prof, headless=True, locale="zh-CN",
+            user_agent=DEFAULT_UA, viewport={"width": 1400, "height": 950},
+            args=list(_LAUNCH_ARGS), **browser_runtime.launch_kwargs())
+        try:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.on("response", _on_resp)
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            except Exception:  # noqa: BLE001
+                pass
+            page.wait_for_timeout(5000)
+            # 作品区是**内部滚动容器** .up，滚 window 不会触发分页（实测）。
+            idle = 0
+            for _ in range(10):
+                if len(photos) >= int(limit):
+                    break
+                before = len(photos)
+                try:
+                    page.evaluate(
+                        "() => { const e = document.querySelector('.up');"
+                        " if (e) e.scrollTop = e.scrollHeight;"
+                        " else window.scrollTo(0, document.body.scrollHeight); }")
+                except Exception:  # noqa: BLE001
+                    pass
+                page.wait_for_timeout(1800)
+                idle = idle + 1 if len(photos) == before else 0
+                if idle >= 2:
+                    break
+        finally:
+            try:
+                ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if not photos:
+        if blocked:
+            msg = ("快手主页作品接口返回未登录（result=109）。"
+                   "请到「平台登录」重新登录快手后重抓一次。")
+            platform_login.mark_invalid(platform, msg)
+            return {"ok": False, "items": [], "login_required": True, "error": msg}
+        return {"ok": False, "items": [], "login_required": False,
+                "error": "已打开快手主页，但作品列表接口没有返回 feeds。"}
+
+    items: list[dict] = []
+    for pid, ph in photos.items():
+        urls: list[str] = []
+        for u in (ph.get("photoUrls") or []):
+            s = str((u or {}).get("url") or "").strip()
+            if s and s not in urls:
+                urls.append(s)
+        cover = str(ph.get("coverUrl") or "").strip()
+        if not cover:
+            cover = str(ph.get("animatedCoverUrl") or "").strip()
+        try:
+            dur = int(ph.get("duration") or 0) // 1000
+        except (TypeError, ValueError):
+            dur = 0
+        items.append({
+            "page_url": f"https://www.kuaishou.com/short-video/{pid}",
+            "direct_url": urls[0] if urls else "",
+            "variants": urls[1:],
+            "title": str(ph.get("caption") or "").strip()[:120],
+            "cover": cover,
+            "uploader": "",
+            "site": "kuaishou.com",
+            "kind_hint": "video",
+            "duration": dur,
+        })
+        if len(items) >= int(limit):
+            break
+    if on_note:
+        on_note(f"从快手 feed 接口读到 {len(items)} 条作品（含封面、标题、详情页）。")
+    return {"ok": bool(items), "items": items, "login_required": False, "error": ""}
+
+
+# 创作中心 / 投稿后台的路径，永远不是「作品」。
+# 实测 B站番剧页：顶栏「投稿」是个 iframe，地址是
+# member.bilibili.com/zh-Hans/platform/upload/video/frame，被抓成一条「视频」。
+_NON_WORK_PATH_WORDS = ("/platform/upload", "/upload/video", "/upload/dash",
+                        "/studio/", "/creator/", "/member/upload", "/edit/",
+                        "/editor/", "/upload-manager")
+
+
+def _collapse_work_rows(rows: list[dict], page_url: str) -> list[dict]:
+    """把「从页面里捞到的一堆地址」收敛成「一条作品一行」。
+
+    为什么需要（2026-11-08 打包版实测）：抓一集番剧，browser 兜底交回 20 条 ——
+    19 条是同一集在十几个 CDN 镜像上的副本（其中 4 条 URL 完全重复），
+    外加「投稿」按钮的 iframe 和推荐位里的另一集。用户点「全选下载」
+    就是把同一集下十几遍。
+
+    两条通用规则：
+      - 同一部片（`_video_variant_info` 归并键相同）只留最高档一条，其余进 variants；
+      - 请求的是单作品页时，页面里的**其它作品链接**都是推荐位，不混进结果。
+    """
+    from .extractor import _video_variant_info
+
+    out: list[dict] = []
+    by_url: dict[str, dict] = {}
+    by_key: dict[str, tuple[dict, int]] = {}
+    single = is_single_work_url(page_url)
+
+    for r in rows:
+        href = str(r.get("page_url") or "")
+        direct = str(r.get("direct_url") or "")
+        if href and any(w in href.lower() for w in _NON_WORK_PATH_WORDS):
+            continue
+        # 单作品页：这一页自己的作品才算结果，别把推荐位的其它视频带进来
+        if single and href and not direct and not _same_target_page(page_url, href):
+            continue
+        u = direct or href
+        if not u or u in by_url:
+            continue
+        key, _orig, height = _video_variant_info(direct) if direct else (None, False, 0)
+        if key:
+            prev = by_key.get(key)
+            if prev is not None:
+                best, best_h = prev
+                if height > best_h:
+                    vs = best.setdefault("variants", [])
+                    if best.get("direct_url") and best["direct_url"] not in vs:
+                        vs.append(best["direct_url"])
+                    best["direct_url"] = direct
+                    best["page_url"] = href or best.get("page_url") or page_url
+                    by_key[key] = (best, height)
+                else:
+                    vs = best.setdefault("variants", [])
+                    if direct not in vs:
+                        vs.append(direct)
+                if not best.get("cover") and r.get("cover"):
+                    best["cover"] = r["cover"]
+                if not best.get("title") and r.get("title"):
+                    best["title"] = r["title"]
+                by_url[u] = best
+                continue
+        row = dict(r)
+        out.append(row)
+        by_url[u] = row
+        if key:
+            by_key[key] = (row, height)
+    return out
+
+
+def browser_items(url: str, *, limit: int = 30, on_note=None,
+                  video_only: bool = False) -> dict:
     from bs4 import BeautifulSoup
     from .renderer import render_page
 
     platform = platform_for_url(url)
+    # 快手走专属通道：它的卡片不是 <a>，通用路径必然拿不到封面/标题。
+    if platform == "ks":
+        return _kuaishou_profile_items(url, limit=limit, on_note=on_note)
     st = platform_login.status(platform) if platform else {}
     if on_note:
         on_note("正在用内置登录浏览器渲染主页并读取页面自己的网络响应…")
+    # 结构化提取：只靠正则从 HTML/JSON 里捞 URL，拿不到封面、标题、作品详情页 ——
+    # 快手这类「主页卡片 + video 直链」的站点会变成一整排没有缩略图、没有标题的
+    # 「视频文件」，点下载还得再猜一次地址（2026-11-07 用户实测）。
+    # 这里在页面内直接读卡片：一条作品 = 详情页链接 + 封面 + 标题 + 预览视频源。
+    _card_js = r"""() => {
+      const out = []; const seen = new Set();
+      const sel = 'a[href*="/short-video/"], a[href*="/video/"], a[href*="/photo/"], a[href*="/note/"], a[href*="/explore/"]';
+      document.querySelectorAll(sel).forEach(a => {
+        const href = a.href || '';
+        if (!href || seen.has(href)) return;
+        seen.add(href);
+        const img = a.querySelector('img');
+        const v = a.querySelector('video');
+        let title = (a.getAttribute('title') || '').trim();
+        if (!title) {
+          const t = a.querySelector('[class*="title"], [class*="caption"], [class*="desc"], p, span');
+          title = t ? (t.textContent || '').trim() : '';
+        }
+        const cover = img ? (img.currentSrc || img.src
+                             || img.getAttribute('data-src') || '') : '';
+        out.push({
+          href: href,
+          title: title.replace(/\s+/g, ' ').slice(0, 140),
+          cover: cover,
+          video: v ? (v.currentSrc || v.src || '') : '',
+        });
+      });
+      return out.slice(0, 500);
+    }"""
     rr = render_page(url, timeout_ms=60000, settle_ms=3500, scroll_rounds=8,
-                     capture_types=("json", "javascript", "text"))
+                     capture_types=("json", "javascript", "text"),
+                     extract_js=_card_js)
     if not rr.ok:
         msg = rr.error or "浏览器渲染失败"
         return {"ok": False, "items": [], "login_required": False, "error": msg}
+
+    landed = str(getattr(rr, "final_url", "") or "")
+    rtitle = str(getattr(rr, "title", "") or "")
+    if not _same_target_page(url, landed):
+        _kind, _quote = _wall_from_html(rr.html, rtitle)
+        is_verify = (_kind == "verification" or "unhuman" in landed
+                     or "captcha" in landed or "验证" in rtitle)
+        return {
+            "ok": False, "items": [],
+            "verification_required": bool(is_verify),
+            "login_required": not is_verify,
+            "error": (f"页面被跳转到「{landed[:120]}」，没有停在目标页。"
+                      f"页面自述「{_quote[:160]}」。"
+                      + ("请稍后重试、换网络出口，或配置该站点 Cookies。"
+                         if is_verify else
+                         "请到「平台登录中心」登录该平台后重抓一次。"))
+        }
+
+    # 快手主页作品接口在登录态失效时返回 `{"result":109}`，页面把作品区整块换成
+    # 「想看更多视频，快去登录吧」。这时从页面里捞到的媒体地址全是推荐流/热榜的，
+    # 不是这个博主的作品 —— 2026-11-07 实测：30 条"视频文件"逐条核对都对不上，
+    # 但界面上看起来"抓取成功"。必须把这个事实带出去，不能让用户以为抓到了。
+    _profile_blocked = ""
+    for _c in rr.captured:
+        _b = (_c.body or "")[:400]
+        if "/rest/v/profile" in (_c.url or "") and '"result":109' in _b:
+            _profile_blocked = ("该页面的作品列表接口返回未登录（result=109），"
+                                "页面提示「想看更多视频，快去登录吧」")
+            break
+
     text = "\n".join(c.body for c in rr.captured if c.body)
+    wall_kind, wall_quote = _wall_from_html(rr.html, str(getattr(rr, "title", "") or ""))
     items, seen = [], set()
 
+    # ---- 优先用页面内读到的卡片（带封面/标题/详情页）----
+    # 卡片路径比「正则捞媒体 URL」多三个信息：作品详情页、封面、标题。
+    # 有它，列表才有缩略图，下载也能按详情页走正常解析。
+    _cards = getattr(rr, "js", None)
+    if isinstance(_cards, list):
+        for c in _cards:
+            if not isinstance(c, dict):
+                continue
+            href = str(c.get("href") or "").strip()
+            if not href or href in seen:
+                continue
+            if not _same_site_candidate(url, href):
+                continue
+            seen.add(href)
+            items.append({
+                "page_url": href,
+                "direct_url": str(c.get("video") or "").strip(),
+                "variants": [],
+                "title": str(c.get("title") or "").strip(),
+                "cover": str(c.get("cover") or "").strip(),
+                "uploader": "",
+                "site": (urlparse(href).hostname or ""),
+                "kind_hint": "video",
+            })
+            if len(items) >= int(limit):
+                break
+
+    # 不在这里直接判墙失败：正常页面的导航里也可能带「登录」字样。
+    # 先按作品形态筛，筛完仍没有作品、又确实撞墙，才把页面原话如实报出去。
+    if wall_kind and on_note:
+        on_note("渲染结果疑似验证/登录页，正在按作品链接形态复核…")
+
     for m in _MEDIA_RE.findall(text + "\n" + (rr.html or "")):
+        if len(items) >= int(limit):
+            break
         u = m.replace("\\/", "/").rstrip("\\")
-        if u in seen:
+        if u in seen or not _looks_like_work_url(u, url):
+            continue
+        # 卡片路径已经带出这条直链时不再重复：裸媒体 URL 生成的条目没有封面、
+        # 没有标题、page_url 还是主页，混进来只会把好好的卡片挤掉。
+        if any(str(x.get("direct_url") or "") == u for x in items):
             continue
         seen.add(u)
         items.append({"page_url": url, "direct_url": u, "variants": [], "title": "",
@@ -2411,6 +3153,14 @@ def browser_items(url: str, *, limit: int = 30, on_note=None) -> dict:
         for u in candidates:
             if u in seen or not _same_site_candidate(url, u):
                 continue
+            # 同站 ≠ 作品：登录页、帮助页、静态资源、验证页脚本全都同站。
+            if not _looks_like_work_url(u, url):
+                continue
+            # 视频模式再收紧一档：只有视频页 / 视频直链能进「视频」结果。
+            # 2026-11-08 实测知乎问题页的 topic/people/question/answer/专栏
+            # 链接在这之前全被当成视频交出去（20 条，标题封面全空）。
+            if video_only and not _looks_like_video_work_url(u):
+                continue
             seen.add(u)
             items.append({"page_url": u, "direct_url": "", "variants": [], "title": "",
                           "cover": "", "uploader": "", "site": (urlparse(u).hostname or ""),
@@ -2418,16 +3168,20 @@ def browser_items(url: str, *, limit: int = 30, on_note=None) -> dict:
             if len(items) >= int(limit):
                 break
 
-    try:
-        visible = BeautifulSoup(rr.html or "", "html.parser").get_text(" ", strip=True).lower()
-    except Exception:
-        visible = ""
-    login_wall = any(x in visible for x in ("登录", "扫码登录", "sign in", "log in"))
-    if not items and login_wall:
-        msg = "页面显示登录提示，当前平台登录态不可用。"
-        if platform and st.get("logged_in"):
+    if not items and wall_kind:
+        # 页面自己的原话必须带出去：验证墙说「请求存在异常」、登录墙说
+        # 「扫码登录」，用户一眼能分辨是站点侧原因，而不是工具坏了。
+        action = ("请稍后重试、换网络出口，或在「设置」里配置该站点 Cookies。"
+                  if wall_kind == "verification" else
+                  "请到「平台登录中心」登录该平台后重抓一次。")
+        msg = (f"页面停在{'安全验证' if wall_kind == 'verification' else '登录'}页："
+               f"「{wall_quote}」。{action}")
+        if platform and st.get("logged_in") and wall_kind == "login":
             platform_login.mark_invalid(platform, msg)
-        return {"ok": False, "items": [], "login_required": True, "error": msg}
+        return {"ok": False, "items": [],
+                "verification_required": wall_kind == "verification",
+                "login_required": wall_kind == "login",
+                "error": msg}
     if not items and platform and st.get("logged_in"):
         # 用户定死的规则：登录态过期必须提示。有的登录墙（如抖音）页面照常打开、
         # 文本里没有「登录」字样，只是 0 条作品——不能落成普通失败让用户摸不着头脑
@@ -2437,8 +3191,56 @@ def browser_items(url: str, *, limit: int = 30, on_note=None) -> dict:
                "（若确认该账号/页面确实没有作品，可忽略此提示）。")
         platform_login.mark_invalid(platform, msg)
         return {"ok": False, "items": [], "login_required": True, "error": msg}
-    return {"ok": bool(items), "items": items, "login_required": False,
-            "error": "" if items else "浏览器已打开主页，但没有识别到作品链接或视频地址"}
+    # 收敛：同一部片的多镜像/多档位合并、去掉完全重复的 URL、
+    # 单作品页里剔掉推荐位的其它作品。必须在 _bare_only 之前做 ——
+    # 那个判据看的是收敛后的这批到底有没有作品信息。
+    items = _collapse_work_rows(items, url)
+
+    # 单作品页只有一条主视频：标题/封面直接取页面自己的。
+    # 不补的话结果卡片是空白一条，用户不知道那是哪一集
+    # （2026-11-08 打包版实测：番剧单集只有一条 URL，标题封面全空）。
+    if is_single_work_url(url) and len(items) == 1:
+        _one = items[0]
+        if not _one.get("title"):
+            try:
+                from .extractor import page_title as _pg_title
+                _one["title"] = _pg_title(rr.html or "") or rtitle
+            except Exception:  # noqa: BLE001
+                _one["title"] = rtitle or ""
+        if not _one.get("cover"):
+            _m = re.search(r'<meta[^>]+(?:property|name)=["\']og:image["\']'
+                           r'[^>]+content=["\']([^"\']+)', rr.html or "", re.I)
+            if _m:
+                _one["cover"] = _m.group(1)
+
+    # 结构性判据（比抓某个接口状态码稳）：一批结果里 **封面、标题、详情页三样全缺、
+    # page_url 还是主页**，说明页面根本没渲染出作品卡片，这些只是从页面原始数据里
+    # 正则捞到的媒体地址。2026-11-07 实测快手登录态失效时就是这样，30 条"视频文件"
+    # 逐条核对都不是该博主的作品，界面却显示"抓取成功"。
+    # 单作品页不适用这条：番剧页的主视频本来就只出现在页面原始数据里，
+    # 没有卡片/封面是正常的，不能说成「很可能不是该账号的作品」。
+    _bare_only = (bool(items) and not is_single_work_url(url)
+                  and all((not x.get("cover")) and (not x.get("title"))
+                          and str(x.get("page_url") or "") == str(url)
+                          for x in items))
+    if not items and _profile_blocked:
+        # 一条都没有，且接口明说未登录：这是确定性结论，别再拿"没识别到作品"糊过去。
+        msg = (f"{_profile_blocked}。请到「平台登录中心」重新登录该平台后重抓一次。")
+        if platform:
+            platform_login.mark_invalid(platform, msg)
+        return {"ok": False, "items": [], "login_required": True, "error": msg}
+    out = {"ok": bool(items), "items": items, "login_required": False,
+           "error": ("" if items else
+                     "浏览器已打开主页，但没有识别到作品链接或视频地址。"
+                     + (f"页面原文：「{wall_quote}」" if wall_quote else ""))}
+    if items and (_profile_blocked or _bare_only):
+        # 有结果但来源可疑：保留（用户可能就要这批），但必须标明来源不可信。
+        _why_src = _profile_blocked or ("页面没有渲染出作品卡片（封面、标题、详情页全缺），"
+                                        "这批是从页面原始数据里捞到的媒体地址")
+        out["warning"] = (f"注意：{_why_src}。很可能不是该账号的作品，而是推荐流内容；"
+                          "重新登录后再抓才是这个账号的真实作品。")
+        out["suspect_source"] = True
+    return out
 
 
 def _relogin_why(platform: str, res: dict) -> str:
@@ -2464,6 +3266,18 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
         return [], ""
     name = PLATFORM_NAMES.get(platform, platform)
     attempts = []
+
+    # 知乎视频走专属通道：通用兜底会把 topic / question / answer 链接当视频
+    # 交出去（2026-11-08 实测 20 条假结果），这里成功就直接收尾，
+    # 失败也如实报原因，不再让后面的 yt-dlp / 浏览器渲染盖掉它。
+    if platform == "zhihu" and want_video:
+        res = _zhihu_video_items(url, limit=limit, on_note=on_note)
+        if res.get("ok"):
+            n = len(res.get("items") or [])
+            return res["items"], f"已读取知乎视频 {n} 条（标题、封面、时长来自解析器）。"
+        if res.get("login_required"):
+            return [], _relogin_why(platform, res)
+        return [], str(res.get("error") or "没有找到知乎视频作品")
 
     if platform == "xhs":
         # V3.0：发现页/搜索页和作者主页是两条完全不同的链路。
@@ -2533,6 +3347,12 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
     if not res.get("ok") and res.get("login_required"):
         return [], _relogin_why(platform, res)
 
+    # 撞上人机验证页时不要再白跑 gallery-dl / yt-dlp / 第二次渲染：
+    # 它们访问的是同一个被拦的页面，只会把验证页的脚本与图标当成作品。
+    if not res.get("ok") and res.get("verification_required") \
+            and not (res.get("items") or []):
+        return [], str(res.get("error") or "站点返回了人机验证页，请稍后重试。")
+
     if not res.get("ok") and platform in {"ig", "pin", "wb", "tiktok"}:
         gallery_limit = limit
         # Weibo feed interleaves image and video posts. In image mode scan beyond
@@ -2563,16 +3383,22 @@ def list_author_items(url: str, *, limit: int = 30, want_video: bool = False,
     # 登录墙，页面自带的演示视频（dc.xhscdn.com 的背景视频/钢琴视频等站点素材）
     # 会被当成「博主作品」返回，用户全选下载全是失败。与其给假结果，不如如实报错。
     if not res.get("ok") and platform != "xhs":
-        res = browser_items(url, limit=limit, on_note=on_note)
+        res = browser_items(url, limit=limit, on_note=on_note,
+                            video_only=bool(want_video))
         attempts.append(("browser", res))
 
     if res.get("ok"):
         used = next((n for n, r in reversed(attempts) if r is res), "内置来源")
         items = res.get("items") or []
         suffix = ""
+        if res.get("warning"):
+            # 有结果但来源可疑（快手主页接口返回 result=109，抓到的是推荐流）：
+            # 结果照给，但必须让用户知道这批很可能不是该账号的作品。
+            suffix += " " + str(res["warning"])
         if platform == "dy" and res.get("verification_required") and len(items) < max(1, int(limit or 30)):
-            suffix = f" 已抓到 {len(items)}/{max(1, int(limit or 30))} 个，继续下拉时遇到验证码；BrowserSkill 验证辅助未完成。"
-        return items, f"已用{used}展开{name}主页。{suffix}"
+            suffix += (f" 已抓到 {len(items)}/{max(1, int(limit or 30))} 个，"
+                       "继续下拉时遇到验证码；BrowserSkill 验证辅助未完成。")
+        return items, f"已用{used}展开{name}{'作品页' if is_single_work_url(url) else '主页'}。{suffix}"
 
     why = str(res.get("error") or "没有返回作品")
     # 需要验证码但 bsk 也没起来时，把 bsk 的失败原因接在后面。

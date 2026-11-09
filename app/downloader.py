@@ -427,6 +427,15 @@ def download_file(
 
                     resuming = (resume_from > 0 and r.status_code == 206)
                     ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                    # HLS/DASH 清单不是媒体文件：直接保存只会得到几百字节的文本，
+                    # 任务却显示成功（实测 xvideos 310B 的 master playlist 被存成 .mp4）。
+                    # 流媒体有专门的下载链路（stream_downloader / ffmpeg），这里明确拒绝。
+                    _u_low = target_url.lower().split("?")[0]
+                    if "mpegurl" in ctype or _u_low.endswith((".m3u8", ".mpd")):
+                        return DownloadResult(
+                            False, url=target_url,
+                            error="该地址是 HLS/DASH 清单（m3u8/mpd），不是可保存的视频文件；"
+                                  "请走流媒体下载")
                     total = r.headers.get("Content-Length")
                     total = int(total) if total and total.isdigit() else 0
                     if resuming and total:

@@ -73,6 +73,10 @@ class RenderResult:
     engine: str = ""          # 启动方式：persistent-profile / bundled / system / chromium
     kernel: str = ""          # 内核来源：bundled（包内 Chromium）/ system（系统 Chrome/Edge）
     elapsed: float = 0.0
+    # 页面内 JS 执行结果（调用方传 extract_js 时才有值）。
+    # 为什么需要：Google 图片结果的「原图地址 + 来源页」只存在于 /imgres 链接的
+    # 查询参数里，解析 DOM 比解析 HTML 文本稳定得多（2026-11 实测）。
+    js: object = None
 
     @property
     def json_bodies(self) -> list[CapturedResponse]:
@@ -150,6 +154,10 @@ async def _render_async(
     force_headless: bool = False,
     on_progress=None,
     should_cancel=None,
+    proxy: str = "",
+    extra_cookies: list[dict] | None = None,
+    extract_js: str = "",
+    scroll_wait_ms: int = 500,
 ) -> list[RenderResult]:
     from playwright.async_api import async_playwright
 
@@ -159,6 +167,9 @@ async def _render_async(
     # 因为我们没打 chromium_headless_shell，不传路径 headless 会直接报「找不到内核」。
     target = browser_runtime.pick()
     kernel_kw = browser_runtime.launch_kwargs(target)
+    # 代理：Google / 海外站点在国内直连不可达或被判定为异常流量时，
+    # 用户可以单独给「渲染通道」配一个出口（settings.google_proxy）。
+    proxy_kw = {"proxy": {"server": proxy}} if proxy else {}
     sem = asyncio.Semaphore(max(1, concurrency))
     done = {"n": 0}
     cancelled = {"v": False}
@@ -208,6 +219,7 @@ async def _render_async(
                     user_agent=user_agent or DEFAULT_UA,
                     args=list(_LAUNCH_ARGS) + ["--disable-blink-features=AutomationControlled"],
                     **kernel_kw,
+                    **proxy_kw,
                 )
                 engine = "persistent-profile"
                 # 同一个 profile 目录不能并发（浏览器会抢锁），登录态模式下串行更稳
@@ -218,7 +230,7 @@ async def _render_async(
                 # 两者是不同的来源、可以同时存在。漏了这一步会出现
                 # 「配了 cookies 但因为同时开了登录态 profile，cookies 悄悄失效」
                 # （实测：test_cookies_offline 的渲染通道断言失败）。
-                _pw_ck = effective_cookies or []
+                _pw_ck = (effective_cookies or []) + list(extra_cookies or [])
                 if _pw_ck:
                     try:
                         await pctx.add_cookies(_pw_ck)
@@ -231,7 +243,7 @@ async def _render_async(
         if pctx is None and kernel_kw:
             try:
                 browser = await p.chromium.launch(headless=True, args=_LAUNCH_ARGS,
-                                                  **kernel_kw)
+                                                  **kernel_kw, **proxy_kw)
                 engine = target["kind"]
             except Exception:
                 browser = None
@@ -278,9 +290,10 @@ async def _render_async(
                         )
                         # 带上「设置」里配好的 cookies：需要登录的站点（Instagram 等）
                         # 匿名访问只会得到登录墙 / 「主页不存在」，正文里没有任何内容。
-                        if effective_cookies:
+                        _pw_ck2 = (effective_cookies or []) + list(extra_cookies or [])
+                        if _pw_ck2:
                             try:
-                                await ctx.add_cookies(effective_cookies)
+                                await ctx.add_cookies(_pw_ck2)
                             except Exception:
                                 pass
                         page = await ctx.new_page()
@@ -312,12 +325,19 @@ async def _render_async(
                     for _ in range(max(0, scroll_rounds)):
                         try:
                             await page.mouse.wheel(0, 3000)
-                            await page.wait_for_timeout(500)
+                            await page.wait_for_timeout(scroll_wait_ms)
                         except Exception:
                             break
                     r.html = await page.content()
                     r.title = (await page.title()) or ""
                     r.final_url = page.url or url
+                    if extract_js:
+                        # 页面内取结构化数据（比正则解析 HTML 稳，尤其是结果卡片
+                        # 只在 DOM 里带 /imgres?imgurl=... 的场景）。
+                        try:
+                            r.js = await page.evaluate(extract_js)
+                        except Exception as _e:  # noqa: BLE001
+                            r.js = None
                     r.ok = bool(r.html)
                     if not r.ok:
                         r.error = "渲染后未取到 HTML"
@@ -428,6 +448,10 @@ def render_many(
     force_headless: bool = False,
     on_progress=None,
     should_cancel=None,
+    proxy: str = "",
+    extra_cookies: list[dict] | None = None,
+    extract_js: str = "",
+    scroll_wait_ms: int = 500,
 ) -> list[RenderResult]:
     """并发渲染多个页面，返回与输入等长、顺序一致的结果列表。"""
     urls = [u for u in (urls or []) if u]
@@ -451,6 +475,10 @@ def render_many(
             force_headless=force_headless,
             on_progress=on_progress,
             should_cancel=should_cancel,
+            proxy=proxy,
+            extra_cookies=extra_cookies,
+            extract_js=extract_js,
+            scroll_wait_ms=scroll_wait_ms,
         ))
     except RendererUnavailable as e:
         return [RenderResult(url=u, error=str(e)) for u in urls]
@@ -469,6 +497,10 @@ def render_page(
     user_agent: str = _UA,
     force_headless: bool = False,
     on_page=None,   # 兼容旧签名，async 实现下不再支持
+    proxy: str = "",
+    extra_cookies: list[dict] | None = None,
+    extract_js: str = "",
+    scroll_wait_ms: int = 500,
 ) -> RenderResult:
     """渲染单个页面。"""
     out = render_many(
@@ -480,6 +512,10 @@ def render_page(
         capture_types=capture_types,
         user_agent=user_agent,
         force_headless=force_headless,
+        proxy=proxy,
+        extra_cookies=extra_cookies,
+        extract_js=extract_js,
+        scroll_wait_ms=scroll_wait_ms,
     )
     return out[0] if out else RenderResult(url=url, error="未返回结果")
 

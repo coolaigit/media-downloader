@@ -23,6 +23,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from html import unescape as _html_unescape
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import requests
@@ -1056,6 +1057,117 @@ _LISTING_LINK_WORDS = ("video", "watch", "view", "clip", "post", "scene", "movie
 _LISTING_LINK_DENY = ("tag", "category", "categor", "page=", "sort", "filter",
                       "login", "signup", "register", "premium", "dmca", "terms",
                       "privacy", "contact", "about", "help")
+# 集合 / 分类页的路径段（地址形态语义，不含站点名）。
+# 这些段出现在**非末段**时说明链接指向一批内容的集合，而不是单条视频。
+_LISTING_COLLECTION_SEGS = frozenset((
+    "c", "u", "videos", "shorts", "streams", "space", "profile", "profiles",
+    "posts", "media", "channel", "channels", "user", "users", "playlist",
+    "playlists", "board", "boards", "album", "albums", "gallery",
+    "tag", "tags", "categories", "category", "topics", "topic",
+    "pornstars", "models", "stars", "actors", "sitemap", "best", "new", "top",
+    "browse",
+))
+_UUID_SEG_RE = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.I)
+
+
+def _seg_has_long_id(seg: str) -> bool:
+    """路径段里是否含「长数字 ID / UUID」——单条内容页的通用证据。"""
+    return bool(re.search(r"(?<!\d)\d{5,}(?!\d)", seg) or _UUID_SEG_RE.fullmatch(seg))
+
+
+def _direct_media_height(item) -> int:
+    """直链条目的清晰度高度：优先 width/height 字段，其次从 URL 里读。
+
+    用途：同一详情页可能同时给出 480P / 720P / 1080P 多条直链，
+    必须挑最高的一条，而不是「HTML 里先出现的那条」。
+    """
+    try:
+        if getattr(item, "height", None):
+            return int(item.height)
+    except (TypeError, ValueError):
+        pass
+    u = str(getattr(item, "url", "") or "").lower()
+    m = re.search(r"(?<!\d)(\d{3,4})x(\d{3,4})(?!\d)", u)
+    if m:
+        return int(m.group(2))
+    m = re.search(r"(?<!\d)(\d{3,4})p(?!\d)", u)
+    return int(m.group(1)) if m else 0
+
+
+def _video_page_identity(url: str) -> str:
+    """同一部视频的多种页面地址归成一个键，用于去重。
+
+    列表页常给同一部片挂多条地址：`/video.<id>/<slug>`、`/video.<id>/27/<slug>`、
+    `/video.<id>/THUMBNUM/<slug>`（缩略图/预览变体）。只按完整 URL 去重会把
+    同一部片收 2~3 条，批量下载就重复下好几遍。
+    判据全是地址形态（首段 `video.<ID>`、`/video/<ID>`、`?v=<ID>` 等），
+    认不出就退回完整 URL —— 不做任何猜测性合并。
+    """
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return url
+    segs = [s for s in (p.path or "").split("/") if s]
+    host = (p.hostname or "").lower().removeprefix("www.")
+    if segs:
+        m = re.match(r"^(?:video|v|watch|clip)[.\-_]([A-Za-z0-9]{6,})$", segs[0], re.I)
+        if m:
+            return f"{host}|video:{m.group(1).lower()}"
+        if len(segs) >= 2 and segs[0].lower() in ("video", "v", "watch", "clip") \
+                and re.fullmatch(r"[A-Za-z0-9]{6,}", segs[1]):
+            return f"{host}|video:{segs[1].lower()}"
+    q = dict(parse_qsl(p.query or "", keep_blank_values=True))
+    for k in ("v", "viewkey", "vid", "id"):
+        if q.get(k):
+            return f"{host}|{k}:{str(q[k]).lower()}"
+    return url
+
+
+def _is_video_detail_link(href: str, list_url: str) -> bool:
+    """渲染列表页里的一个链接是不是「单条视频页」，排除分类/标签/分页/导航链接。
+
+    纯函数（不联网），离线用例可以直接喂地址。判据全是地址形态 + 字段语义：
+      1) 同域、路径深度 ≥ 2、不与列表页自身同路径
+      2) 查询串不带 tag/category/sort/page 这类集合/分页参数
+      3) 路径不含 tag/category/login/… 等装饰词
+      4) 路径里有集合段（/c/、/tags/、/channels/…）时，必须另有长数字 ID/UUID
+         才认内容页 —— 否则就是分类列表页（/videos/33006/slug 仍放行）
+      5) 必须有内容证据：路径含内容词（video/watch/view/…），或任一段含长 ID
+
+    为什么改掉旧的「末段 ≥6 位且含数字就算内容页」：
+    实测 xvideos 分类页里 `/c/Ass-14`、`/c/Arab-159` 这类**分类页**末段恰好是
+    「文字-短数字」，全部命中旧判据；而它们在 DOM 里排在视频卡片前面，limit 一满
+    30 条全是标签页 —— 用户看到的就是「批量抓到的链接全下不了」。
+    """
+    from urllib.parse import urlparse as _up
+    try:
+        base = _up(list_url)
+        pu = _up(href)
+    except ValueError:
+        return False
+    host = (base.hostname or "").lower().removeprefix("www.")
+    if not host or (pu.hostname or "").lower().removeprefix("www.") != host:
+        return False
+    segs = [s for s in (pu.path or "").split("/") if s]
+    if len(segs) < 2:
+        return False
+    low_segs = [s.lower() for s in segs]
+    low_path = "/".join(low_segs)
+    list_segs = [s.lower() for s in (base.path or "").split("/") if s]
+    if low_segs == list_segs:
+        return False
+    low_q = (pu.query or "").lower()
+    if any(w in low_q for w in ("tag", "category", "sort", "page")):
+        return False
+    if any(w in low_path for w in _LISTING_LINK_DENY):
+        return False
+
+    has_long_id = any(_seg_has_long_id(s) for s in low_segs)
+    # 集合段只在「没有长 ID」时否决；真内容页可能长成 /videos/33006/xxx/
+    if any(s in _LISTING_COLLECTION_SEGS for s in low_segs[:-1]) and not has_long_id:
+        return False
+    has_content_word = any(w in low_path for w in _LISTING_LINK_WORDS)
+    return has_content_word or has_long_id
 
 
 def _render_listing_links(list_url: str, *, limit: int = 60, on_note=None) -> list[dict]:
@@ -1069,8 +1181,10 @@ def _render_listing_links(list_url: str, *, limit: int = 60, on_note=None) -> li
     筛选刻意保守（宁可少抓，也不要抓一堆标签页/登录页回来）：
     - 必须同域
     - 路径深度 ≥ 2
-    - 命中视频类路径词，或末段是长 ID
+    - 命中视频类路径词，或任一段含长数字 ID / UUID
+    - 排除集合段（/c/、/tags/、/channels/…）指向的分类页
     - 排除 tag/category/page=/login 这类非内容链接
+    具体判据抽成纯函数 _is_video_detail_link，便于离线回归（不联网）。
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -1126,37 +1240,25 @@ def _render_listing_links(list_url: str, *, limit: int = 60, on_note=None) -> li
     except Exception:  # noqa: BLE001
         return []
 
-    out: list[dict] = []
+    picked: dict[str, dict] = {}
+    order: list[str] = []
+    seg_count: dict[str, int] = {}
     seen: set[str] = set()
-    list_path = (base.path or "").rstrip("/")
     for r in rows if isinstance(rows, list) else []:
         href = str((r or {}).get("href") or "").split("#", 1)[0]
         if not href.startswith("http"):
             continue
-        try:
-            pu = _up(href)
-        except ValueError:
+        # 分类/标签/导航链接必须在这里挡掉：它们排在视频卡片前面，
+        # 一旦混进来，limit 用满后整批结果全是打不开的标签页。
+        if not _is_video_detail_link(href, list_url):
             continue
-        if (pu.hostname or "").lower().removeprefix("www.") != host:
-            continue
-        path = "/".join([s for s in (pu.path or "").split("/") if s])
-        segs = [s for s in (pu.path or "").split("/") if s]
-        if len(segs) < 2:
-            continue
-        low_q = (pu.query or "").lower()
-        if any(w in low_q for w in ("tag", "category", "sort", "page")):
-            continue
-        low_path = path.lower()
-        if any(w in low_path for w in _LISTING_LINK_DENY):
-            continue
-        last = segs[-1].lower()
-        # 末段是长 ID（数字/十六进制/短横线混合，≥6 位）也算内容页
-        looks_like_id = bool(re.fullmatch(r"(?=.*\d)[\w\-]{6,}", last))
-        if not (any(w in low_path for w in _LISTING_LINK_WORDS) or looks_like_id):
-            continue
-        if path == list_path.strip("/") or href in seen:
+        if href in seen:
             continue
         seen.add(href)
+        try:
+            segs = [s for s in _up(href).path.split("/") if s]
+        except ValueError:
+            continue
         # 标题优先级：title 属性 > 图片 alt > 卡片内标题元素 > URL slug > 链接文字。
         # 链接文字常常是「16:01 / 86%」这种时长+进度，绝不能拿来当名字
         # （实测 hornyleak.tv 抓出来的名字全是 "16:01 86%"）。
@@ -1178,7 +1280,7 @@ def _render_listing_links(list_url: str, *, limit: int = 60, on_note=None) -> li
                 title = slug.replace("-", " ").replace("_", " ").strip()
         if not title:
             title = str((r or {}).get("text") or "")[:150]
-        out.append({
+        row = {
             "page_url": href,
             "direct_url": "",
             "title": title[:150],
@@ -1186,10 +1288,25 @@ def _render_listing_links(list_url: str, *, limit: int = 60, on_note=None) -> li
             "uploader": "",
             "site": host,
             "kind_hint": "video",
-        })
-        if len(out) >= max(1, int(limit or 60)):
-            break
-    return out
+        }
+        # 同一部片的 /27/、/THUMBNUM/ 变体只保留路径最短的那条（规范地址）。
+        # 不做这一步，一部片会被收 2~3 条、批量下载重复下好几遍。
+        key = _video_page_identity(href)
+        if key in picked:
+            if len(segs) < seg_count.get(key, 99):
+                picked[key] = row
+                seg_count[key] = len(segs)
+            continue
+        picked[key] = row
+        seg_count[key] = len(segs)
+        order.append(key)
+    return [picked[k] for k in order][:max(1, int(limit or 60))]
+
+
+# 搜索 / 结果页的路径段（地址形态语义，不是站点规则）
+_LIST_SEG_NAMES = frozenset((
+    "search", "results", "result", "browse", "explore", "find", "suche",
+))
 
 
 def _looks_like_collection_page(url: str) -> bool:
@@ -1205,7 +1322,8 @@ def _looks_like_collection_page(url: str) -> bool:
 
     顺序很关键（都会互相误伤，实测踩过）：
       a) 查询串里带内容 ID 参数 → 内容页，先判（/view_video.php?viewkey=…）
-      b) 「内容名词 + ID 形态」的末两段 → 内容页（/@x/video/7539… 也命中 @handle，
+      a2) 查询串/路径带搜索词 → 结果页（/video/search?search=… 是列表，不是单条）
+      b) 「内容名词 + 带数字的 ID」的末两段 → 内容页（/@x/video/7539… 也命中 @handle，
          所以必须排在集合名词判断**之前**）
       c) 末段/倒数第二段是集合名词、或末段是 @handle → 集合页（/space/12345、
          /@x/videos 都是集合，虽然末段看着像 ID）
@@ -1230,8 +1348,19 @@ def _looks_like_collection_page(url: str) -> bool:
     if re.search(r"[?&](v|id|vid|video_?id|content_?id|media_?id|watch|viewkey)=",
                  url, re.I):
         return False
-    # b) 内容名词 + ID 形态 → 单条内容
-    if prev in _CONTENT_SEG_NAMES and re.fullmatch(r"[\w.\-]{6,}", segs[-1]):
+    # a2) 搜索 / 结果页：地址形态上就是「一批结果」，不是单条内容。
+    #     实测踩坑：/video/search?search=… 的末段 "search" 是 6 个字母，
+    #     命中了下面 b) 的「内容名词 + ID 形态」，被当成单条视频页 → 跳过
+    #     yt-dlp 列表展开，退回网页抓取拿到一堆 240P 直链：既没有「解析清晰度」
+    #     入口，批量下载也默认最低档。判据只有查询串语义 + 路径段语义，不含站点名。
+    if re.search(r"[?&](search|search_query|query|q|keyword|keywords|k|term)=",
+                 url, re.I) or any(s in _LIST_SEG_NAMES for s in low):
+        return True
+    # b) 内容名词 + ID 形态 → 单条内容。
+    #     ID 必须真的带数字：纯字母段（search / categories / channels…）是列表页
+    #     的路径词，不是内容 ID，不能拿来把列表页判成单条内容。
+    if prev in _CONTENT_SEG_NAMES and re.fullmatch(r"(?=.*\d)[\w.\-]{6,}", segs[-1]) \
+            and last not in _LIST_SEG_NAMES:
         return False
     # c) 集合名词 / @handle → 人 或 集合
     if prev in _COLLECTION_SEG_NAMES or last in _COLLECTION_SEG_NAMES \
@@ -1293,6 +1422,45 @@ def _expand_video_listing(
             return None, ""
         site_host = (urlparse(list_url).hostname or "").removeprefix("www.")
 
+        # ★ 列表页 yt-dlp 不认识，不代表它不认识「单条视频页」。
+        #   实测 xvideos 分类页：yt-dlp 没有该分类页的列表提取器，但抽出来的
+        #   /video.<id>/<slug> 每条都有专用提取器。这时必须保留**视频页地址**，
+        #   交给下载层用 yt-dlp 逐条解析：能单独解析清晰度、默认取最高档，
+        #   也不会拿到网页里那条带签名会过期的低码率直链（实测只有 360p）。
+        #   只有「yt-dlp 连单条视频页也不认识」的站点（hornyleak.tv 等）才走
+        #   下面的就地换直链，否则 /api/download/videos 会报 Unsupported URL。
+        #   判据全部来自 yt-dlp 自己的提取器，不含站点名单。
+        sample = [r["page_url"] for r in rendered[:3]]
+        if sample and all(has_specific_extractor(u) for u in sample):
+            items = [
+                MediaItem(
+                    url=r["page_url"], kind="video", source=f"渲染列表:{site_host}",
+                    title=r.get("title") or "", thumbnail=r.get("cover") or "",
+                    referer=list_url, origin_page=list_url,
+                    extra={"is_page": True, "ext": "", "duration": None,
+                           "duration_string": "", "uploader": "", "site": site_host},
+                )
+                for r in rendered
+            ]
+            return {
+                "items": [m.to_dict() for m in items],
+                "summary": summarize(items),
+                "pages": [{"page": 1, "url": list_url, "method": "内置浏览器渲染列表",
+                           "html_bytes": 0, "media": len(items), "links": len(items),
+                           "elapsed": 0.0, "visible_text": 0}],
+                "detail_pages": {"total": 0, "ok": 0, "failed": 0, "urls": []},
+                "stats": {"list_pages": 1, "detail_pages": 0, "http_ok": 0,
+                          "render_used": 1, "variants_collapsed": 0, "elapsed": 0.0},
+                "warnings": [
+                    f"这个站的列表页 yt-dlp 没有专用提取器，已用内置浏览器渲染抽出 "
+                    f"{len(items)} 个视频页地址；单条视频页 yt-dlp 认识，"
+                    "下载时会逐条解析，默认取最高清晰度，也可点卡片单独解析。",
+                ],
+                "list_url": list_url,
+                "renderer": renderer_status(),
+                "via": "render-listing",
+            }, ""
+
         # ★ 必须就地换成直链，不能把「视频页地址」丢给 yt-dlp。
         # 判据是「yt-dlp 自己说不认识这个站」（has_specific_extractor=False），
         # 那 /api/download/videos 拿这些地址去问 yt-dlp 只会得到 Unsupported URL。
@@ -1310,6 +1478,52 @@ def _expand_video_listing(
             )
         except Exception:  # noqa: BLE001
             dres = []
+
+        # ---- 点击跳转链接：用下钻后的最终地址再问一次 yt-dlp ----
+        # 列表页常把视频包在 /prof-video-click/、/out/、/redirect?url=… 这类
+        # 跳转链接里。原地址 yt-dlp 不认识，但 302 之后的**规范视频页**它认识；
+        # 这时必须保留规范页地址（能选最高清晰度、能单条解析），不能退化成
+        # 网页里那条 360P 直链。判据仍是 yt-dlp 自己的能力，不含站点名单。
+        # 实测（2026-11-06）：xvideos 的 /prof-video-click/… 原地址被判成未知站，
+        # 渲染解析拿到 HLS 清单当直链，最后把 310 字节的 m3u8 存成了 .mp4。
+        finals = [str(getattr(fr, "final_url", "") or "") for fr in dres]
+        if len(dres) == len(rendered) \
+                and all(f and getattr(fr, "ok", False)
+                        for f, fr in zip(finals, dres)) \
+                and all(has_specific_extractor(f) for f in finals):
+            seen_final: set[str] = set()
+            items = []
+            for r, f in zip(rendered, finals):
+                if f in seen_final:
+                    continue
+                seen_final.add(f)
+                items.append(MediaItem(
+                    url=f, kind="video", source=f"渲染列表:{site_host}",
+                    title=r.get("title") or "", thumbnail=r.get("cover") or "",
+                    referer=list_url, origin_page=list_url,
+                    extra={"is_page": True, "ext": "", "duration": None,
+                           "duration_string": "", "uploader": "", "site": site_host},
+                ))
+            return {
+                "items": [m.to_dict() for m in items],
+                "summary": summarize(items),
+                "pages": [{"page": 1, "url": list_url, "method": "内置浏览器渲染列表",
+                           "html_bytes": 0, "media": len(items), "links": len(items),
+                           "elapsed": 0.0, "visible_text": 0}],
+                "detail_pages": {"total": len(rendered), "ok": len(items),
+                                 "failed": max(0, len(rendered) - len(items)),
+                                 "urls": [m.url for m in items[:20]]},
+                "stats": {"list_pages": 1, "detail_pages": len(rendered),
+                          "http_ok": len(items), "render_used": 1,
+                          "variants_collapsed": 0, "elapsed": 0.0},
+                "warnings": [
+                    f"列表里的视频链接是跳转地址，已跟随到规范视频页 "
+                    f"（{len(items)} 条）；下载时由 yt-dlp 逐条解析，默认取最高清晰度。",
+                ],
+                "list_url": list_url,
+                "renderer": renderer_status(),
+                "via": "render-listing-resolved",
+            }, ""
 
         # 先解析每一页，再统一校验，因为「可信」要跨页面比对才知道。
         per_page: list[tuple[dict, list[MediaItem]]] = []
@@ -1374,7 +1588,10 @@ def _expand_video_listing(
         r_items: list[MediaItem] = []
         got_direct = 0
         for r, vids in per_page:
-            best = next((v for v in vids if _trustworthy(v)), None)
+            # 同一页可能给出多档直链：挑高度最高的一条，而不是先出现的那条
+            # （HTML 里 480P 常排在 1080P 前面，旧逻辑「取第一个可信」就下成低清）。
+            trusted = [v for v in vids if _trustworthy(v)]
+            best = max(trusted, key=_direct_media_height) if trusted else None
             if best is not None:
                 got_direct += 1
                 r_items.append(MediaItem(
@@ -1385,6 +1602,9 @@ def _expand_video_listing(
                     width=best.width, height=best.height,
                     extra={
                         "is_page": False,
+                        # 这条直链来自哪个视频页：批量结果里的「解析清晰度」
+                        # 入口统一用它，所有站点都能回到单条解析（见 to_dict）。
+                        "probe_url": r["page_url"],
                         "ext": best.extra.get("ext", ""),
                         "variants": [v.url for v in vids[1:]
                                      if v.url != best.url and _trustworthy(v)],
@@ -1627,6 +1847,37 @@ def _expand_profile_image_source(
     }, note
 
 
+def _xhs_note_meta(page_html: str) -> tuple[str, str]:
+    """从小红书笔记页本身取标题和封面（纯函数，可离线单测）。
+
+    列表接口经常不给 display_title（实测视频结果 title 全空），下钻拿到的
+    直链于是连卡片名都没有，落盘就是 CDN 的随机字符串。笔记页自己的
+    og:title / og:image 一定有，用它补齐；封面只在列表卡片和视频 poster
+    都缺时才用，避免拿站点 logo 覆盖真封面。
+    """
+    t = _clean_title(page_title(page_html) or "")
+    t = re.sub(r"[\s\-|—]+小红书\s*$", "", t).strip()
+    if not t:
+        # 有的笔记页 og:title 是空的，标题只在内嵌 JSON 里。
+        jm = re.search(r'"display_?[Tt]itle"\s*:\s*"([^"\\]{4,150})"',
+                       page_html or "")
+        if jm:
+            t = _clean_title(_html_unescape(jm.group(1)))
+    cover = ""
+    for pat in (
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
+    ):
+        mm = re.search(pat, page_html or "", re.S | re.I)
+        if mm:
+            cover = _html_unescape(mm.group(1)).strip()
+            break
+    if cover.startswith("//"):
+        cover = "https:" + cover
+    return t, cover
+
+
 def _expand_via_platform_source(
     list_url: str,
     *,
@@ -1701,6 +1952,9 @@ def _expand_via_platform_source(
             extra={
                 # 没有直链时，url 是页面地址 → 前端要走 yt-dlp
                 "is_page": not direct,
+                # 直链条目也记住它来自哪个作品页：单条解析入口统一读 probe_url，
+                # IG / TikTok / 小红书等平台来源与网页抓取走同一条规则。
+                "probe_url": page if _kind in ("video", "stream") else "",
                 "ext": "",
                 # 同一条媒体的其它档位直链（如小红书会给多个清晰度）：
                 # 首选地址下不了时，下载层会自动换用（与网页抓取那条路径同机制）
@@ -1726,6 +1980,10 @@ def _expand_via_platform_source(
     # 而带令牌的笔记页**纯 HTTP** 就能拿到 mp4 主地址（实测 25 秒拿 2 条），
     # 所以在这里用 HTTP 并发下钻，把直链填回条目。
     page_items = [m for m in items if m.extra.get("is_page")]
+    # 发现页/搜索页的 xhs 结果本身就是直链，没有 is_page 条目时下钻整段跳过；
+    # 结尾还要读 blocked 出提示，必须先给初值，否则 UnboundLocalError
+    # （2026-11-08 实测 https://www.xiaohongshu.com/explore 直接崩在收尾）。
+    blocked: list[MediaItem] = []
     if page_items and platform == "xhs":
         on_note(f"正在逐篇打开 {len(page_items)} 篇笔记获取视频直链…")
         dres = fetch_many(
@@ -1758,12 +2016,16 @@ def _expand_via_platform_source(
                 vids = [g for g in got if g.kind == "video"]
                 if vids:
                     best = vids[0]
+                    note_title, note_cover = _xhs_note_meta(fr.html)
                     drilled.append(MediaItem(
                         url=best.url, kind="video", source=m.source,
-                        title=m.title or "", thumbnail=m.thumbnail or best.thumbnail or "",
+                        title=m.title or note_title or "",
+                        thumbnail=m.thumbnail or best.thumbnail or note_cover or "",
                         referer=m.url, origin_page=m.url,
                         extra={
                             "is_page": False,
+                            # 直链来自哪篇笔记：单条解析入口统一读 probe_url
+                            "probe_url": m.url,
                             "ext": "",
                             "variants": [v.url for v in vids[1:] if v.url != best.url],
                             "uploader": m.extra.get("uploader") or "",
@@ -1802,11 +2064,19 @@ def _expand_via_platform_source(
             (f"；{len(failed)} 篇读取失败" if failed else "") + "）。"
 
     name = profile_sources.PLATFORM_NAMES.get(platform, platform)
-    warnings = [
-        f"这是一个{name}主页，已用内置来源（{profile_sources.source_name(platform)}）"
-        f"展开 {len(items)} 条作品 —— 该平台的作品列表要签名参数 + 登录态，"
-        "普通网页抓取不足时由该内置来源补齐。",
-    ]
+    # 番剧播放页 / 单条视频页 用「作品页」，别再说成「主页」——
+    # 用户看到「这是一个B站主页」会以为工具把地址认错了（2026-11-08 实测）。
+    if profile_sources.is_single_work_url(list_url):
+        warnings = [
+            f"这是{name}的一个作品页，已用内置来源"
+            f"（{profile_sources.source_name(platform)}）解析出 {len(items)} 条可下载地址。",
+        ]
+    else:
+        warnings = [
+            f"这是一个{name}主页，已用内置来源（{profile_sources.source_name(platform)}）"
+            f"展开 {len(items)} 条作品 —— 该平台的作品列表要签名参数 + 登录态，"
+            "普通网页抓取不足时由该内置来源补齐。",
+        ]
     if any(not m.extra.get("is_page") for m in items):
         warnings.append("工具返回的是**带签名的直链**（会过期），点「下载选中」会立刻下载；"
                         "过一段时间再下需要重新抓一次。")
@@ -1969,6 +2239,20 @@ def crawl_list(
         pt_exp = None
         pt_note = ""
 
+        def _empty(ws: list[str]) -> dict:
+            """平台来源给出确定失败原因时如实收尾，不回退制造垃圾结果。"""
+            return {
+                "items": [], "summary": summarize([]), "pages": [],
+                "detail_pages": {"total": 0, "ok": 0, "failed": 0, "urls": []},
+                "stats": {"list_pages": 0, "detail_pages": 0, "http_ok": 0,
+                          "render_used": 0, "variants_collapsed": 0,
+                          "elapsed": round(time.time() - t0, 2)},
+                "warnings": ws,
+                "list_url": list_url,
+                "renderer": renderer_status(),
+                "via": "external-tool-failed",
+            }
+
         if profile_first:
             pt_exp, pt_note = _expand_via_platform_source(
                 list_url,
@@ -1980,6 +2264,13 @@ def crawl_list(
                 pt_exp["stats"]["elapsed"] = round(time.time() - t0, 2)
                 _emit("merge", 0, 0, f"已展开 {len(pt_exp.get('items') or [])} 条作品")
                 return pt_exp
+            # 站点侧明确拦截：后面所有工具访问的是同一个被拦的页面，
+            # 继续跑 yt-dlp / 二次渲染只会白等，还可能把验证页素材当作品。
+            if any(k in (pt_note or "") for k in
+                   ("安全验证", "人机验证", "停在登录页", "平台登录中心",
+                    "换网络出口", "请求存在异常", "已按知乎视频通道确认")):
+                _emit("merge", 0, 0, "站点返回验证/登录页，已停止回退")
+                return _empty(warnings + [pt_note])
 
         # 权威平台（dy/ks/xhs/pin/ig）专用来源失败后，不再白跑第二个通用 90 秒。
         # 这些主页的作品列表本来就不在普通 HTML / yt-dlp 通用列表里。
@@ -2011,7 +2302,11 @@ def crawl_list(
         # 两条路都没成：把原因都写清楚，再退回网页抓取
         hints = [h for h in (exp_err, pt_note) if h]
         # 「需要登录」的提示单独说，别包进「核对账号名」的通用文案里
-        login_hint = next((h for h in hints if "打开浏览器去登录" in h), "")
+        login_hint = next(
+            (h for h in hints if any(k in h for k in (
+                "打开浏览器去登录", "平台登录中心", "安全验证", "人机验证",
+                "停在登录页", "换网络出口", "页面原文", "登录即可",
+                "扫码登录", "需要登录"))), "")
         if login_hint:
             warnings.append(login_hint)
         elif hints:
@@ -2031,26 +2326,19 @@ def crawl_list(
         from . import profile_sources as _ps   # 与上面的用法一致，局部导入避免循环依赖
         if _ps.authoritative(list_url):
             _emit("merge", 0, 0, "该平台主页需要外部工具，已停止网页抓取回退")
-            return {
-                "items": [], "summary": summarize([]), "pages": [],
-                "detail_pages": {"total": 0, "ok": 0, "failed": 0, "urls": []},
-                "stats": {"list_pages": 0, "detail_pages": 0, "http_ok": 0,
-                          "render_used": 0, "variants_collapsed": 0,
-                          "elapsed": round(time.time() - t0, 2)},
-                "warnings": warnings + [
-                    f"{_ps.PLATFORM_NAMES.get(_ps.platform_for_url(list_url), '该平台')}"
-                    "主页的作品列表只能通过平台接口拿到，网页抓取这里没有可用的东西 ——"
-                    "已停止回退，避免给你一堆站点自己的宣传片 / 直播地址当成结果。"],
-                "list_url": list_url,
-                "renderer": renderer_status(),
-                "via": "external-tool-failed",
-            }
+            return _empty(warnings + [
+                "本次没有从平台来源拿到作品，已停止网页抓取回退 ——"
+                "验证页/登录页/导航页里的脚本、图标和推荐链接都不是作品，"
+                "退回去抓只会给用户一堆下不了的假结果。"
+                + (f"平台：{_ps.PLATFORM_NAMES.get(_ps.platform_for_url(list_url), '')}"
+                   if _ps.platform_for_url(list_url) else "")])
 
     # ---------- 1~3. 列表页（含翻页）----------
     page_url = list_url
     page_no = 1
     visited: set[str] = set()
     prev_fingerprint = ""
+    wall_stop = False          # 第 1 页撞验证/登录墙：终态必须清空所有媒体
     # 输入页的「页面自述」（标题 + 正文片段）+ 该页是不是内容稀薄：
     # 收尾时若一条结果都没有，把这段原文摆给用户 —— 站点侧原因
     # （账号不存在 / 页面已删 / 要登录）与工具侧原因必须能一眼区分。
@@ -2152,6 +2440,27 @@ def crawl_list(
             break
         prev_fingerprint = fingerprint
 
+        # 验证墙 / 登录墙页面上的「媒体」全是站点自己的图标、脚本与验证图，
+        # 绝不能当作品交付。2026-11-07 实测知乎问题页：安全验证页留下 6 张
+        # zhimg 装饰图，用户看到的就是「抓不全 / 全是重复的无关图」。
+        if fr.visible_text_len < 400:
+            _wall = _detect_wall(fr.html) if fr.html else None
+            _login = any(w in _visible_text(fr.html, 800).lower()
+                         for w in ("扫码登录", "立即登录", "登录后",
+                                   "登录即可", "sign in", "log in"))
+            if _wall or _login:
+                p_title, p_text = _page_self_report(fr.html)
+                warnings.append(
+                    f"第 {page_no} 页停在{'安全验证' if _wall else '登录'}页，"
+                    f"页面自述「{(p_title + ' ' + p_text).strip()[:180]}」；"
+                    "该页的图标/脚本不是作品，已全部丢弃。"
+                    + ("请稍后重试、换网络出口，或配置该站点 Cookies。"
+                       if _wall else "请到「平台登录中心」登录该平台后重抓。"))
+                got = []
+                # 只有第 1 页撞墙才清空最终所有媒体；后续页撞墙时
+                # 保留前面已经抓到的正常结果，只停止翻页。
+                wall_stop = (page_no == 1)
+
         all_media.extend(got)
         if page_no == 1:
             first_report = _page_self_report(fr.html)
@@ -2168,6 +2477,9 @@ def crawl_list(
             "links": len(links), "elapsed": round(fr.elapsed, 1),
             "visible_text": fr.visible_text_len,
         })
+        if wall_stop:
+            _emit("list", page_no, max_pages, "验证/登录页，已停止翻页")
+            break
         # 渲染后仍近乎无正文：站点反爬拦截页 / 需登录 / 地域限制。
         #
         # 判据在 2026-09-20 放宽过一次：原来只看「可见文本 < 100」，
@@ -2455,6 +2767,11 @@ def crawl_list(
 
     # ---------- 6. 汇总 ----------
     _emit("merge", 0, 0, "正在汇总去重")
+    if wall_stop:
+        # 验证/登录页的素材可能从详情页下钻阶段再次混进来
+        # （2026-11-07 知乎问题页实测：列表页清空后，下钻又带回 6 张验证页图）。
+        all_media = []
+        detail_media = []
     merged = dedupe(all_media + detail_media)
     merged = enrich_with_originals(merged)
     merged = dedupe(merged)
@@ -2904,6 +3221,11 @@ def crawl_site(
                 got.extend(extract_from_json_text(jt, base, base, source="json"))
             for g in got:
                 g.extra["site_page"] = base
+                # 整站模式没有「列表页 → 详情页」两段式，媒体是在哪一页抓到的
+                # 就记哪一页。只有该页本身像**单条内容页**时才给单条解析入口，
+                # 否则解析一个列表页只会得到播放列表（用通用地址形态判断）。
+                if g.kind in ("video", "stream") and not _looks_like_collection_page(base):
+                    g.extra["probe_url"] = base
             all_media.extend(got)
             if stats.pages_list == 1:
                 first_report = _page_self_report(fr.html)

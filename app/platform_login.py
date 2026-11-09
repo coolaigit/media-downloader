@@ -30,10 +30,20 @@ PLATFORMS = {
                "auth_cookies": ("sessionid", "sessionid_ss", "sid_tt", "sid_guard", "uid_tt")},
     "ks": {"name": "快手", "login_url": "https://www.kuaishou.com/",
            "domains": ("kuaishou.com",),
-           # userId/passToken 只能证明 id.kuaishou.com 身份流程留下过账号信息，
-           # 不能证明 www.kuaishou.com 已建立可用的 Web 会话。web_st 才是
-           # 当前下载/主页抓取真正需要的站点会话凭据。
-           "auth_cookies": ("kuaishou.server.web_st",)},
+           # 2026-11-07 实测：快手已把 Web 会话 Cookie 从 kuaishou.server.web_st
+           # 换成 kuaishou.server.webday7_st（7 天有效）+ 配套的 webday7_ph，
+           # 直播子域另有 live.web_st / live.web_ph。旧名单只认 server.web_st，
+           # 于是登录后的真实 profile 里 25 条 Cookie 一条都命中不了 ——
+           # 用户看到的就是「明明登录了却显示未登录」。
+           #
+           # passToken / userId 单独出现不算：它们来自 id.kuaishou.com 的身份
+           # 流程（扫码/第三方登录都会写），不能证明 www.kuaishou.com 建立了
+           # 可用的 Web 会话。所以仍以 *web*st / *webday7*(st|ph) 为准。
+           "auth_cookies": (
+               "kuaishou.server.web_st", "kuaishou.server.webday7_st",
+               "kuaishou.server.webday7_ph",
+               "kuaishou.live.web_st", "kuaishou.live.web_ph",
+           )},
     "bili": {"name": "B站", "login_url": "https://www.bilibili.com/",
              "domains": ("bilibili.com", "b23.tv"), "auth_cookies": ("sessdata", "dedeuserid")},
     "wb": {"name": "微博", "login_url": "https://weibo.com/",
@@ -286,6 +296,105 @@ def _verify_platform_auth(platform: str, rows: list[dict]) -> dict:
     return {"state": "unknown", "reason": "登录状态尚未验证"}
 
 
+# ---------- 「登录窗口是不是真的开着」 ----------
+#
+# 2026-11-07 实测教训：**不能再用 profile 的 lockfile 判断登录窗口**。
+# 本程序自己会在后台拿同一个 profile 起 headless Chromium 去抓主页、解析直链、
+# 刷新 Cookie（app/video_downloader._douyin_real_url_profiled、
+# profile_sources.*_author_items、refresh_from_profile 都是）。这些后台进程
+# 同样持有 lockfile，于是 /api/platforms/status 把「我自己在跑渲染」报成
+# 「登录窗口已打开」—— 用户看到的就是状态不定时地乱跳。
+#
+# 现在改成登记式：打开登录窗口时把 pid 写进 <profile_root>/login_window.json，
+# 只有这个进程还活着才算「窗口开着」。后台渲染不登记，就不会再冒充窗口。
+_WINDOW_FILE = "login_window.json"
+
+
+def _window_file(platform: str) -> Path:
+    if platform not in PLATFORMS:
+        raise ValueError(f"unknown platform: {platform}")
+    return platform_root(platform) / _WINDOW_FILE
+
+
+def _pid_alive(pid: int) -> bool:
+    """进程是否还活着（Windows 用 GetExitCodeProcess，其它平台 os.kill 0）。
+
+    ⚠️ Windows 上**不能**用 os.kill(pid, 0)：Python 会把它转成
+    TerminateProcess，等于顺手把登录窗口杀了。
+    """
+    try:
+        pid = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    try:
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong(0)
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return False
+            return int(code.value) == STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def mark_login_window(platform: str, pid: int) -> None:
+    """登记「这个平台现在真有一个登录窗口开着」。"""
+    if platform not in PLATFORMS:
+        return
+    try:
+        p = _window_file(platform)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"pid": int(pid), "ts": int(time.time())}),
+                     encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+
+
+def clear_login_window(platform: str) -> None:
+    if platform not in PLATFORMS:
+        return
+    try:
+        _window_file(platform).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def login_window_alive(platform: str) -> bool:
+    """登录窗口是否开着：只认自己登记过的那个 pid。
+
+    服务重启 / 进程已退出时会顺手把登记文件删掉，避免状态永远卡在
+    「登录窗口已打开」。
+    """
+    if platform not in PLATFORMS:
+        return False
+    p = _window_file(platform)
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not _pid_alive(int((raw or {}).get("pid") or 0)):
+        clear_login_window(platform)
+        return False
+    return True
+
+
 def status(platform: str) -> dict:
     cfg = PLATFORMS.get(platform)
     if not cfg:
@@ -315,9 +424,18 @@ def status(platform: str) -> dict:
 
     state = "not_logged_in"
     reason = ""
-    if invalid_ts and invalid_ts >= login_ts:
+    # 失效标记按证据强度分有效期：页面跳转只是一次观测，不能把平台钉死。
+    # 老版本写下的标记没有 code 字段，但「没有停在目标页」这句话能认出来。
+    _code = str(invalid.get("code") or "")
+    _why = str(invalid.get("reason") or "")
+    if not _code and "没有停在目标页" in _why:
+        _code = "redirect"
+    _ttl = INVALID_TTL.get(_code or "auth", 0)
+    _invalid_active = bool(invalid_ts and invalid_ts >= login_ts
+                           and not (_ttl and (now - invalid_ts) > _ttl))
+    if _invalid_active:
         state = "invalid"
-        reason = str(invalid.get("reason") or "登录态已失效")
+        reason = _why or "登录态已失效"
     elif auth:
         if platform in ACTIVE_VERIFY_PLATFORMS:
             if verification_state == "verified":
@@ -360,6 +478,10 @@ def status(platform: str) -> dict:
         "verification_state": verification_state,
         "verification_ts": verification_ts,
         "profile_dir": str(prof), "profile_exists": prof.exists(),
+        # 登录窗口是否真的开着：只认自己登记过的 pid（见 login_window_alive）。
+        # main.py 的 /api/platforms/status 直接用这个字段，不再去读 lockfile ——
+        # 后台渲染任务也持有 lockfile，那样会把「我在抓数据」误报成「登录窗口已打开」。
+        "window_open": login_window_alive(platform),
         "cookie_file": str(ck) if ck.exists() else "", "cookie_count": len(relevant),
         "auth_cookie_count": len(auth),
         "auth_cookie_names": sorted({str(r.get("name") or "") for r in auth}),
@@ -422,14 +544,27 @@ def playwright_cookies(platform: str) -> list[dict]:
     return out
 
 
-def mark_invalid(platform: str, reason: str) -> None:
+# 失效标记的有效期（秒）。0 / 缺省 = 一直有效，直到用户重新登录刷新 login_state。
+# redirect 只保留 15 分钟：它来自「这一页跳走了」的单次观测，页面 A/B、语言前缀、
+# 地区风控都会触发，不该让平台在登录中心里长期显示「已失效」。
+INVALID_TTL = {"redirect": 900}
+
+
+def mark_invalid(platform: str, reason: str, code: str = "auth") -> None:
+    """记下「这个平台登录态失效」。
+
+    code 区分证据强弱，决定这条标记能活多久（见 INVALID_TTL）：
+      - auth      鉴权接口明确拒绝 → 一直有效，直到用户重新登录
+      - redirect  单次页面跳转观测   → 只活 15 分钟，避免一次风控把平台钉死
+    """
     if platform not in PLATFORMS:
         return
     p = invalid_file(platform)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps({
-            "ts": int(time.time()), "reason": (reason or "登录态已失效")[:500],
+            "ts": int(time.time()), "code": code or "auth",
+            "reason": (reason or "登录态已失效")[:500],
         }, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         pass
@@ -445,6 +580,15 @@ def clear_invalid(platform: str) -> None:
 
 
 def looks_like_auth_error(message: str) -> bool:
+    """这段话能不能当成「登录态失效」的证据。
+
+    先排除我们自己写的「页面被跳转到…」观测：那段提示里带「请到平台登录中心
+    登录」这几个字，一旦拿它反过来做 auth 判定，就会自证 —— 页面因为任何原因
+    跳走（语言前缀、A/B、地区风控）都会把平台永久标成失效，用户重新登录也
+    解除不了（2026-11-08 实测：B站番剧页路径大小写误判后写出 invalid 标记）。
+    """
+    if "没有停在目标页" in (message or ""):
+        return False
     low = (message or "").lower()
     terms = (
         "login required", "login_required", "sign in", "not logged", "authentication",

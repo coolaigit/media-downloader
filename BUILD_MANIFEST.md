@@ -7,6 +7,72 @@
 > 段落里引用的 commit SHA 已失效**，按 SHA 找不到属正常；查证请按提交标题搜。
 > 改写前完整备份：`D:\Project\_md_repo_backup_before_rewrite.bundle`。
 
+## V3.0.4（2026-11-09）发布版 · 本次交付
+
+> 本节是**实际发布**的那一份；下面 2026-11-07 的「定版」段是当时的基线记录，
+> 其产物（89,041,112 B / `2BEE45E3…`）已被本节取代，不要再拿它当交付物。
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `APP_VERSION = "3.0.4"` / `APP_TITLE = "MediaDownloader 3.0.4"`（`app/config.py:23-24`） |
+| 代码基线 | 功能改动截止 `aae5124`；其后为发布说明、台账与回归脚本入库（tag `v3.0.4` 指向远端 main 的发布提交） |
+| 构建方式 | `_venv` + PyInstaller 6.22.3（`MediaDownloader_Test.spec`，onefile 隔离测试版） |
+| Release 文件 | `_dist_ui/MediaDownloader_TEST.exe` — 89,083,082 B，构建于 2026-11-09 00:35，FileVer `3.0.4.1` |
+| SHA256 | `e01297988219b52d650b0e10bbbaa17deaaba9e86b378d0fe9e2f9cd8528243c` |
+| 正式安装包 | 未构建（iss 已改 `MediaDownloader_V3.0.4_Setup`，待打包） |
+| 发布说明 | `RELEASE_NOTES_V3.0.4.md`（含 F-01~F-28 摘要、回归明细、deepseek harness 会话 ID 的更新记录） |
+
+### 交付前验证
+
+- 打包版 18848 与源码版 18849 各跑一遍**全量**回归，逐项一致全 PASS，日志
+  `_reg_v318_signoff.log` / `_reg_src_v318_signoff.log`；离线用例 11 组
+  （`test_preview_guard_offline.py` 39/0、`test_vip_offline.py` 72 项 ALL PASS）。
+- 端到端会员试看：`人间世 第二季 第8集 儿科医生 [810642].mp4` +
+  `⚠️ 只拿到试看片段（6:00 / 正片 51:15）…不是完整正片`。
+- 冻结台账：`REGRESSION.md` F-01 ~ F-28，含 00:29 / 00:45 两条版本验收记录。
+- **未覆盖**：正式安装包未构建；知乎视频、国外平台未由 Sam 用户验收（不计 PASS）。
+
+### 本次发布与 deepseek harness 会话的关系
+
+会话 ID `session-c4d7b847-0d3a-4922-b659-cde96a34b050` 只作溯源：会话正文不在本仓库，
+按可查证提交整理的更新链（Google 官方搜图 API 一键配置 `fe8eaa8` → 同日因官方对新客户
+关闭而整体回退 `531acaf` → 保留 render/searx 兜底）见 `RELEASE_NOTES_V3.0.4.md` 同名章节。
+
+---
+
+## V3.0.4（2026-11-07）定版
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `app/config.py` `APP_VERSION = "3.0.4"` / `APP_TITLE = "MediaDownloader 3.0.4"` |
+| 源码分支 | `master` @ `0219cef` |
+| 构建方式 | `_venv` + PyInstaller（`MediaDownloader_Test.spec`，onefile 测试版）+ Inno Setup 6（正式包脚本已跟进 3.0.4） |
+| 隔离测试版 | `_dist_ui/MediaDownloader_TEST.exe` — 89,041,112 B，FileVer **3.0.4.1** / ProductVersion 3.0.4-test |
+| SHA256 | `2BEE45E3909D57DBFCC12657BE0A406EC57541E7F62686AB035C19E980C62C36` |
+| 正式安装包 | 未构建（iss 已改 `MediaDownloader_V3.0.4_Setup`，待打包） |
+
+### V3.0.3 → V3.0.4 变更清单
+
+| 提交 | 内容 |
+|---|---|
+| `0219cef` | **定版 3.0.4**：`APP_VERSION`/`APP_TITLE`、`/api/health` 增加 `version`、`version_info.txt` 3.0.3.0→3.0.4.0、`version_info_test.txt` 3.0.4.1、iss 三处版本号、`index.html` 五个版本串（`app.js?v=` 此前仍停在 3.0.3-kernel，升级后浏览器会继续吃旧脚本）。**首页通道**：搜索框内 `图片/视频` 控件 + `VIDEO_HOSTS` 站点自动识别 + `SINGLE_VIDEO_PAT` 单条/批量分流 + 手动只锁当前输入 + 关键词回退图片；`startFrom(v,c)` 统一四个落点；意图标签移到 `.home-meta` 与站点提示并排。**工作台版面**：`--panel-h` 由 `syncPanelHeight()` 写入、`.panel.active` 改 flex 列撑满、`.workpane > *` 不收缩只有结果区吃余量、空态占满居中 + 可点示例词、视频页长说明折叠成 `details.pane-note`、删掉重复的 `#imageModeSwitch`、视频页补与图片页同构的页头 |
+
+### 验证记录（本机，全部对打包版 18848 实跑）
+
+- `_verify_v304.py` **45/45 PASS**：版本号 5 项、首页通道 9 项、通道分派 8 项、四工作区版面 20 项、回归 3 项。
+  关键实测：快手主页 → 视频批量抓取；`bilibili.com/video/BV…` → 走解析；`pexels.com/search/…` → 图片链接抓取；
+  点过「视频」后再贴 Pexels 链接 → 重新按站点判断为图片；关键词不改变已选通道。
+- 版面实测：`--panel-h` = 845px（视口 950），四个工作区结果区底边与面板底边差 ≤ 48px，
+  空态高度 = 结果区高度、宽度 > 400px，视频页长说明折叠后 40px 一行。
+- `_verify_hero_ui.py` / `_verify_filter_scope.py` ALL PASS；`_verify_home_ui.py` 18/18 PASS。
+- `_verify_pkg_ui2.py` PASS（web/index.html 12/12、style.css 10/10、shell.js 11/11、app.js 5/5），
+  反向断言 3 条：无 `<details class="filters" id="imgCrawlOptions">`、无 `id="imageModeSwitch"`、无 `app.js?v=3.0.3-kernel`。
+- `_verify_pkg_ui.py` PASS（PYZ 2979 模块，`app.video_downloader` 8/8 等）。
+- 离线 `test_filter_scope_offline.py` / `test_crawl_links_offline.py` / `test_batch_gate_offline.py` ALL PASS。
+- `test_isolation_check.py` PASS：测试版端口 18848-18870 / data_root `_dist_test\MediaDownloader_TEST\data`，
+  已装版端口 8848-8870 / `%LOCALAPPDATA%\MediaDownloader3`，实例指纹与配置互不可见。
+- **未覆盖**：正式安装包未构建；真实站点大规模抓取未在本轮复测（只验分派与版面）。
+
 ## V3.0.3（2026-11-03）
 
 | 项 | 值 |

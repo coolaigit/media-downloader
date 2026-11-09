@@ -13,8 +13,8 @@
 ; 5) 安装包不含任何登录态/台账/下载文件 —— 那些是用户数据，不在程序目录里。
 
 #define AppName "MediaDownloader"
-#define AppVer "3.0.3"
-#define AppVerShort "V3.0.3"
+#define AppVer "3.0.4"
+#define AppVerShort "V3.0.4"
 #define AppPublisher "Illumi Tools"
 #define AppExe "MediaDownloader.exe"
 #define SrcDir "..\dist_new\MediaDownloader"
@@ -38,7 +38,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir=D://_md_installer_build
-OutputBaseFilename=MediaDownloader_V3.0.3_Setup
+OutputBaseFilename=MediaDownloader_V3.0.4_Setup
 SetupIconFile=..\app_icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName} {#AppVerShort}

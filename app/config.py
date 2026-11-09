@@ -10,12 +10,18 @@ import sys
 import time
 from pathlib import Path
 
+from .win_console import ensure_quiet_subprocess
+
+# 所有业务模块都依赖 config，补丁放在这里最早生效：ffmpeg / ffprobe / 任何
+# 未来新增的子进程调用都不会在 windowed 打包版里弹出黑色控制台窗口。
+ensure_quiet_subprocess()
+
 # ---------- 产品标识 ----------
 # V3.0 用独立的数据目录，绝不和 V2.5 共用。
 # 原因（2026-10-22 事故）：两版 config 结构会各自演进，共用同一个 config.json
 # 必然互相覆盖；再加上端口认领问题，用户会看到「装好的客户端被改了」的假象。
-APP_TITLE = "MediaDownloader 3.0"       # 窗口标题 / 任务栏 / 开始菜单（与 V2.5 明确区分）
-APP_VERSION = "3.0.3"
+APP_TITLE = "MediaDownloader 3.0.4"     # 窗口标题 / 任务栏 / 开始菜单（与 V2.5 明确区分）
+APP_VERSION = "3.0.4"
 DATA_DIR_NAME = "MediaDownloader3"      # 本版数据目录名
 LEGACY_DATA_DIR_NAME = "MediaDownloader"  # V2.5 的数据目录名（只读，用于首次迁移）
 
@@ -62,6 +68,17 @@ def _default_data_root() -> Path:
 
 
 DATA_ROOT = Path(os.environ.get("MEDIA_DOWNLOADER_DATA_DIR") or _default_data_root())
+
+# TLS CA 固化必须在**任何网络模块发请求之前**完成：frozen onefile 的
+# %TEMP%\_MEIxxxxxx\certifi\cacert.pem 会被外部清理，清掉后 requests 的
+# import-time 缓存常量就成了坏路径，抖音/小红书/快手/B站 会同时挂。
+# 详见 app/ca_bundle.py 顶部的事故记录。失败也不能让程序启动崩掉。
+try:
+    from . import ca_bundle as _ca_bundle
+    CA_BUNDLE = _ca_bundle.install(DATA_ROOT)
+except Exception as _ca_exc:  # noqa: BLE001
+    CA_BUNDLE = {"path": "", "exists": False, "source": "install-failed",
+                 "error": f"{type(_ca_exc).__name__}: {_ca_exc}"}
 
 
 def _migrate_from_v25() -> None:

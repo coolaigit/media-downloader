@@ -12,7 +12,7 @@ import sys
 import time
 import webbrowser
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, quote
 
 import requests
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -26,8 +26,8 @@ from .image_search import FILTER_OPTIONS, search_images
 from .page_scanner import resolve_stream
 from .stream_downloader import stream_supported
 from .task_manager import manager
-from .video_downloader import ffmpeg_available, probe_video, search_videos
-from . import browser_profile, browser_runtime, browser_skill, cookie_store, crawl_manager, platform_login, profile_sources, store, subproc
+from .video_downloader import douyin_item_probe, ffmpeg_available, probe_video, search_videos
+from . import browser_profile, browser_runtime, browser_skill, ca_bundle, cookie_store, crawl_manager, platform_login, profile_sources, store, subproc
 
 # 「设置」里配的 cookies.txt 也要用于**网页抓取与浏览器渲染**，不只是 yt-dlp：
 # 需要登录的平台（Instagram 等）匿名访问只会返回登录墙，正文里没有任何内容 ——
@@ -67,6 +67,11 @@ def _is_instagram_url(url: str) -> bool:
 def _is_xhs_url(url: str) -> bool:
     host = (urlparse(url or "").hostname or "").lower()
     return host == "xiaohongshu.com" or host.endswith(".xiaohongshu.com")
+
+
+def _is_douyin_url(url: str) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return host == "douyin.com" or host.endswith(".douyin.com")
 
 
 def _cookie_args_for_url(url: str, settings: dict) -> tuple[str | None, str | None]:
@@ -142,7 +147,7 @@ def _warm_status():
             _STATUS_WARM["ffmpeg_version"] = ffmpeg_version(find_ffmpeg()) or ""
         except Exception:  # noqa: BLE001
             pass
-        for key, fn in (("js_runtime", find_js_runtime),
+        for key, fn in (("js_runtime", lambda: (lambda r: {"name": r[0], "path": r[1]} if r else None)(find_js_runtime())),
                         ("cookies", cookie_store.status),
                         ("browser_profile", browser_profile.info),
                         ("browser", browser_runtime.status)):
@@ -158,6 +163,25 @@ def _warm_status():
 @app.on_event("startup")
 def _warm_status_on_startup():
     _warm_status()
+
+
+def _google_status() -> dict:
+    """Google 搜图通道状态（纯本地判断，不联网）。"""
+    try:
+        from .search_google import google_status
+        return google_status()
+    except Exception as e:  # noqa: BLE001
+        return {"api_configured": False, "render_available": False,
+                "error": f"{type(e).__name__}"}
+
+
+def vip_status(check: bool = False) -> dict:
+    """会员兜底通道状态。check=True 时联网校验 Cookie 会员态（较慢）。"""
+    try:
+        from .vip_unlock import status as _vip_status
+        return _vip_status(check=check)
+    except Exception as e:  # noqa: BLE001
+        return {"auto_unlock": False, "error": f"{type(e).__name__}: {e}"}
 
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
@@ -324,8 +348,20 @@ class SettingsReq(BaseModel):
     # 桌面窗口右上角 X：exit=直接退出；tray=隐藏到系统托盘
     close_behavior: str | None = Field(default=None, pattern="^(exit|tray)$")
     # 基础界面模式与强调色分离；都只允许内置预设。
-    ui_mode: str | None = Field(default=None, pattern="^(gray|dark|black|light)$")
-    ui_accent: str | None = Field(default=None, pattern="^(blue|cyan|violet|green|orange|rose)$")
+    ui_mode: str | None = Field(default=None, pattern="^(gray|dark|black|light|obsidian|slate|ivory|midnight)$")
+    ui_accent: str | None = Field(default=None, pattern="^(blue|cyan|violet|green|orange|rose|indigo|teal)$")
+    # ---- Google 搜图接入（2026-11）----
+    # 官方 API 已对新客户关闭，设置里只保留渲染代理 / 通道 / SearXNG。
+    google_proxy: str | None = Field(default=None, max_length=500)
+    google_transport: str | None = Field(default=None, pattern="^(auto|render|searx)$")
+    google_searx: str | None = Field(default=None, max_length=1000)
+    # ---- 会员视频兜底（2026-11）----
+    vip_auto_unlock: bool | None = None
+    vip_cookie_dir: str | None = Field(default=None, max_length=1000)
+    vip_parse_endpoints: str | None = Field(default=None, max_length=2000)
+    vip_resource_sites: str | None = Field(default=None, max_length=500)
+    vip_overseas: bool | None = None
+    download_proxy: str | None = Field(default=None, max_length=500)
 
 
 # ---------- 工具 ----------
@@ -419,6 +455,10 @@ def api_status():
         "browser_skill": browser_skill.status(),
         # 2.0：每个平台自己的登录态。安装包不携带账号数据，首次使用按需登录。
         "platform_logins": platform_login.all_status(),
+        # 2026-11：Google 搜图三条通道（API/渲染/SearXNG）各自就绪情况
+        "google": _google_status(),
+        # 2026-11：会员视频兜底（Cookie 池 / 资源站换源 / 解析网关）
+        "vip": vip_status(check=False),
         "filter_options": FILTER_OPTIONS,
     }
 
@@ -581,8 +621,14 @@ def api_platform_status(
 
     items = platform_login.all_status()
     for item in items.values():
-        prof = item.get("profile_dir") or ""
-        item["in_use"] = bool(prof) and browser_profile.lock_state(prof) == "held"
+        # in_use 只表示「用户开的那个登录窗口还开着」。
+        #
+        # 2026-11-07 修正：原先是 lock_state(profile) == "held"，而本程序自己的
+        # 后台渲染（抓主页 / 解析直链 / 刷新 Cookie）同样持有同一个 profile 的
+        # lockfile，于是解析抖音、抓快手主页的时候，界面会莫名其妙地跳成
+        # 「登录窗口已打开」，一批平台跟着一起变 —— 用户说的「状态不稳定」就是它。
+        # 现在由 platform_login 登记登录窗口的 pid，只认那一个进程。
+        item["in_use"] = bool(item.get("window_open"))
     return {"platforms": items}
 
 
@@ -608,6 +654,9 @@ def api_platform_login(payload: dict = Body(...)):
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"启动登录浏览器失败：{e}")
+    # 登记这个 pid 作为「登录窗口」的唯一凭据（见 platform_login.login_window_alive）。
+    # 后台渲染任务不会登记，所以解析视频时不会再跳「登录窗口已打开」。
+    platform_login.mark_login_window(platform, proc.pid)
     return {"ok": True, "pid": proc.pid, "platform": platform,
             "name": cfg["name"], "dir": prof, "url": url,
             "note": "登录完成后关闭窗口，状态会自动保存。"}
@@ -737,6 +786,67 @@ def api_stream_resolve(payload: dict = Body(...)):
     return resolve_stream(url, referer=str(payload.get("referer") or ""))
 
 
+# ---------- 会员视频兜底（2026-11） ----------
+
+class VipResolveReq(BaseModel):
+    """会员视频兜底：解析（可选直接下载）一个需要会员才能看完整的页面。"""
+    url: str = Field(min_length=1, max_length=2000)
+    download: bool = False
+    title: str = ""
+
+
+@app.post("/api/vip/resolve")
+def api_vip_resolve(req: VipResolveReq):
+    """把「只能试看」的会员页面换源成可下载的完整版。
+
+    download=false 只解析（返回命中的资源站/播放地址，便于用户核对片名和集数）；
+    download=true 会在后台任务目录里落盘，返回文件路径。
+    """
+    url = req.url.strip()
+    if not _settings().get("allow_private_network") and _is_private_url(url):
+        raise HTTPException(403, "已拒绝内网地址")
+    from . import vip_unlock
+    try:
+        meta = vip_unlock.extract_meta(url)
+    except Exception as e:  # noqa: BLE001
+        meta = {"error": f"{type(e).__name__}: {e}"}
+    if not req.download:
+        res = vip_unlock.resolve(url, meta)
+        return {"ok": bool(res.get("ok")), "meta": meta,
+                "result": {k: v for k, v in res.items() if k != "meta"},
+                "error": res.get("error") or ""}
+
+    out_dir = DOWNLOADS_DIR / (store.load().get("downloads_subdir_videos") or "videos")
+    try:
+        res = vip_unlock.unlock(url, out_dir, title=req.title, meta=meta)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"兜底下载失败: {type(e).__name__}: {e}")
+    if not res.get("ok"):
+        return {"ok": False, "meta": meta, "error": res.get("error") or "换源下载失败"}
+    return {"ok": True, "meta": meta, "output_dir": str(out_dir),
+            "files": [{"path": res["path"], "name": Path(res["path"]).name,
+                       "size": res.get("size") or 0}],
+            "note": res.get("note") or "", "backend": res.get("backend") or ""}
+
+
+@app.get("/api/vip/status")
+def api_vip_status(check: int = Query(default=0, ge=0, le=1)):
+    """会员兜底通道状态；check=1 时联网校验 Cookie 池的会员态（较慢）。"""
+    return vip_status(check=bool(check))
+
+
+@app.post("/api/vip/check-cookies")
+def api_vip_check_cookies():
+    """只做一件事：联网校验 vip_cookies 目录里每份 Cookie 的会员状态。"""
+    from . import vip_unlock
+    items = vip_unlock.list_vip_cookies()
+    return {"ok": True, "count": len(items),
+            "vip": sum(1 for i in items if i.get("vip")),
+            "items": [{"file": i["file"], "vip": i.get("vip"), "uname": i.get("uname"),
+                       "vip_label": i.get("vip_label") or "", "error": i.get("error")}
+                      for i in items]}
+
+
 # ---------- 视频解析 ----------
 
 @app.post("/api/video/probe")
@@ -753,6 +863,16 @@ def api_video_probe(req: VideoProbeReq):
                 return {"ok": False, "error": xr.get("error") or "小红书解析失败", "url": url}
             item = xr["item"]
             res = _direct_item_probe(item, url, "XHS/" + str(xr.get("source") or "signed"))
+        elif _is_douyin_url(url):
+            # 抖音不能交给 yt-dlp（2026-11-07 用户报错）：
+            # DouyinIE 的 detail 接口现在要 a_bogus 签名，拿不到响应就抛
+            # `Fresh cookies (not necessarily logged in) are needed`——
+            # 报的是 cookies，实际与登录态无关，换新 cookies 也一样。
+            # 同一份登录态走渲染能拿到 zjcdn 直链，所以这里走渲染。
+            dr = douyin_item_probe(url)
+            if not dr.get("ok"):
+                return {"ok": False, "error": dr.get("error") or "抖音解析失败", "url": url}
+            res = _direct_item_probe(dr["item"], url, "Douyin/profiled")
         else:
             ck_file, ck_browser = _cookie_args_for_url(url, settings)
             res = probe_video(
@@ -1130,6 +1250,11 @@ def api_proxy(url: str = Query(..., max_length=2000), referer: str = Query(defau
     # 预览代理与真实下载必须使用同一平台登录态。微博/Sina 图床在匿名
     # 预览时可能 403，但同一图片通过带 Cookie 的下载器却能正常下载。
     proxy_session = requests.Session()
+    # 显式指向 DATA_ROOT 里的持久 CA：frozen onefile 的 _MEI 临时目录被清理后，
+    # requests 的 import-time 默认值会变成坏路径，所有 HTTPS 图片一起 500。
+    _ca = ca_bundle.ca_path()
+    if _ca:
+        proxy_session.verify = _ca
     proxy_platform = platform_login.platform_for_url(referer or "") or platform_login.platform_for_url(url)
     if proxy_platform:
         ck_file = platform_login.cookie_file_for_platform(proxy_platform) or ""
@@ -1175,6 +1300,21 @@ def api_proxy(url: str = Query(..., max_length=2000), referer: str = Query(defau
             r = None
             if attempt < 3:
                 time.sleep(0.3 * attempt)
+        except OSError as e:
+            # cert_verify 抛的是裸 OSError（不是 RequestException）。
+            # CA 被外部清理时重新固化一次并重试，避免整条预览链路长期瘫痪。
+            if "CA certificate bundle" in str(e) or "cacert" in str(e):
+                _ca = ca_bundle.refresh().get("path") or ""
+                if _ca:
+                    proxy_session.verify = _ca
+                last_err = "ca-bundle-refreshed"
+                r = None
+                if attempt < 3:
+                    time.sleep(0.2 * attempt)
+                    continue
+            last_err = f"OSError: {e}"
+            r = None
+            break
         except requests.exceptions.RequestException as e:
             last_err = type(e).__name__
             r = None
@@ -1184,7 +1324,11 @@ def api_proxy(url: str = Query(..., max_length=2000), referer: str = Query(defau
 
     try:
         if r.status_code >= 400:
-            raise HTTPException(502, f"源站返回 {r.status_code}")
+            # 上游自己的 4xx 原样透传：缩略图签名过期是 403、原图删了是 404。
+            # 一律包成 502 会让「图片过期」看起来像「代理/CA 坏了」，
+            # 排查方向直接被带偏（2026-11-08 实测：小红书历史缩略图 token 过期）。
+            _code = r.status_code if 400 <= r.status_code < 500 else 502
+            raise HTTPException(_code, f"源站返回 {r.status_code}")
 
         ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         if ctype and not (ctype.startswith("image/") or ctype.startswith("video/")
@@ -1268,7 +1412,11 @@ def api_downloads_tree():
                 "name": p.name,
                 "title": str(meta.get("title") or ""),
                 "rel": rel,
-                "href": f"/files/{rel}",
+                # 逐段百分号编码：抖音/微博标题里大量带 `#`，直接拼进 href 会被
+                # 浏览器当成片段分隔符 —— 请求只发到 `#` 之前（半截文件名、
+                # 没有扩展名），服务端按「仅允许访问媒体文件」回 403，
+                # 下载库和首页示例区就是一排裂图（2026-11-08 实测）。
+                "href": "/files/" + "/".join(quote(seg) for seg in rel.split("/")),
                 "size": st.st_size,
                 "mtime": st.st_mtime,
                 "dir": str(p.parent.relative_to(root).as_posix()) if p.parent != root else "",
@@ -1334,8 +1482,13 @@ def api_health():
     # 否则开发版跑在 8850 会被已安装版当成「自己」，窗口挂到错误的版本上
     # （2026-10-22 真实事故，详见 app/ports.py 顶部说明）。这两项都不要删。
     from .ports import instance_id
-    return {"ok": True, "app": "MediaDownloader", "root": str(ROOT),
-            "instance": instance_id(), "data_root": str(DATA_ROOT)}
+    # version：版本号以这里为准，前端标题、安装包、验收脚本都读同一个值，
+    # 避免「页面写 3.0.4、exe 还是 3.0.3」这种对不上的情况（V3.0.4 起）
+    from .config import APP_VERSION
+    return {"ok": True, "app": "MediaDownloader", "version": APP_VERSION,
+            "root": str(ROOT), "instance": instance_id(), "data_root": str(DATA_ROOT),
+            # 排障证据：CA 是否来自持久目录、_MEI 被清理后有没有自愈
+            "ca_bundle": ca_bundle.status()}
 
 
 # ---------- 前端静态资源 ----------
