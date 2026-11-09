@@ -15,20 +15,21 @@
 | 项 | 值 |
 |---|---|
 | 版本号 | `APP_VERSION = "3.0.4"` / `APP_TITLE = "MediaDownloader 3.0.4"`（`app/config.py:23-24`） |
-| 交付文件 | `_dist_release/MediaDownloader_V3.0.4.exe` — 89,078,938 B，单文件绿色版 |
-| SHA256 | `9d79d535cb5a673cbf4fae94fd12047272b7200b8d4bc7eea1ec4b03873034e5` |
-| 构建方式 | `_venv` + PyInstaller 6.22.3，`MediaDownloader_Release.spec`（入口 `launcher.py`，onefile）；版本资源 `version_info_release.txt`：FileVer `3.0.4.0` / ProductVersion `3.0.4` |
-| 正式安装包 | 未构建（构建环境缺 Inno Setup 6 与 `bin/ffmpeg.exe`；iss 版本号已跟进 `MediaDownloader_V3.0.4_Setup`） |
+| 交付文件 | `_dist_setup/MediaDownloader_V3.0.4.exe` — 67,249,929 B，Inno Setup 6 安装包 |
+| SHA256 | `5d28ea098937768765e9ef6309bf4fc39bc48d016a270edeebed15a5a9ff06cd` |
+| 构建方式 | `_venv` + PyInstaller 6.22.3 生成 onedir 载荷（`dist_new/MediaDownloader`，195 MB）→ Inno Setup 6.7.4 编译 `installer/MediaDownloader3.iss`（`lzma2/max` + SolidCompression） |
+| 安装内容 | 主程序、`_internal/` 运行库、开始菜单/桌面快捷方式、卸载器；不含内置 ffmpeg、内置 Chromium 与 BrowserSkill，运行时使用系统 PATH 的 ffmpeg 与系统 WebView2 / Chrome |
+| 默认安装位置 | `%LOCALAPPDATA%\Programs\MediaDownloaderV3`（`PrivilegesRequired=lowest`，免管理员） |
 | 发布说明 | `RELEASE_NOTES_V3.0.4.md` |
 
 ### 交付前验证
 
 - 界面、抓取、下载、HTTPS 与包内资源的自动化回归全 PASS。
-- 交付 exe 实起自检：`/api/health` 返回 `version=3.0.4`，`index.html` / `app.js` / `shell.js` 均 200；
-  自检数据落到临时目录，不触碰正式数据目录。
-- Windows 文件属性：FileDescription / ProductName = `MediaDownloader 3.0.4`，
-  ProductVersion `3.0.4`，OriginalFilename 与交付文件名一致，无测试构建标识。
-- **未覆盖**：正式安装包未构建。
+- 安装包静默安装验证：`MediaDownloader.exe`、`_internal/`、`unins000.exe` 均正常落地，
+  验证后已卸载并清理临时目录。
+- Windows 文件属性：FileDescription `MediaDownloader V3.0.4 安装程序`，
+  ProductName `MediaDownloader`，ProductVersion `3.0.4`。
+- **未覆盖**：未在干净虚拟机上做完整安装 / 覆盖升级链路。
 
 ### 更新记录溯源
 
