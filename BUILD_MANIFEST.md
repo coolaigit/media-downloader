@@ -15,21 +15,25 @@
 | 项 | 值 |
 |---|---|
 | 版本号 | `APP_VERSION = "3.0.4"` / `APP_TITLE = "MediaDownloader 3.0.4"`（`app/config.py:23-24`） |
-| 交付文件 | `_dist_setup/MediaDownloader_V3.0.4.exe` — 67,249,929 B，Inno Setup 6 安装包 |
-| SHA256 | `5d28ea098937768765e9ef6309bf4fc39bc48d016a270edeebed15a5a9ff06cd` |
-| 构建方式 | `_venv` + PyInstaller 6.22.3 生成 onedir 载荷（`dist_new/MediaDownloader`，195 MB）→ Inno Setup 6.7.4 编译 `installer/MediaDownloader3.iss`（`lzma2/max` + SolidCompression） |
-| 安装内容 | 主程序、`_internal/` 运行库、开始菜单/桌面快捷方式、卸载器；不含内置 ffmpeg、内置 Chromium 与 BrowserSkill，运行时使用系统 PATH 的 ffmpeg 与系统 WebView2 / Chrome |
+| 交付文件 | `_dist_setup/MediaDownloader_V3.0.4.exe` — 99,573,399 B，Inno Setup 6 安装包 |
+| SHA256 | `086a05d81824ca789ed61ad7e9618abbee922501e2849388fcbcc12a4e8cad78` |
+| 构建方式 | `_venv` + PyInstaller 6.22.3 生成 onedir 载荷（`dist_new/MediaDownloader`，313 MB）→ Inno Setup 6.7.4 编译 `installer/MediaDownloader3.iss`（`lzma2/max` + SolidCompression） |
+| 安装内容 | 主程序、`_internal/`（ffmpeg 9.0.2 静态版 105 MB、bsk.exe 17 MB、bsk-extension、Playwright 驱动与 CA、VC++ 运行库）、开始菜单/桌面快捷方式、卸载器 |
+| 系统组件 | WebView2 运行时、Chromium 内核使用系统已安装版本；WebView2 缺失时程序转浏览器模式，JS 渲染与登录窗口用系统 Chrome / Edge |
 | 默认安装位置 | `%LOCALAPPDATA%\Programs\MediaDownloaderV3`（`PrivilegesRequired=lowest`，免管理员） |
 | 发布说明 | `RELEASE_NOTES_V3.0.4.md` |
 
 ### 交付前验证
 
-- 界面、抓取、下载、HTTPS 与包内资源的自动化回归全 PASS。
-- 安装包静默安装验证：`MediaDownloader.exe`、`_internal/`、`unins000.exe` 均正常落地，
-  验证后已卸载并清理临时目录。
+- 界面、抓取、下载、HTTPS 与包内资源的自动化回归全 PASS；离线 11 组中 10 组 PASS，
+  `test_isolation_check.py` 因回归实例为无头模式（无桌面窗口）未执行，与本次构建配置改动无关。
+- 安装包静默安装验证：`MediaDownloader.exe`、`_internal/bin/ffmpeg.exe`（105,423,872 B）、
+  `_internal/bin/bsk.exe`、`_internal/bsk-extension/manifest.json`、`unins000.exe` 全部落地；
+  随包 ffmpeg 实跑输出 `ffmpeg version 9.0.2-essentials_build`；验证后已卸载并清理临时目录。
 - Windows 文件属性：FileDescription `MediaDownloader V3.0.4 安装程序`，
   ProductName `MediaDownloader`，ProductVersion `3.0.4`。
-- **未覆盖**：未在干净虚拟机上做完整安装 / 覆盖升级链路。
+- **未覆盖**：未在干净虚拟机上做完整安装 / 覆盖升级链路；Playwright Chromium 内核未随包分发
+  （下载通道不可用，改由系统 Chrome / Edge 承担渲染）。
 
 ### 更新记录溯源
 
