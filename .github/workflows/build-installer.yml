@@ -67,6 +67,15 @@ jobs:
           Copy-Item $exe.FullName bin\ffmpeg.exe -Force
           "ffmpeg bytes: $((Get-Item bin\ffmpeg.exe).Length)"
 
+      - name: Restore BrowserSkill binary
+        shell: pwsh
+        run: |
+          # 17 MB 的 exe 直推仓库会被 API 网关判 401，故以 6.2 MB zip 入库，这里还原。
+          if (-not (Test-Path packaging\bsk.zip)) { throw 'packaging/bsk.zip 缺失' }
+          Expand-Archive packaging\bsk.zip -DestinationPath bin -Force
+          if (-not (Test-Path bin\bsk.exe)) { throw 'bsk.exe 解压失败' }
+          "bsk bytes: $((Get-Item bin\bsk.exe).Length)"
+
       - name: Fetch WebView2 Fixed Runtime
         shell: pwsh
         run: |
