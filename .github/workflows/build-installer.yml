@@ -31,7 +31,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          # 仓库里没有 requirements.txt / pyproject.toml，锁定文件叫 requirements.lock.txt，
+          # 不显式指定的话 setup-python 的 pip 缓存会直接报错退出。
           cache: pip
+          cache-dependency-path: requirements.lock.txt
 
       - name: Install Python dependencies
         shell: pwsh
