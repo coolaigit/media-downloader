@@ -125,7 +125,9 @@ jobs:
           choco install innosetup -y --no-progress
           $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
           if (-not (Test-Path $iscc)) { throw "ISCC 未安装: $iscc" }
-          & $iscc '/DSrcDir=..\dist_ci\MediaDownloader' '/DOutputDir=out' 'installer\MediaDownloader3.iss'
+          # OutputDir 的相对路径是相对 iss 所在目录（installer\），所以写 ..\out
+          # 才会落到仓库根的 out\；写 out 会变成 installer\out。
+          & $iscc '/DSrcDir=..\dist_ci\MediaDownloader' '/DOutputDir=..\out' 'installer\MediaDownloader3.iss'
           $exe = 'out\MediaDownloader_V3.0.4.exe'
           if (-not (Test-Path $exe)) { throw "安装包未生成: $exe" }
           $size = (Get-Item $exe).Length
