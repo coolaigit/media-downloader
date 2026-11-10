@@ -3,13 +3,13 @@
 | 项 | 值 |
 |---|---|
 | 版本 | `3.0.4` |
-| 发布日期 | 2026-11-09 |
+| 发布日期 | 2026-11-10 |
 | 交付文件 | `MediaDownloader_V3.0.4.exe`（**安装包**，Inno Setup 6，免管理员权限） |
-| 大小 | 99,573,399 B |
-| SHA256 | `086a05d81824ca789ed61ad7e9618abbee922501e2849388fcbcc12a4e8cad78` |
+| 大小 | 548,886,935 B |
+| SHA256 | `D3410C626E37A781D633A4A356DAE2BDEC12FDAFE42C2096FF7E22D33B4DC393` |
 | 默认安装位置 | `%LOCALAPPDATA%\Programs\MediaDownloaderV3` |
-| 随包组件 | ffmpeg 9.0.2 静态版（105 MB）、BrowserSkill（bsk.exe + 浏览器扩展）、Playwright 驱动与 CA 证书、VC++ 运行库 |
-| 运行环境 | Windows 10/11 x64；系统 WebView2 运行时（缺失时自动转浏览器模式）；系统 Chrome / Edge 用于 JS 渲染 |
+| 随包组件 | Playwright Chromium 151（`_internal\browsers\chromium-1234\`，428 MB）、WebView2 Fixed Version Runtime 157.0.4341.46（`_internal\webview2\`，384 MB）、ffmpeg 9.0.2 静态版（105 MB）、BrowserSkill（bsk.exe + 浏览器扩展）、Playwright 驱动与 CA 证书、VC++ 运行库 |
+| 运行环境 | Windows 10/11 x64；浏览器内核、WebView2 桌面壳运行时、ffmpeg 全部随包，目标机器不需要预装任何浏览器或运行库 |
 
 ## 本版更新
 
@@ -36,7 +36,9 @@
 
 - CA 证书在启动早期固化到数据目录，源丢失时从系统根证书库导出兜底，避免长期运行后所有 HTTPS 请求一起失败。
 
-发布前已对界面、抓取、下载、HTTPS 与包内资源跑过自动化回归；安装包做过静默安装验证（主程序、随包 ffmpeg / BrowserSkill / 扩展、卸载器均正常落地，ffmpeg 9.0.2 实跑通过）。
+发布前已对界面、抓取、下载、HTTPS 与包内资源跑过自动化回归；安装包做过静默安装验证（主程序、随包 Chromium、随包 WebView2 运行时、ffmpeg / BrowserSkill / 扩展、卸载器均正常落地，ffmpeg 9.0.2 实跑通过）。
+
+**本版补齐（2026-11-10）**：安装包改为完整自足 —— Playwright Chromium 内核与 WebView2 Fixed Version Runtime 随包分发。桌面壳优先探测 `_internal\webview2\` 内的随包运行时（探测顺序见 `app/desktop_shell.py`），系统 WebView2 被清理工具破坏注册表的机器也能正常出 Chromium 窗口；JS 渲染与登录窗口直接用随包 Chromium，目标机器一个浏览器都没装也能完整工作。同时本版安装包已从 GitHub Release 下载回传复算，SHA256 与本地构建产物一致。
 
 ## 安装与使用
 
@@ -69,6 +71,7 @@
 
 ## 已知限制
 
-- WebView2 运行时与 Chromium 内核使用系统已安装版本（Windows 10/11 一般自带 WebView2 与 Edge）；WebView2 不可用时程序自动转浏览器模式运行。本版未随包分发 Playwright Chromium 内核，JS 渲染与登录窗口使用系统 Chrome / Edge。
+- 随包 Chromium 为 Playwright 构建的 Chromium 151（rev 1234），不含厂商专有编解码；页面渲染、抓取与登录窗口不受影响。
+- WebView2 Fixed Runtime 取自 Evergreen 安装的 157.0.4341.46 整目录拷贝，不随 Edge 更新自动升级（这正是 Fixed Version 的定位）；程序会在随包运行时不可用时回退系统 WebView2。
 - 会员正片需要自行配置对应平台的登录态；只拿到试看片段时会明确提示，不会静默当整集交付。
 - 反爬拦截页、付费与私密内容不提供绕过，站点权限以站点侧为准。

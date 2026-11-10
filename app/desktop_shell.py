@@ -80,6 +80,19 @@ def _log(message: str) -> None:
 # --------------------------------------------------------------------------
 # WebView2 运行时探测（文件系统 + 注册表）
 # --------------------------------------------------------------------------
+def _bundled_webview2_root() -> Path:
+    """安装包随带的 Fixed Version Runtime 目录（{app}\\webview2）。
+
+    Inno 打包时把一份完整的 WebView2 运行时（自包含，含 msedgewebview2.exe）
+    解压到安装目录的 webview2\\ 子目录，版本号目录形如 `157.0.4341.46`。
+    Fixed Version Runtime 本质就是一份可直接搬迁的目录拷贝
+    （微软官方文档的定义），不需要注册表、不需要 EdgeUpdate 服务。
+    源码模式 / 精简包里没有这个目录 → 返回的 Path 不存在，
+    `_webview2_runtime_dir()` 自然跳过它走系统探测，行为不变。
+    """
+    return BUNDLE_DIR / "webview2"
+
+
 def _webview2_runtime_dir() -> str:
     """按**文件系统**找 WebView2 运行时目录，找不到返回空串。
 
@@ -99,7 +112,14 @@ def _webview2_runtime_dir() -> str:
     `webview.settings['WEBVIEW2_RUNTIME_PATH']` 交给 WebView2 当
     BrowserExecutableFolder —— 绕开坏掉的注册表。
     """
+    # V3.0.5：安装包随带 Fixed Version Runtime（{app}\webview2\<ver>\）。
+    # 放在系统路径**之前**：随包版本与发布时测试过的版本一致，
+    # 不受目标机器 Evergreen 自动升级/清理工具破坏注册表的影响。
     candidates: list[Path] = []
+    bundled_root = _bundled_webview2_root()
+    if bundled_root.is_dir():
+        candidates.append(bundled_root)
+
     roots: list[str] = []
     for env in ("ProgramFiles(x86)", "ProgramFiles"):
         root = os.environ.get(env)

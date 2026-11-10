@@ -8,8 +8,11 @@
 ;    和安装目录无关 —— 覆盖安装 / 升级不会丢数据，卸载也不动它。
 ; 3) MinVersion=10.0：Python 3.14 运行时不支持 Win8 及更早，低于 Win10 直接拒绝安装，
 ;    比装完了打不开要好。
-; 4) 内置 Chromium(约 428MB) + ffmpeg + bsk：目标电脑不需要额外装浏览器，也不需要
-;    单独装 ffmpeg。VC++ 运行库(vcruntime140/msvcp140 等)已随包附带，无需另装 redist。
+; 4) 内置 Chromium(约 428MB) + WebView2 Fixed Runtime(约 383MB) + ffmpeg + bsk：
+;    目标电脑不需要额外装浏览器，也不需要单独装 ffmpeg；桌面壳自带 WebView2
+;    运行时（_internal\webview2\<ver>\），系统 WebView2 被清理工具破坏的机器
+;    也能正常出 Chromium 窗口（探测优先级见 app/desktop_shell.py）。
+;    VC++ 运行库(vcruntime140/msvcp140 等)已随包附带，无需另装 redist。
 ; 5) 安装包不含任何登录态/台账/下载文件 —— 那些是用户数据，不在程序目录里。
 
 #define AppName "MediaDownloader"
@@ -17,9 +20,14 @@
 #define AppVerShort "V3.0.4"
 #define AppPublisher "Illumi Tools"
 #define AppExe "MediaDownloader.exe"
-#define SrcDir "..\dist_new\MediaDownloader"
-; 必须指向 dist_new（构建产物）：原先是 ..\dist\MediaDownloader（本地在跑的绿色版），
-; 两者脱节会打出「版本号是新的、文件是旧的」的假包 —— 2026-11-03 实测踩到，务必别改回去。
+#define SrcDir "..\dist_ful2\MediaDownloader"
+; 必须指向构建产物（2026-11-10 本轮为 dist_ful2：全新 PyInstaller 产物，含随包
+; Chromium 与 WebView2 Fixed Runtime）。原先是 ..\dist\MediaDownloader（本地在跑
+; 的绿色版），两者脱节会打出「版本号是新的、文件是旧的」的假包 —— 2026-11-03
+; 实测踩到。每次换构建目录务必同步改这里。
+
+; 打包命令（本机 ISCC 位于 F:\Apps\Inno Setup 6\ISCC.exe）：
+;   "F:\Apps\Inno Setup 6\ISCC.exe" installer\MediaDownloader3.iss
 
 [Setup]
 AppId={{8F3C2A47-5D61-4B9E-9C2F-7A1D4E6B8C05}
@@ -37,7 +45,9 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
-OutputDir=D://_md_installer_build
+; 输出目录：D:\_md_installer_build 曾被杀软实时扫描锁住写入中的 exe（error 32，
+; 2026-11-10 两次复现），换独立输出目录规避。
+OutputDir=D:\_md_build_v304
 OutputBaseFilename=MediaDownloader_V3.0.4
 SetupIconFile=..\app_icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
