@@ -5,10 +5,10 @@
 | 版本 | `3.0.4` |
 | 发布日期 | 2026-11-10 |
 | 交付文件 | `MediaDownloader_V3.0.4.exe`（**安装包**，Inno Setup 6，免管理员权限） |
-| 大小 | 548,886,954 B |
-| SHA256 | `1A1EFD523B6CF6EE6326FE20AA545E958E42E0B03A99131D8703F5F8C2E80E3D` |
+| 大小 | 543,145,335 B |
+| SHA256 | `3E7C4409EEF808C77E3967C202DF3C9DD5178E58CD4D86B2DA783402719081CF` |
 | 默认安装位置 | `%LOCALAPPDATA%\Programs\MediaDownloaderV3` |
-| 随包组件 | Playwright Chromium 151（`_internal\browsers\chromium-1234\`，428 MB）、WebView2 Fixed Version Runtime 157.0.4341.46（`_internal\webview2\`，384 MB）、ffmpeg 9.0.2 静态版（105 MB）、BrowserSkill（bsk.exe + 浏览器扩展）、Playwright 驱动与 CA 证书、VC++ 运行库 |
+| 随包组件 | Playwright Chromium 151（`_internal\browsers\chromium-1234\`，428 MB）、WebView2 Fixed Version Runtime 156.0.4314.58（`_internal\webview2\`，384 MB）、ffmpeg 9.0.2 静态版（105 MB）、BrowserSkill（bsk.exe + 浏览器扩展）、Playwright 驱动与 CA 证书、VC++ 运行库 |
 | 运行环境 | Windows 10/11 x64；浏览器内核、WebView2 桌面壳运行时、ffmpeg 全部随包，目标机器不需要预装任何浏览器或运行库 |
 
 ## 本版更新
@@ -72,6 +72,6 @@
 ## 已知限制
 
 - 随包 Chromium 为 Playwright 构建的 Chromium 151（rev 1234），不含厂商专有编解码；页面渲染、抓取与登录窗口不受影响。
-- WebView2 Fixed Runtime 取自 Evergreen 安装的 157.0.4341.46 整目录拷贝，不随 Edge 更新自动升级（这正是 Fixed Version 的定位）；程序会在随包运行时不可用时回退系统 WebView2。
+- WebView2 Fixed Runtime 取自 Evergreen 安装的 156.0.4314.58 整目录拷贝，不随 Edge 更新自动升级（这正是 Fixed Version 的定位）；程序会在随包运行时不可用时回退系统 WebView2。
 - 会员正片需要自行配置对应平台的登录态；只拿到试看片段时会明确提示，不会静默当整集交付。
 - 反爬拦截页、付费与私密内容不提供绕过，站点权限以站点侧为准。
