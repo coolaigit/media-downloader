@@ -38,12 +38,14 @@ datas = [
 if (SPEC_DIR / "bin" / "bsk.exe").is_file():
     datas.append((str(SPEC_DIR / "bin" / "bsk.exe"), "bin"))
 else:
-    print("!! 警告：bin/bsk.exe 不存在 —— 打出来的包没有 BrowserSkill，验证码场景无法协助")
+    # 构建日志一律用 ASCII：CI runner 的 stdout 是 cp1252，中文 print 会直接抛
+    # UnicodeEncodeError 把构建打断（2026-11-10 GitHub Actions 实测）。
+    print("!! WARNING: bin/bsk.exe missing - the bundle has no BrowserSkill")
 
 if (SPEC_DIR / "bsk-extension" / "manifest.json").is_file():
     datas.append((str(SPEC_DIR / "bsk-extension"), "bsk-extension"))
 else:
-    print("!! 警告：bsk-extension/ 不存在 —— 内置浏览器无法承载 BrowserSkill 扩展")
+    print("!! WARNING: bsk-extension/ missing - the bundled browser cannot load BrowserSkill")
 
 # ---- V3.0：内置 Playwright Chromium（约 430 MB）----
 # 目的：用户电脑没有任何浏览器（只有 360/QQ 或什么都没有）也必须能做 JS 渲染和登录窗口。
@@ -55,8 +57,8 @@ if (SPEC_DIR / "browsers").is_dir():
         if _b.is_dir() and _b.name.startswith("chromium-"):
             datas.append((str(_b), f"browsers/{_b.name}"))
 else:
-    print("!! 警告：browsers/ 不存在，打出来的包没有内置 Chromium（只能靠用户系统浏览器）")
-    print("!! 补下载：set PLAYWRIGHT_BROWSERS_PATH=%CD%\\browsers && python -m playwright install chromium")
+    print("!! WARNING: browsers/ missing - no bundled Chromium (system browser only)")
+    print("!! fix: set PLAYWRIGHT_BROWSERS_PATH=%CD%\\browsers && python -m playwright install chromium")
 datas += collect_data_files("certifi")                   # CA 证书（requests/yt-dlp 用）
 datas += collect_data_files("playwright")                # playwright 驱动（node.exe 等）
                                                          #   浏览器内核见上面的 browsers/ 段（V3.0 起自带，
@@ -77,8 +79,8 @@ _wvr_stage = Path(
 if _wvr_stage.is_dir():
     datas.append((str(_wvr_stage), "webview2"))
 else:
-    print("!! 警告：webview2 staging 不存在（E:\\_md_installer_build\\webview2_staging\\webview2）")
-    print("!!       安装包不带 WebView2 Fixed Runtime，桌面壳在注册表被破坏的机器上会降级 IE11")
+    print("!! WARNING: webview2 staging not found - installer has no bundled WebView2 runtime")
+    print(f"!!        expected at {_wvr_stage}")
 datas += collect_data_files("yt_dlp_ejs")                # 1E.2：yt-dlp EJS 挑战脚本（.js 资源）
 datas += collect_data_files("webview")                      # 桌面壳运行时资源（如有）
 

@@ -94,6 +94,8 @@ jobs:
         shell: pwsh
         env:
           MD_WEBVIEW2_STAGE: ${{ github.workspace }}\webview2_staging\webview2
+          # runner 默认 stdout 是 cp1252，任何中文输出都会抛 UnicodeEncodeError
+          PYTHONIOENCODING: utf-8
         run: |
           python -m PyInstaller --noconfirm --distpath dist_ci --workpath _build_ci _spec_onedir_release.spec
           $d = 'dist_ci\MediaDownloader'
