@@ -20,7 +20,15 @@
 #define AppVerShort "V3.0.4"
 #define AppPublisher "Illumi Tools"
 #define AppExe "MediaDownloader.exe"
+; SrcDir / OutputDir 都可以用 ISCC 的 /D 参数覆盖（CI 用）：
+;   ISCC /DSrcDir=..\dist_ci\MediaDownloader /DOutputDir=out installer\MediaDownloader3.iss
+; 不传 /D 时用下面的默认值，本机打包行为与以前完全一致。
+#ifndef SrcDir
 #define SrcDir "..\dist_ful2\MediaDownloader"
+#endif
+#ifndef OutputDir
+#define OutputDir "D:\_md_build_v304"
+#endif
 ; 必须指向构建产物（2026-11-10 本轮为 dist_ful2：全新 PyInstaller 产物，含随包
 ; Chromium 与 WebView2 Fixed Runtime）。原先是 ..\dist\MediaDownloader（本地在跑
 ; 的绿色版），两者脱节会打出「版本号是新的、文件是旧的」的假包 —— 2026-11-03
@@ -47,9 +55,9 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
-; 输出目录：D:\_md_installer_build 曾被杀软实时扫描锁住写入中的 exe（error 32，
-; 2026-11-10 两次复现），换独立输出目录规避。
-OutputDir=D:\_md_build_v304
+; 输出目录：D:\_md_build_v304 曾被杀软实时扫描锁住写入中的 exe（error 32，
+; 2026-11-10 两次复现），换独立输出目录规避。CI 用 /DOutputDir=out 指到工作区。
+OutputDir={#OutputDir}
 OutputBaseFilename=MediaDownloader_V3.0.4
 SetupIconFile=..\app_icon.ico
 UninstallDisplayIcon={app}\{#AppExe}

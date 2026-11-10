@@ -1,0 +1,145 @@
+name: build-installer
+
+# 云端构建「完整自足」安装包并挂到 Release。
+#
+# 为什么要有这条流水线：本地出口到 uploads.github.com 只有 0.6~1.8 MB/s 且伴随
+# stall，549 MB 的包在收尾阶段必被 GitHub 判 408（Upload body timed out due to
+# inactivity），本机重复 5 次全部断在 99%。改由 runner 在云端拉依赖、构建、
+# 压缩并直接上传 asset，绕开本地上行瓶颈。
+#
+# 触发：Actions -> build-installer -> Run workflow（填 tag）
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag the installer attaches to"
+        required: true
+        default: "v3.0.4"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock.txt
+          pip install "pyinstaller==6.17.0"
+          python -c "import yt_dlp, gallery_dl, webview, pystray, uvicorn, fastapi, xhshow; print('deps ok')"
+
+      - name: Fetch Playwright Chromium
+        shell: pwsh
+        run: |
+          # 装到工作区 browsers/，spec 会整目录收进 _internal\browsers\chromium-<rev>\
+          $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $env:GITHUB_WORKSPACE 'browsers'
+          python -m playwright install chromium
+          Get-ChildItem browsers | Select-Object Name
+          $exe = Get-ChildItem browsers -Recurse -Filter chrome.exe |
+                 Where-Object { $_.FullName -like '*chrome-win64*' } | Select-Object -First 1
+          if (-not $exe) { throw 'chrome.exe 未落地，Chromium 下载失败' }
+          "chrome.exe: $($exe.FullName)"
+
+      - name: Fetch ffmpeg static build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bin | Out-Null
+          # spec 里 bin/ffmpeg.exe 是硬依赖，缺了构建直接失败
+          curl.exe -L --fail --retry 3 -o ff.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          Expand-Archive ff.zip -DestinationPath ff -Force
+          $exe = Get-ChildItem ff -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $exe.FullName bin\ffmpeg.exe -Force
+          "ffmpeg bytes: $((Get-Item bin\ffmpeg.exe).Length)"
+
+      - name: Fetch WebView2 Fixed Runtime
+        shell: pwsh
+        run: |
+          # runner 自带 Edge/WebView2 Evergreen；目录里的版本就是自包含 Fixed Runtime
+          # （微软对 Fixed Version 的定义即整目录拷贝，无注册表依赖）。
+          $root = 'C:\Program Files (x86)\Microsoft\EdgeWebView\Application'
+          if (-not (Test-Path $root)) {
+            curl.exe -L --fail -o wv2.exe "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+            Start-Process .\wv2.exe -ArgumentList '/silent','/install' -Wait
+          }
+          $ver = Get-ChildItem $root -Directory |
+                 Where-Object { $_.Name -match '^\d+\.' } |
+                 Sort-Object { [version]($_.Name) } -Descending |
+                 Select-Object -First 1
+          if (-not $ver) { throw '未找到 WebView2 运行时目录' }
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'webview2_staging\webview2'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item $ver.FullName (Join-Path $stage $ver.Name) -Recurse -Force
+          "webview2 staging: $($ver.Name)"
+          if (-not (Test-Path (Join-Path $stage "$($ver.Name)\msedgewebview2.exe"))) {
+            throw 'msedgewebview2.exe 缺失'
+          }
+
+      - name: Build onedir (PyInstaller)
+        shell: pwsh
+        env:
+          MD_WEBVIEW2_STAGE: ${{ github.workspace }}\webview2_staging\webview2
+        run: |
+          python -m PyInstaller --noconfirm --distpath dist_ci --workpath _build_ci _spec_onedir_release.spec
+          $d = 'dist_ci\MediaDownloader'
+          foreach ($p in @(
+            "$d\MediaDownloader.exe",
+            "$d\_internal\bin\ffmpeg.exe",
+            "$d\_internal\webview2"
+          )) {
+            if (-not (Test-Path $p)) { throw "构建产物缺失: $p" }
+          }
+          $chrome = Get-ChildItem "$d\_internal\browsers" -Recurse -Filter chrome.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $chrome) { throw '构建产物缺失 chromium chrome.exe' }
+          "onedir 大小: $([math]::Round((Get-ChildItem $d -Recurse -File | Measure-Object Length -Sum).Sum/1MB,0)) MB"
+
+      - name: Package (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "ISCC 未安装: $iscc" }
+          & $iscc '/DSrcDir=..\dist_ci\MediaDownloader' '/DOutputDir=out' 'installer\MediaDownloader3.iss'
+          $exe = 'out\MediaDownloader_V3.0.4.exe'
+          if (-not (Test-Path $exe)) { throw "安装包未生成: $exe" }
+          $size = (Get-Item $exe).Length
+          "安装包: $size B"
+          $sha = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "SHA256: $sha"
+          "$sha  MediaDownloader_V3.0.4.exe" | Set-Content 'out\SHA256SUMS.txt' -Encoding ascii
+
+      - name: Upload asset to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release view $env:TAG --repo $env:GITHUB_REPOSITORY
+          gh release upload $env:TAG "out\MediaDownloader_V3.0.4.exe" --clobber --repo $env:GITHUB_REPOSITORY
+          gh release upload $env:TAG "out\SHA256SUMS.txt" --clobber --repo $env:GITHUB_REPOSITORY
+
+      - name: Verify uploaded asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          $json = gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json assets | ConvertFrom-Json
+          $json.assets | ForEach-Object { "$($_.name)  $($_.size) B  state=$($_.state)" }
+          $asset = $json.assets | Where-Object { $_.name -eq 'MediaDownloader_V3.0.4.exe' }
+          if (-not $asset) { throw 'asset 未出现在 Release 上' }
+          $local = (Get-Item 'out\MediaDownloader_V3.0.4.exe').Length
+          if ($asset.size -ne $local) { throw "大小不一致：线上 $($asset.size) / 本地 $local" }
+          "线上大小与本地一致：$local B"
