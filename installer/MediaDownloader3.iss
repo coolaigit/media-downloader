@@ -24,7 +24,9 @@
 ; 必须指向构建产物（2026-11-10 本轮为 dist_ful2：全新 PyInstaller 产物，含随包
 ; Chromium 与 WebView2 Fixed Runtime）。原先是 ..\dist\MediaDownloader（本地在跑
 ; 的绿色版），两者脱节会打出「版本号是新的、文件是旧的」的假包 —— 2026-11-03
-; 实测踩到。每次换构建目录务必同步改这里。
+; 每次换构建目录务必同步改这里。2026-11-10 精简本地工作区后 dist_ful2 已归档到
+; E:\_md_cleanup_20261110\dist_ful2，重新打包前先跑 PyInstaller 生成该目录：
+;   python -m PyInstaller --noconfirm --distpath dist_ful2 --workpath _build_full _spec_onedir_release.spec
 
 ; 打包命令（本机 ISCC 位于 F:\Apps\Inno Setup 6\ISCC.exe）：
 ;   "F:\Apps\Inno Setup 6\ISCC.exe" installer\MediaDownloader3.iss
@@ -58,8 +60,13 @@ WizardStyle=modern
 ShowLanguageDialog=no
 CloseApplications=yes
 RestartApplications=no
-DisableDirPage=auto
-UsePreviousAppDir=yes
+; 目录页必须**始终**显示（2026-11-10 实测事故）：原为 DisableDirPage=auto，
+; 检测到已有安装记录时 Inno 会隐藏「选择目标位置」页，再叠加
+; UsePreviousAppDir=yes 直接沿用上次目录 —— 用户点下一步就被带到上一次的
+; 测试路径，没有任何选择机会。改成 no + 不沿用旧目录，每次都可选。
+DisableDirPage=no
+UsePreviousAppDir=no
+AlwaysShowDirOnReadyPage=yes
 
 [Languages]
 Name: "chs"; MessagesFile: "compiler:Default.isl"

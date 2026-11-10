@@ -5,8 +5,8 @@
 | 版本 | `3.0.4` |
 | 发布日期 | 2026-11-10 |
 | 交付文件 | `MediaDownloader_V3.0.4.exe`（**安装包**，Inno Setup 6，免管理员权限） |
-| 大小 | 548,886,935 B |
-| SHA256 | `D3410C626E37A781D633A4A356DAE2BDEC12FDAFE42C2096FF7E22D33B4DC393` |
+| 大小 | 548,886,954 B |
+| SHA256 | `1A1EFD523B6CF6EE6326FE20AA545E958E42E0B03A99131D8703F5F8C2E80E3D` |
 | 默认安装位置 | `%LOCALAPPDATA%\Programs\MediaDownloaderV3` |
 | 随包组件 | Playwright Chromium 151（`_internal\browsers\chromium-1234\`，428 MB）、WebView2 Fixed Version Runtime 157.0.4341.46（`_internal\webview2\`，384 MB）、ffmpeg 9.0.2 静态版（105 MB）、BrowserSkill（bsk.exe + 浏览器扩展）、Playwright 驱动与 CA 证书、VC++ 运行库 |
 | 运行环境 | Windows 10/11 x64；浏览器内核、WebView2 桌面壳运行时、ffmpeg 全部随包，目标机器不需要预装任何浏览器或运行库 |
@@ -38,11 +38,11 @@
 
 发布前已对界面、抓取、下载、HTTPS 与包内资源跑过自动化回归；安装包做过静默安装验证（主程序、随包 Chromium、随包 WebView2 运行时、ffmpeg / BrowserSkill / 扩展、卸载器均正常落地，ffmpeg 9.0.2 实跑通过）。
 
-**本版补齐（2026-11-10）**：安装包改为完整自足 —— Playwright Chromium 内核与 WebView2 Fixed Version Runtime 随包分发。桌面壳优先探测 `_internal\webview2\` 内的随包运行时（探测顺序见 `app/desktop_shell.py`），系统 WebView2 被清理工具破坏注册表的机器也能正常出 Chromium 窗口；JS 渲染与登录窗口直接用随包 Chromium，目标机器一个浏览器都没装也能完整工作。同时本版安装包已从 GitHub Release 下载回传复算，SHA256 与本地构建产物一致。
+**本版补齐（2026-11-10）**：安装包改为完整自足 —— Playwright Chromium 内核与 WebView2 Fixed Version Runtime 随包分发。桌面壳优先探测 `_internal\webview2\` 内的随包运行时（探测顺序见 `app/desktop_shell.py`），系统 WebView2 被清理工具破坏注册表的机器也能正常出 Chromium 窗口；JS 渲染与登录窗口直接用随包 Chromium，目标机器一个浏览器都没装也能完整工作。安装向导始终显示「选择目标位置」页，可自行指定安装目录，不沿用上一次安装路径。本版安装包已从 GitHub Release 下载回传复算，SHA256 与本地构建产物一致。
 
 ## 安装与使用
 
-1. 下载 `MediaDownloader_V3.0.4.exe`，双击运行，按向导完成安装；无需管理员权限，不写系统目录。
+1. 下载 `MediaDownloader_V3.0.4.exe`，双击运行；向导第二页「选择目标位置」可自行指定安装目录（默认 `%LOCALAPPDATA%\Programs\MediaDownloaderV3`，点 Browse 可改）；无需管理员权限，不写系统目录。
 2. 安装后从开始菜单或桌面快捷方式启动。**安装包已自带 ffmpeg**，视频合并 / 转封装开箱可用，无需另行安装；BrowserSkill 与浏览器扩展也随包提供。
 3. 覆盖安装即可升级，**用户数据不受影响**：配置、平台登录态与下载台账保存在 `%LOCALAPPDATA%\MediaDownloader3`，卸载也不会删除。
 4. 各平台登录态在「设置 → 平台登录」中由使用者自行配置，程序不内置任何账号凭据。
