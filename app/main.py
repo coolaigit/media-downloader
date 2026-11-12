@@ -84,6 +84,19 @@ def _cookie_args_for_url(url: str, settings: dict) -> tuple[str | None, str | No
     return settings.get("cookies_file") or None, settings.get("cookies_from_browser") or None
 
 
+# 走 download_proxy 的海外平台集合。国内站直连（走代理反而可能被出口 IP
+# 连累），只有这些平台才注入代理 —— 与 video_downloader「海外源单独走
+# 代理」的设计一致，也与 vip_unlock 海外兜底通道的取值来源相同。
+_OVERSEAS_PLATFORMS = {"yt", "tiktok", "ig", "pin"}
+
+
+def _overseas_proxy(url: str, settings: dict) -> str:
+    """海外源返回设置里的 download_proxy，其余一律空串（直连）。"""
+    if platform_login.platform_for_url(url) not in _OVERSEAS_PLATFORMS:
+        return ""
+    return str(settings.get("download_proxy") or "").strip()
+
+
 def _direct_item_probe(item: dict, webpage_url: str, extractor: str) -> dict:
     """把受信来源已经解析出的真实视频直链直接映射成前端 probe 结果。"""
     urls = []
@@ -880,6 +893,8 @@ def api_video_probe(req: VideoProbeReq):
                 include_playlist=req.include_playlist,
                 cookies_file=ck_file,
                 cookies_from_browser=ck_browser,
+                # 海外源解析与下载走同一条网络路径（设置 → download_proxy）
+                proxy=_overseas_proxy(url, settings),
             )
             if _is_instagram_url(url) and (not res.get("ok") or not res.get("thumbnail")):
                 gd = profile_sources.gallery_dl_items(url, limit=1, video_only=True, retries=1)
@@ -1026,6 +1041,7 @@ def api_download_video(req: DownloadVideoReq):
         cookies_from_browser=ck_browser or "",
         rate_limit=req.rate_limit,
         format_id=req.format_id,
+        proxy=_overseas_proxy(download_url, st),
     )
     return {"task_id": tid, "ffmpeg_available": ffmpeg_available()}
 
@@ -1046,7 +1062,9 @@ def api_download_videos(req: DownloadVideosReq):
             continue
         if not allow_private and _is_private_url(url):
             raise HTTPException(403, f"已拒绝内网地址：{url[:80]}")
-        items.append({"url": url, "title": (it.title or "")[:60]})
+        items.append({"url": url, "title": (it.title or "")[:60],
+                      # 每条按自己的 URL 算代理：批量里可能国内外混着
+                      "proxy": _overseas_proxy(url, st)})
     if not items:
         raise HTTPException(400, "没有可下载的地址")
 

@@ -16,8 +16,8 @@
 ; 5) 安装包不含任何登录态/台账/下载文件 —— 那些是用户数据，不在程序目录里。
 
 #define AppName "MediaDownloader"
-#define AppVer "3.0.4"
-#define AppVerShort "V3.0.4"
+#define AppVer "3.0.5"
+#define AppVerShort "V3.0.5"
 #define AppPublisher "Illumi Tools"
 #define AppExe "MediaDownloader.exe"
 ; SrcDir / OutputDir 都可以用 ISCC 的 /D 参数覆盖（CI 用）：
@@ -32,8 +32,8 @@
 ; 必须指向构建产物（2026-11-10 本轮为 dist_ful2：全新 PyInstaller 产物，含随包
 ; Chromium 与 WebView2 Fixed Runtime）。原先是 ..\dist\MediaDownloader（本地在跑
 ; 的绿色版），两者脱节会打出「版本号是新的、文件是旧的」的假包 —— 2026-11-03
-; 每次换构建目录务必同步改这里。2026-11-10 精简本地工作区后 dist_ful2 已归档到
-; E:\_md_cleanup_20261110\dist_ful2，重新打包前先跑 PyInstaller 生成该目录：
+; 每次换构建目录务必同步改这里。归档区已于 2026-11-11 清理，本地重新打包前
+; 必须先跑 PyInstaller 生成 dist_ful2（或直接用 CI 的 /DSrcDir 指到别的产物）：
 ;   python -m PyInstaller --noconfirm --distpath dist_ful2 --workpath _build_full _spec_onedir_release.spec
 
 ; 打包命令（本机 ISCC 位于 F:\Apps\Inno Setup 6\ISCC.exe）：
@@ -58,7 +58,7 @@ MinVersion=10.0
 ; 输出目录：D:\_md_build_v304 曾被杀软实时扫描锁住写入中的 exe（error 32，
 ; 2026-11-10 两次复现），换独立输出目录规避。CI 用 /DOutputDir=out 指到工作区。
 OutputDir={#OutputDir}
-OutputBaseFilename=MediaDownloader_V3.0.4
+OutputBaseFilename=MediaDownloader_V3.0.5
 SetupIconFile=..\app_icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName} {#AppVerShort}

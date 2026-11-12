@@ -439,6 +439,7 @@ class TaskManager:
         cookies_from_browser: str = "",
         rate_limit: str = "",
         format_id: str = "",
+        proxy: str = "",
     ) -> str:
         out = _resolve_output(output_subdir)
         task = Task(
@@ -459,6 +460,9 @@ class TaskManager:
                 "cookies_from_browser": cookies_from_browser,
                 "rate_limit": rate_limit,
                 "format_id": format_id,
+                # 海外源代理（YouTube/TikTok/IG/Pinterest）：由 API 层按
+                # 设置里的 download_proxy 算好传入；空串 = 直连。
+                "proxy": proxy,
             },
         )
         self._register(task)
@@ -510,6 +514,8 @@ class TaskManager:
                 include_playlist=include_playlist,
                 cookies_file=cookies_file,
                 cookies_from_browser=cookies_from_browser,
+                # 每条各自带代理：批量里可能国内外混着，API 层已按 URL 算好
+                proxy=str((it or {}).get("proxy") or ""),
             ))
         return ids
 
@@ -887,6 +893,7 @@ class TaskManager:
                                               (o.get("cookies_from_browser") or None)),
                         rate_limit=o.get("rate_limit", ""),
                         format_id=o.get("format_id", ""),
+                        proxy=str(o.get("proxy") or ""),
                         on_progress=on_progress,
                     )
                 finally:

@@ -341,11 +341,15 @@ def probe_video(
     cookies_file: str | None = None,
     cookies_from_browser: str | None = None,
     max_attempts: int = 3,
+    proxy: str = "",
 ) -> dict:
     """解析视频链接，返回可用清晰度列表与元信息（不下载）。
 
     对瞬时网络错误（SSL 中断、超时、连接重置、5xx）自动重试；
     权限类错误（登录、私密、地域限制）不重试，直接返回友好提示。
+    proxy：海外源（YouTube/TikTok/IG 等）按设置里的 download_proxy 走代理，
+    与下载链路同源 —— 解析和下载走的必须是同一条网络路径，否则会出现
+    「能解析出来但下载 403」或「解析直接超时」的分裂现象。
     """
     _shown_url = url
     url = _normalize_media_url(url)
@@ -356,6 +360,7 @@ def probe_video(
             include_playlist=include_playlist,
             cookies_file=cookies_file,
             cookies_from_browser=cookies_from_browser,
+            proxy=proxy,
         )
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
