@@ -128,13 +128,13 @@ jobs:
           # OutputDir 的相对路径是相对 iss 所在目录（installer\），所以写 ..\out
           # 才会落到仓库根的 out\；写 out 会变成 installer\out。
           & $iscc '/DSrcDir=..\dist_ci\MediaDownloader' '/DOutputDir=..\out' 'installer\MediaDownloader3.iss'
-          $exe = 'out\MediaDownloader_V3.0.4.exe'
+          $exe = 'out\MediaDownloader_V3.0.5.exe'
           if (-not (Test-Path $exe)) { throw "安装包未生成: $exe" }
           $size = (Get-Item $exe).Length
           "安装包: $size B"
           $sha = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
           "SHA256: $sha"
-          "$sha  MediaDownloader_V3.0.4.exe" | Set-Content 'out\SHA256SUMS.txt' -Encoding ascii
+          "$sha  MediaDownloader_V3.0.5.exe" | Set-Content 'out\SHA256SUMS.txt' -Encoding ascii
 
       - name: Upload asset to release
         shell: pwsh
@@ -143,7 +143,7 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           gh release view $env:TAG --repo $env:GITHUB_REPOSITORY
-          gh release upload $env:TAG "out\MediaDownloader_V3.0.4.exe" --clobber --repo $env:GITHUB_REPOSITORY
+          gh release upload $env:TAG "out\MediaDownloader_V3.0.5.exe" --clobber --repo $env:GITHUB_REPOSITORY
           gh release upload $env:TAG "out\SHA256SUMS.txt" --clobber --repo $env:GITHUB_REPOSITORY
 
       - name: Verify uploaded asset
@@ -154,8 +154,8 @@ jobs:
         run: |
           $json = gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json assets | ConvertFrom-Json
           $json.assets | ForEach-Object { "$($_.name)  $($_.size) B  state=$($_.state)" }
-          $asset = $json.assets | Where-Object { $_.name -eq 'MediaDownloader_V3.0.4.exe' }
+          $asset = $json.assets | Where-Object { $_.name -eq 'MediaDownloader_V3.0.5.exe' }
           if (-not $asset) { throw 'asset 未出现在 Release 上' }
-          $local = (Get-Item 'out\MediaDownloader_V3.0.4.exe').Length
+          $local = (Get-Item 'out\MediaDownloader_V3.0.5.exe').Length
           if ($asset.size -ne $local) { throw "大小不一致：线上 $($asset.size) / 本地 $local" }
           "线上大小与本地一致：$local B"
